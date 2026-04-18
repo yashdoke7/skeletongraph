@@ -2,11 +2,178 @@
 C++ tree-sitter AST extraction rules.
 """
 from __future__ import annotations
-from typing import Optional
+
+from typing import List, Optional, Tuple, Dict
 from tree_sitter import Node, Tree
-from ..ast_extractor import FileExtractionResult
+from pathlib import Path
+
+from ..ast_extractor import (
+    FileExtractionResult,
+    RawFunction,
+    RawClass,
+    RawImport,
+    RawCallSite,
+    node_text,
+    count_branches,
+    estimate_tokens,
+    _hash_text
+)
+from ..node_kinds import NodeKind
+
+def _get_child_by_type(node: Node, child_type: str) -> Optional[Node]:
+    for child in node.children:
+        if child.type == child_type:
+            return child
+    return None
+
+def _get_name(node: Node, source_bytes: bytes) -> str:
+    name_node = _get_child_by_type(node, "identifier") or _get_child_by_type(node, "type_identifier")
+    if name_node:
+        return node_text(name_node, source_bytes)
+    return ""
 
 def extract_cpp(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> Optional[FileExtractionResult]:
-    # Placeholder for C++ AST extraction (function_definition, class_specifier)
-    # See languages/python.py for full implementation pattern
-    return FileExtractionResult(file_path=file_path, language="cpp", file_hash="", total_lines=source.count("\\n") + 1)
+    root_node = tree.root_node
+    
+    functions: List[RawFunction] = []
+    classes: List[RawClass] = []
+    imports: List[RawImport] = []
+    call_sites: List[RawCallSite] = []
+    
+    base_namespace = []
+
+    def current_namespace() -> str:
+        if not base_namespace:
+            return ""
+        return "::".join(base_namespace)
+
+    def traverse(node: Node, current_class: Optional[str] = None):
+        if node.type == "preproc_include":
+            path_node = _get_child_by_type(node, "string_literal") or _get_child_by_type(node, "system_lib_string")
+            if path_node:
+                path = node_text(path_node, source_bytes)
+                imports.append(RawImport(
+                    module=path,
+                    names=[],
+                    line=node.start_point[0] + 1
+                ))
+
+        elif node.type == "namespace_definition":
+            ns_name = _get_name(node, source_bytes)
+            if ns_name:
+                base_namespace.append(ns_name)
+            for child in node.children:
+                traverse(child, current_class)
+            if ns_name:
+                base_namespace.pop()
+            return
+            
+        elif node.type in ("class_specifier", "struct_specifier"):
+            cls_name = _get_child_by_type(node, "type_identifier")
+            cls_name_str = node_text(cls_name, source_bytes) if cls_name else ""
+            if cls_name_str:
+                kind = NodeKind.CLASS if node.type == "class_specifier" else NodeKind.STRUCT
+                ns = current_namespace()
+                fqn = f"{ns}::{cls_name_str}" if ns else cls_name_str
+                
+                classes.append(RawClass(
+                    name=cls_name_str,
+                    fqn=fqn,
+                    file_path=file_path,
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    kind=kind
+                ))
+                for child in node.children:
+                    traverse(child, current_class=cls_name_str)
+            return
+
+        elif node.type == "function_definition":
+            # Extract function name, checking for Class::method syntax
+            declarator = _get_child_by_type(node, "function_declarator")
+            if not declarator:
+                return
+                
+            name_node = _get_child_by_type(declarator, "identifier")
+            qual_name = _get_child_by_type(declarator, "qualified_identifier")
+            
+            func_name = ""
+            parent_cls = current_class
+            
+            if qual_name:
+                # out-of-line definition: ClassName::methodName
+                qual_str = node_text(qual_name, source_bytes)
+                parts = qual_str.split("::")
+                if len(parts) >= 2:
+                    parent_cls = parts[-2]
+                    func_name = parts[-1]
+                else:
+                    func_name = qual_str
+            elif name_node:
+                func_name = node_text(name_node, source_bytes)
+                
+            if func_name:
+                ns = current_namespace()
+                fqn_prefix = f"{ns}::" if ns else ""
+                
+                fqn = f"{fqn_prefix}{parent_cls}.{func_name}" if parent_cls else f"{fqn_prefix}{func_name}"
+                
+                block_node = _get_child_by_type(node, "compound_statement")
+                sig_text = ""
+                body_text = ""
+                if block_node:
+                    sig_bytes = source_bytes[node.start_byte:block_node.start_byte]
+                    sig_text = sig_bytes.decode("utf-8", errors="replace").strip()
+                    body_text = node_text(block_node, source_bytes)
+                else:
+                    sig_text = node_text(node, source_bytes)
+                    
+                kind = NodeKind.METHOD if parent_cls else NodeKind.FUNCTION
+                
+                func = RawFunction(
+                    name=func_name,
+                    fqn=fqn,
+                    file_path=file_path,
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=sig_text,
+                    kind=kind,
+                    body_text=body_text,
+                    is_exported=True, # C++ typically depends on header vs src rather than modifiers
+                    parent_class=parent_cls
+                )
+                
+                # Try to bind to local class if we are parsing the header
+                if parent_cls:
+                    for cls in classes:
+                        if cls.name == parent_cls:
+                            cls.methods.append(func)
+                            break
+                functions.append(func)
+
+        elif node.type == "call_expression":
+            fn = _get_child_by_type(node, "identifier") or _get_child_by_type(node, "field_expression") or _get_child_by_type(node, "qualified_identifier")
+            if fn:
+                callee_name = node_text(fn, source_bytes)
+                call_sites.append(RawCallSite(
+                    caller_fqn="", 
+                    callee_name=callee_name,
+                    line=node.start_point[0] + 1
+                ))
+
+        for child in node.children:
+            traverse(child, current_class)
+
+    traverse(root_node)
+    
+    return FileExtractionResult(
+        file_path=file_path,
+        language="cpp",
+        functions=functions,
+        classes=classes,
+        imports=imports,
+        call_sites=call_sites,
+        file_hash=_hash_text(source),
+        total_lines=source.count("\\n") + 1,
+        exports=[]
+    )
