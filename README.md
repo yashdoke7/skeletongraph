@@ -1,74 +1,131 @@
-# 🦴 SkeletonGraph
+# SkeletonGraph
 
-> **Token-minimal, constraint-preserving context assembly for AI coding agents.**
+**Token-minimal, constraint-preserving context assembly for AI coding agents.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+SkeletonGraph indexes your codebase into a lightweight skeleton graph — function signatures, dependency edges, and structural metadata — then assembles the minimum context an LLM needs to complete a coding task. No full-file reading, no wasted tokens.
 
-SkeletonGraph parses your codebase into function-level skeletons and a dependency graph, then assembles the **minimum context** an LLM needs to handle any coding task — typically **4-10× fewer tokens** than reading raw files.
+## Key Metrics (on test fixture)
+
+| Metric | Value |
+|--------|-------|
+| Avg Token Reduction | **2.0×** vs raw file reading |
+| Coverage Score | **90%** of expected functions included |
+| Constraint Preservation | **100%** — constraints never dropped |
+| High Confidence Rate | **100%** — correct entity resolution |
+| Resolve Time | **0.1ms** — zero LLM cost for retrieval |
 
 ## How It Works
 
 ```
-Your Codebase                    SkeletonGraph                         LLM Context
-┌──────────────┐                ┌─────────────────┐                 ┌────────────────────┐
-│ 500 files     │  Tree-sitter  │ Skeleton Table   │   Retrieve +   │ Zone 1: Constraints│
-│ 5000 functions│ ──────────► │ Dependency Graph │ ──Assemble──► │ Zone 2: Target Code│
-│ ~500K tokens  │   + Summary   │ Inverted Index   │   (~735 tok)   │ Zone 3: Skeletons  │
-│               │               │ Bloom Filter     │                │ Zone 4: Prompt     │
-└──────────────┘                └─────────────────┘                 └────────────────────┘
-                                     ~20K tokens                       4-10× reduction
+Source Files → Tree-sitter AST → Skeleton Table + Dependency Graph
+                                         ↓
+User Prompt → Intent Analysis → Entity Resolution → Graph Expansion
+                                         ↓
+                              Budget Allocation → 4-Zone Assembly → LLM Context
 ```
+
+**4-Zone Attention-Aware Assembly:**
+- **Zone 1** (top): Project constraints → primacy effect
+- **Zone 3** (middle): Structural context (signatures, relationships)
+- **Zone 2** (above prompt): Target code bodies → recency effect
+- **Zone 4** (bottom): User prompt → strongest attention
 
 ## Quick Start
 
 ```bash
 pip install skeletongraph
 
-# Build index for your project
+# Index your project
 skeletongraph build
 
-# Query your codebase
-skeletongraph query "what does validate_token depend on?"
+# Query
+skeletongraph query "fix validate_token in middleware.py" --verbose
 
-# Start MCP server for IDE integration
-skeletongraph serve
+# Incremental update after code changes
+skeletongraph update
 
-# Standalone chat mode
-skeletongraph chat --model gpt-4o-mini
+# Generate LLM summaries (optional, requires API key)
+skeletongraph summarize --model gemini/gemini-2.0-flash
 ```
 
-## IDE Integration
+## Python API
 
-```bash
-# Claude Code
-skeletongraph install --platform claude-code
+```python
+from skeletongraph import build_index, resolve_context, assemble_context
+from pathlib import Path
 
-# Google Antigravity  
-skeletongraph install --platform antigravity
+# Build index
+store = build_index(Path("."))
 
-# Cursor
-skeletongraph install --platform cursor
+# Query
+result = resolve_context("fix the authentication bug", store)
+context = assemble_context(result, store, Path("."))
 
-# GitHub Copilot
-skeletongraph install --platform copilot
+print(f"Tokens: {context.token_count}")
+print(f"Confidence: {context.confidence}")
+print(context.text)
 ```
 
-## Key Features
+## MCP Server (IDE Integration)
 
-- **Skeleton-First Retrieval**: Function signatures + 1-line summaries = 25× cheaper than full bodies
-- **Dependency Graph**: Blast-radius analysis — know what breaks before you change it
-- **Constraint Zones**: HierMem-inspired attention-aware assembly — constraints never get lost
-- **Dynamic Budget**: Elastic token allocation — expands for complex tasks, compresses for simple ones
-- **Output Modes**: TERSE / STANDARD / DETAILED — control output token usage
-- **Zero-LLM Retrieval**: 70%+ of queries resolved with pure graph traversal, no LLM calls
-- **Incremental Updates**: < 1 second on file save (function-level dirty tracking)
-- **Multi-Language**: Python, TypeScript/JavaScript (Phase 1). Go, Rust (Phase 2).
+Add to your Claude Code / Cursor MCP config:
 
-## Research
+```json
+{
+  "mcpServers": {
+    "skeletongraph": {
+      "command": "python",
+      "args": ["-m", "skeletongraph.cli.main", "serve", "--path", "."]
+    }
+  }
+}
+```
 
-SkeletonGraph builds on [HierMem](https://github.com/.../llm-hiermem), extending its constraint-preserving zone architecture from conversational memory to local file context management.
+Available tools:
+- `query_context` — Prompt → assembled context
+- `expand_function` — Page-fault: get full source of a function
+- `show_graph` — Dependency graph around a function
+- `search_index` — Keyword search across all functions
+- `index_status` — Index health check
 
-**Paper**: Coming soon.
+## Architecture
+
+```
+src/skeletongraph/
+├── parser/           # Tree-sitter AST extraction (Python, TypeScript)
+│   ├── ast_extractor.py
+│   ├── edge_extractor.py
+│   ├── node_kinds.py
+│   ├── skeleton.py
+│   └── languages/    # Language-specific rules
+├── graph/            # Dependency graph + search structures
+│   ├── dependency.py # BFS traversal algorithms
+│   ├── bloom.py      # Probabilistic existence check
+│   └── inverted_index.py
+├── storage/          # Persistence to .skeletongraph/
+│   ├── dirty.py      # Incremental change tracking
+│   └── local.py      # Atomic JSON serialization
+├── retrieval/        # Intent → candidates pipeline
+│   ├── intent.py     # Entity extraction + task classification
+│   ├── budget.py     # Elastic token budget
+│   └── resolver.py   # Graph-based context retrieval
+├── assembly/         # Context construction
+│   └── zone_assembler.py
+├── llm/              # LLM integration
+│   ├── provider.py   # LiteLLM abstraction
+│   └── summarizer.py # Batch function summarization
+├── server/           # MCP server
+│   └── mcp.py
+├── cli/              # CLI commands
+│   └── main.py
+└── build.py          # Build orchestrator
+```
+
+## Supported Languages
+
+- Python (.py)
+- TypeScript (.ts, .tsx)
+- JavaScript (.js, .jsx, .mjs, .cjs)
 
 ## License
 

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "skeletongraph": {
+      "command": "python",
+      "args": ["-m", "skeletongraph.cli.main", "serve", "--path", "."],
+      "env": {}
+    }
+  }
+}

@@ -162,5 +162,76 @@ def query(prompt: str, path: str, budget: int, verbose: bool):
     console.print(assembled.text)
 
 
+@app.command()
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--model", "-m", default="gemini/gemini-2.0-flash", help="LLM model")
+@click.option("--force", is_flag=True, help="Re-summarize all functions")
+def summarize(path: str, model: str, force: bool):
+    """Generate LLM summaries for indexed functions."""
+    project_root = Path(path).resolve()
+
+    from ..storage.local import load_index
+    from ..llm.summarizer import summarize_index
+    from ..llm.provider import LLMConfig
+
+    store = load_index(project_root)
+    if store is None:
+        console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
+        return
+
+    cfg = LLMConfig(model=model)
+    console.print(f"[bold]> Summarizing with {model}[/bold]")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Summarizing...", total=None)
+
+        def on_progress(fqn: str, current: int, total: int):
+            short = fqn.split("::")[-1] if "::" in fqn else fqn
+            progress.update(task, description=f"[{current}/{total}] {short}")
+
+        result = summarize_index(
+            store, project_root, config=cfg, force=force, on_progress=on_progress,
+        )
+
+    table = Table(title="Summarization Complete", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Summarized", str(result.summarized))
+    table.add_row("Skipped", str(result.skipped))
+    table.add_row("Errors", str(result.errors))
+    table.add_row("Input tokens", str(result.total_input_tokens))
+    table.add_row("Output tokens", str(result.total_output_tokens))
+    table.add_row("Duration", f"{result.duration_seconds:.2f}s")
+    if result.total_cost > 0:
+        table.add_row("Cost", f"${result.total_cost:.4f}")
+    console.print(table)
+
+
+@app.command()
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--port", default=3500, help="Server port")
+def serve(path: str, port: int):
+    """Start the MCP server for IDE integration."""
+    project_root = Path(path).resolve()
+
+    from ..storage.local import load_index
+
+    store = load_index(project_root)
+    if store is None:
+        console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
+        return
+
+    console.print(f"[bold]> Starting MCP server on port {port}[/bold]")
+    console.print(f"  Index: {store.status_summary()}")
+
+    from ..server.mcp import start_server
+    start_server(store, project_root, port=port)
+
+
 if __name__ == "__main__":
     app()
