@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "skeletongraph"
+version = "0.1.0"
+description = "Token-minimal, constraint-preserving context assembly for AI coding agents"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = []
+keywords = [
+    "llm", "context", "coding-agent", "ast", "tree-sitter",
+    "token-optimization", "mcp", "claude-code", "skeleton", "graph"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "tree-sitter>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
+    "litellm>=1.0",
+    "click>=8.0",
+    "mmh3>=4.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp-server-sdk>=0.1"]
+eval = ["pandas", "matplotlib", "seaborn"]
+dev = ["pytest", "pytest-cov", "ruff"]
+all = ["skeletongraph[mcp,eval,dev]"]
+
+[project.scripts]
+skeletongraph = "skeletongraph.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/.../skeletongraph"
+Documentation = "https://github.com/.../skeletongraph/tree/main/docs"
+Repository = "https://github.com/.../skeletongraph"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skeletongraph"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
