@@ -234,6 +234,36 @@ def serve(path: str, port: int):
 
 
 @app.command()
+@click.argument("ide", type=click.Choice(["claude", "cursor", "antigravity"]))
+@click.option("--path", "-p", default=".", help="Project root directory")
+def install(ide: str, path: str):
+    """Install IDE-specific rules safely hardening agent memory retention."""
+    project_root = Path(path).resolve()
+    
+    if ide == "claude":
+        target = project_root / "CLAUDE.md"
+        from ..integrations.claude_code import CLAUDE_MD_TEMPLATE
+        content = CLAUDE_MD_TEMPLATE
+    elif ide == "cursor":
+        target = project_root / ".cursorrules"
+        from ..integrations.cursor import CURSOR_RULES_TEMPLATE
+        content = CURSOR_RULES_TEMPLATE
+    elif ide == "antigravity":
+        target = project_root / ".antigravity.md"
+        from ..integrations.antigravity import ANTIGRAVITY_RULES_TEMPLATE
+        content = ANTIGRAVITY_RULES_TEMPLATE
+    else:
+        return
+        
+    try:
+        target.write_text(content)
+        console.print(f"[bold green]✓ Installed hardened SkeletonGraph rules to {target.name}[/bold green]")
+        console.print("[dim]These rules instruct the agent to use `resolve_context` while retaining its internal memory loops.[/dim]")
+    except Exception as e:
+        console.print(f"[bold red]✗ Failed to write {target.name}: {e}[/bold red]")
+
+
+@app.command()
 @click.option("--path", "-p", default=".", help="Project root directory")
 def watch(path: str):
     """Start a background daemon to auto-reindex files on save."""
