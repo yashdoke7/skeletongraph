@@ -45,6 +45,27 @@ def _get_parser(lang: str) -> Parser:
                 _LANGUAGES[lang] = Language(tsts.language_tsx())
             else:
                 _LANGUAGES[lang] = Language(tsts.language_typescript())
+        elif lang == "java":
+            import tree_sitter_java as tsjava
+            _LANGUAGES[lang] = Language(tsjava.language())
+        elif lang == "go":
+            import tree_sitter_go as tsgo
+            _LANGUAGES[lang] = Language(tsgo.language())
+        elif lang == "rust":
+            import tree_sitter_rust as tsrust
+            _LANGUAGES[lang] = Language(tsrust.language())
+        elif lang in ("cpp", "c++", "c"):
+            import tree_sitter_cpp as tscpp
+            _LANGUAGES[lang] = Language(tscpp.language())
+        elif lang in ("csharp", "cs", "c#"):
+            import tree_sitter_c_sharp as tscsharp
+            _LANGUAGES[lang] = Language(tscsharp.language())
+        elif lang == "ruby":
+            import tree_sitter_ruby as tsruby
+            _LANGUAGES[lang] = Language(tsruby.language())
+        elif lang == "php":
+            import tree_sitter_php as tsphp
+            _LANGUAGES[lang] = Language(tsphp.language_php())
         else:
             raise ValueError(f"Unsupported language: {lang}")
 
@@ -65,6 +86,16 @@ def detect_language(file_path: str) -> Optional[str]:
         ".jsx": "javascript",
         ".ts": "typescript",
         ".tsx": "tsx",
+        ".java": "java",
+        ".go": "go",
+        ".rs": "rust",
+        ".cpp": "cpp",
+        ".c": "cpp",
+        ".h": "cpp",
+        ".hpp": "cpp",
+        ".cs": "csharp",
+        ".rb": "ruby",
+        ".php": "php",
     }.get(ext)
 
 
@@ -225,6 +256,27 @@ def extract_file(
     elif lang in ("javascript", "typescript", "tsx"):
         from .languages.typescript import extract_typescript
         return extract_typescript(file_path, source, source_bytes, tree, lang)
+    elif lang == "java":
+        from .languages.java import extract_java
+        return extract_java(file_path, source, source_bytes, tree)
+    elif lang == "go":
+        from .languages.go import extract_go
+        return extract_go(file_path, source, source_bytes, tree)
+    elif lang == "rust":
+        from .languages.rust import extract_rust
+        return extract_rust(file_path, source, source_bytes, tree)
+    elif lang == "cpp":
+        from .languages.cpp import extract_cpp
+        return extract_cpp(file_path, source, source_bytes, tree)
+    elif lang == "csharp":
+        from .languages.csharp import extract_csharp
+        return extract_csharp(file_path, source, source_bytes, tree)
+    elif lang == "ruby":
+        from .languages.ruby import extract_ruby
+        return extract_ruby(file_path, source, source_bytes, tree)
+    elif lang == "php":
+        from .languages.php import extract_php
+        return extract_php(file_path, source, source_bytes, tree)
     else:
         return None
 

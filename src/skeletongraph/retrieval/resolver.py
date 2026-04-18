@@ -78,15 +78,27 @@ def resolve_context(
         confidence = "HIGH"
         confidence_reason = f"Exact entity match: {', '.join(list(target_fqns)[:3])}"
     else:
-        # Fallback: search inverted index
-        search_results = store.inverted_index.search(prompt, top_k=5)
-        if search_results:
-            target_fqns = {fqn for fqn, _ in search_results}
-            confidence = "MEDIUM"
-            confidence_reason = "Matched via keyword search"
-        else:
-            confidence = "LOW"
-            confidence_reason = "No entity or keyword matches found"
+        # Fallback 1: Semantic BM25 search over LLM Summaries (if any exist)
+        if len(store.summaries._cache) > 0:
+            from ..graph.bm25 import BM25Model
+            bm25 = BM25Model()
+            bm25.fit(store.summaries._cache)
+            bm25_results = bm25.search(prompt, top_k=5)
+            if bm25_results:
+                target_fqns = {fqn for fqn, _ in bm25_results}
+                confidence = "MEDIUM"
+                confidence_reason = "Matched via semantic BM25 summary search"
+
+        # Fallback 2: Keyword search on Inverted Index (if BM25 fails or no summaries)
+        if not target_fqns:
+            search_results = store.inverted_index.search(prompt, top_k=5)
+            if search_results:
+                target_fqns = {fqn for fqn, _ in search_results}
+                confidence = "MEDIUM"
+                confidence_reason = "Matched via keyword search"
+            else:
+                confidence = "LOW"
+                confidence_reason = "No entity, semantic, or keyword matches found"
 
     # Step 4: Expand via graph traversal
     candidates: Dict[str, RankedCandidate] = {}

@@ -233,5 +233,14 @@ def serve(path: str, port: int):
     start_server(store, project_root, port=port)
 
 
+@app.command()
+@click.option("--path", "-p", default=".", help="Project root directory")
+def watch(path: str):
+    """Start a background daemon to auto-reindex files on save."""
+    project_root = Path(path).resolve()
+    from ..daemon import start_daemon
+    start_daemon(project_root)
+
+
 if __name__ == "__main__":
     app()
