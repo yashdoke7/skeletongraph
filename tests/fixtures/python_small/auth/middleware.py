@@ -71,7 +71,6 @@ def get_user(user_id: str) -> Optional[User]:
     pass
 
 
-@staticmethod
 def _helper():
     """Internal helper, not exported."""
     pass

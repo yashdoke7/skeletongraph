@@ -45,8 +45,9 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp-server-sdk>=0.1"]
 eval = ["pandas", "matplotlib", "seaborn"]
+daemon = ["watchdog>=3.0"]
 dev = ["pytest", "pytest-cov", "ruff"]
-all = ["skeletongraph[mcp,eval,dev]"]
+all = ["skeletongraph[mcp,eval,daemon,dev]"]
 
 [project.scripts]
 skeletongraph = "skeletongraph.cli.main:app"

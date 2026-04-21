@@ -359,17 +359,27 @@ def _raw_to_skeleton(raw: RawFunction) -> SkeletonCore:
         kind=raw.kind,
         decorators=tuple(raw.decorators),
         is_exported=raw.is_exported,
-        complexity=count_branches(_DUMMY_NODE) if not raw.body_text else 1,
+        complexity=_estimate_complexity_from_text(raw.body_text),
         body_token_estimate=estimate_tokens(raw.body_text),
         sha256=_hash_text(raw.body_text) if raw.body_text else "",
     )
 
 
-# Placeholder for when we don't have the AST node during conversion
-class _DummyNode:
-    type = ""
-    children = []
-    start_byte = 0
-    end_byte = 0
+def _estimate_complexity_from_text(body_text: str) -> int:
+    """Estimate cyclomatic complexity from raw body text.
 
-_DUMMY_NODE = _DummyNode()
+    Since we don't retain the AST node at conversion time, we use a
+    keyword-counting heuristic. Base complexity is 1; each branch
+    keyword adds 1.
+    """
+    if not body_text:
+        return 1  # No body → trivial complexity
+
+    import re
+    # Branch keywords across Python, JS/TS, Go, Rust, Java, C++, C#, Ruby, PHP
+    branch_keywords = re.findall(
+        r'\b(if|elif|else if|elseif|for|while|except|catch|case|match|when|'
+        r'and|or|&&|\|\|)\b',
+        body_text,
+    )
+    return 1 + len(branch_keywords)

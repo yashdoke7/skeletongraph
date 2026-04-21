@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from threading import Timer
 
-from ..build import update_index, discover_files
+from .build import update_index, discover_files
 
 try:
     from watchdog.observers import Observer

@@ -79,10 +79,10 @@ def resolve_context(
         confidence_reason = f"Exact entity match: {', '.join(list(target_fqns)[:3])}"
     else:
         # Fallback 1: Semantic BM25 search over LLM Summaries (if any exist)
-        if len(store.summaries._cache) > 0:
+        if len(store.summaries._store) > 0:
             from ..graph.bm25 import BM25Model
             bm25 = BM25Model()
-            bm25.fit(store.summaries._cache)
+            bm25.fit(store.summaries._store)
             bm25_results = bm25.search(prompt, top_k=5)
             if bm25_results:
                 target_fqns = {fqn for fqn, _ in bm25_results}

@@ -50,7 +50,18 @@ _DEFAULT_IGNORE = [
 ]
 
 # Supported file extensions
-_SUPPORTED_EXTENSIONS = {".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"}
+_SUPPORTED_EXTENSIONS = {
+    ".py",                                      # Python
+    ".js", ".mjs", ".cjs", ".jsx",              # JavaScript
+    ".ts", ".tsx",                               # TypeScript
+    ".java",                                     # Java
+    ".go",                                       # Go
+    ".rs",                                       # Rust
+    ".cpp", ".cxx", ".cc", ".c", ".h", ".hpp",  # C/C++
+    ".cs",                                       # C#
+    ".rb",                                       # Ruby
+    ".php",                                      # PHP
+}
 
 
 def discover_files(
@@ -315,15 +326,21 @@ def update_index(
             {sk.fqn: sk.sha256 for sk in file_skel.all_skeletons},
         )
 
-    # Rebuild edges for changed files
+    # Rebuild edges for changed files (reuse cached results to avoid double-parse)
     all_fqns = set(store.skeleton_table.keys())
     short_name_index = build_short_name_index(all_fqns)
 
+    # Cache extraction results from the parse phase above
+    _cached_results = {}
     for file_path in files_to_process:
         if file_path not in store.file_skeletons:
             continue
 
-        result = extract_file(file_path, project_root)
+        # Reuse previous extraction if available, else parse once
+        if file_path not in _cached_results:
+            _cached_results[file_path] = extract_file(file_path, project_root)
+
+        result = _cached_results[file_path]
         if result is None:
             continue
 
