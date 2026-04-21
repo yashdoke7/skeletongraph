@@ -53,9 +53,9 @@ all = ["skeletongraph[mcp,eval,daemon,dev]"]
 skeletongraph = "skeletongraph.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/.../skeletongraph"
-Documentation = "https://github.com/.../skeletongraph/tree/main/docs"
-Repository = "https://github.com/.../skeletongraph"
+Homepage = "https://github.com/yashdoke7/skeletongraph"
+Documentation = "https://github.com/yashdoke7/skeletongraph/tree/main/docs"
+Repository = "https://github.com/yashdoke7/skeletongraph"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/skeletongraph"]

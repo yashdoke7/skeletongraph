@@ -203,11 +203,16 @@ def build_index(
                 call_sites = extract_call_sites(
                     result.file_path, source_bytes, tree, func_ranges,
                 )
-            else:
+            elif lang in ("javascript", "js", "typescript", "ts", "tsx"):
                 from .parser.languages.typescript import extract_call_sites_ts
                 call_sites = extract_call_sites_ts(
                     result.file_path, source_bytes, tree, func_ranges,
                 )
+            else:
+                # Go, Java, Rust, C++, C#, Ruby, PHP — call_sites
+                # are already extracted by the language-specific parser
+                # in Phase 1 and stored in the FileExtractionResult.
+                call_sites = result.call_sites if hasattr(result, 'call_sites') else []
 
             # Convert to DependencyEdges
             edges = extract_edges(
@@ -364,11 +369,13 @@ def update_index(
                 call_sites = extract_call_sites(
                     file_path, source_bytes, tree, func_ranges,
                 )
-            else:
+            elif lang in ("javascript", "js", "typescript", "ts", "tsx"):
                 from .parser.languages.typescript import extract_call_sites_ts
                 call_sites = extract_call_sites_ts(
                     file_path, source_bytes, tree, func_ranges,
                 )
+            else:
+                call_sites = result.call_sites if hasattr(result, 'call_sites') else []
 
             edges = extract_edges(
                 result, call_sites, all_fqns, short_name_index, import_map,
