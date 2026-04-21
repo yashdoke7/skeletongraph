@@ -7,6 +7,11 @@ Exposes SkeletonGraph as tools that IDE agents (Claude Code, Cursor, etc.) can c
   - show_graph: Visualize dependencies for a function
   - search_index: Keyword search across all indexed functions
   - index_status: Check index health and stats
+  - review_delta: Diff-aware context assembly (blast radius)
+  - get_blast_radius: Compute blast radius for a function
+  - get_dependencies: Show dependency chain for a function
+  - detect_changes: Risk-scored change impact analysis
+  - get_stats: Token savings dashboard
 
 Protocol: JSON-RPC over stdio (stdin/stdout) per MCP spec.
 """
@@ -21,6 +26,8 @@ from typing import Any, Callable, Dict, List, Optional
 from ..storage.local import IndexStore, load_index
 from ..retrieval.resolver import resolve_context
 from ..assembly.zone_assembler import assemble_context
+from ..retrieval.session import Session
+from ..config import SGConfig, load_config
 
 
 # ── Tool Registry ──────────────────────────────────────────────────────
@@ -44,27 +51,65 @@ def tool(name: str, description: str, parameters: dict):
     return decorator
 
 
+# ── Server State ───────────────────────────────────────────────────────
+
+_server_state: Dict[str, Any] = {
+    "store": None,
+    "project_root": None,
+    "session": None,
+    "config": None,
+}
+
+
+def _get_store() -> IndexStore:
+    return _server_state["store"]
+
+
+def _get_root() -> Path:
+    return _server_state["project_root"]
+
+
+def _get_session() -> Session:
+    return _server_state["session"]
+
+
 # ── Tool Definitions ───────────────────────────────────────────────────
 
 @tool(
     name="query_context",
     description=(
-        "Retrieve assembled context for a coding task. Returns token-minimal, "
-        "constraint-preserving context with full target code + structural neighbors."
+        "Main entry point. Takes a natural language prompt and returns "
+        "attention-optimized, 4-zone context with constraints, target code, "
+        "structural context, and the task. Uses session memory to avoid "
+        "re-sending code the agent already has."
     ),
     parameters={
-        "prompt": {"type": "string", "description": "Natural language coding task"},
-        "budget": {"type": "integer", "description": "Token budget limit", "default": 128000},
+        "prompt": {"type": "string", "description": "The user's task or question"},
+        "budget": {
+            "type": "integer",
+            "description": "Model context limit in tokens (default: 128000)",
+        },
     },
 )
-def query_context_tool(
-    store: IndexStore, project_root: Path, prompt: str, budget: int = 128000,
-) -> dict:
-    result = resolve_context(prompt, store)
+def query_context_tool(params: dict) -> dict:
+    store = _get_store()
+    root = _get_root()
+    session = _get_session()
+
+    prompt = params["prompt"]
+    budget = params.get("budget", 128_000)
+
+    result = resolve_context(prompt, store, session=session)
     assembled = assemble_context(
-        result, store, project_root, model_context_limit=budget,
+        result, store, root,
+        model_context_limit=budget,
+        session=session,
     )
-    return {
+
+    # Save session after each query
+    session.save(root)
+
+    response = {
         "context": assembled.text,
         "token_count": assembled.token_count,
         "confidence": assembled.confidence,
@@ -72,182 +117,360 @@ def query_context_tool(
         "entities_matched": assembled.entities_matched,
         "zone_breakdown": assembled.zone_breakdown,
         "reduction_ratio": assembled.reduction_ratio,
-        "warning": assembled.warning,
     }
+
+    if assembled.attention_map:
+        response["attention_map"] = [
+            {
+                "zone": z.zone_name,
+                "tokens": z.token_count,
+                "attention": z.attention_level,
+                "bar": z.bar,
+            }
+            for z in assembled.attention_map
+        ]
+
+    if assembled.session_dedup_count > 0:
+        response["session_dedup"] = {
+            "bodies_skipped": assembled.session_dedup_count,
+            "tokens_saved": assembled.session_tokens_saved,
+        }
+
+    if assembled.warning:
+        response["warning"] = assembled.warning
+
+    return response
 
 
 @tool(
     name="expand_function",
-    description="Page-fault: retrieve the full source code of a specific function by FQN.",
+    description=(
+        "Page-fault expansion: get the full body of a specific function. "
+        "Use when the skeleton/summary wasn't enough and you need the "
+        "complete implementation."
+    ),
     parameters={
-        "fqn": {"type": "string", "description": "Fully qualified name (e.g., 'auth/middleware.py::validate_token')"},
+        "fqn": {"type": "string", "description": "Fully qualified name of the function"},
     },
 )
-def expand_function_tool(
-    store: IndexStore, project_root: Path, fqn: str,
-) -> dict:
+def expand_function_tool(params: dict) -> dict:
+    store = _get_store()
+    root = _get_root()
+
+    fqn = params["fqn"]
     sk = store.get_skeleton(fqn)
-    if sk is None:
-        # Try fuzzy match
-        matches = store.search(fqn.split("::")[-1] if "::" in fqn else fqn, top_k=3)
-        if matches:
-            return {
-                "error": f"FQN '{fqn}' not found. Did you mean: {', '.join(matches)}",
-                "suggestions": matches,
-            }
-        return {"error": f"FQN '{fqn}' not found"}
+    if not sk:
+        return {"error": f"Function not found: {fqn}"}
 
-    # Read full body
-    file_path = project_root / sk.file_path
-    body = ""
-    if file_path.exists():
-        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+    file_path = root / sk.file_path
+    if not file_path.exists():
+        return {"error": f"File not found: {sk.file_path}"}
 
-    summary = store.summaries.get(fqn) or ""
+    lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    body = "\n".join(lines[sk.line_start - 1:sk.line_end])
 
     return {
         "fqn": fqn,
-        "file_path": sk.file_path,
-        "line_range": f"{sk.line_start}-{sk.line_end}",
+        "file": sk.file_path,
+        "lines": f"{sk.line_start}-{sk.line_end}",
         "signature": sk.signature,
-        "kind": sk.kind.value,
-        "summary": summary,
-        "source": body,
-        "token_count": len(body) // 4,
+        "body": body,
+        "token_estimate": len(body) // 4,
     }
 
 
 @tool(
     name="show_graph",
-    description="Show dependency graph around a function: callers, callees, and test coverage.",
+    description="Show dependency relationships for a function (callers and callees).",
     parameters={
-        "fqn": {"type": "string", "description": "FQN to center the graph on"},
-        "depth": {"type": "integer", "description": "Max traversal depth", "default": 2},
+        "fqn": {"type": "string", "description": "Fully qualified name"},
+        "depth": {"type": "integer", "description": "Max traversal depth (default: 2)"},
     },
 )
-def show_graph_tool(
-    store: IndexStore, project_root: Path, fqn: str, depth: int = 2,
-) -> dict:
-    if not store.graph.has_node(fqn):
-        return {"error": f"FQN '{fqn}' not in graph"}
+def show_graph_tool(params: dict) -> dict:
+    store = _get_store()
+    fqn = params["fqn"]
+    depth = params.get("depth", 2)
 
+    # Forward deps (what this calls)
+    deps = store.graph.dependency_chain(fqn, max_depth=depth)
+
+    # Reverse deps (what calls this)
     callers = store.graph.blast_radius(fqn, max_depth=depth)
-    callees = store.graph.dependency_chain(fqn, max_depth=depth)
-    tests = store.graph.test_coverage(fqn)
 
     return {
         "fqn": fqn,
-        "callers": {k: v for k, v in sorted(callers.items(), key=lambda x: x[1])},
-        "callees": {k: v for k, v in sorted(callees.items(), key=lambda x: x[1])},
-        "tests": tests,
-        "total_blast_radius": len(callers),
-        "total_dependencies": len(callees),
+        "calls": {k: v for k, v in deps.items()},
+        "called_by": {k: v for k, v in callers.items()},
+        "total_dependencies": len(deps),
+        "total_callers": len(callers),
     }
 
 
 @tool(
     name="search_index",
-    description="Search the function index by keyword. Returns top matching FQNs with signatures.",
+    description="Keyword search across all indexed functions, classes, and methods.",
     parameters={
         "query": {"type": "string", "description": "Search query"},
-        "top_k": {"type": "integer", "description": "Max results", "default": 10},
+        "top_k": {"type": "integer", "description": "Max results (default: 10)"},
     },
 )
-def search_index_tool(
-    store: IndexStore, project_root: Path, query: str, top_k: int = 10,
-) -> dict:
+def search_index_tool(params: dict) -> dict:
+    store = _get_store()
+    query = params["query"]
+    top_k = params.get("top_k", 10)
+
     results = store.inverted_index.search(query, top_k=top_k)
-    entries = []
+    items = []
     for fqn, score in results:
         sk = store.get_skeleton(fqn)
         if sk:
-            entries.append({
+            items.append({
                 "fqn": fqn,
+                "file": sk.file_path,
                 "signature": sk.signature,
-                "file": sk.file_display,
                 "kind": sk.kind.value,
-                "score": round(score, 2),
+                "score": score,
             })
-    return {"results": entries, "total": len(entries)}
+
+    return {"query": query, "results": items, "total": len(items)}
 
 
 @tool(
     name="index_status",
-    description="Check index health: file count, function count, edge count, build time.",
+    description="Check index health, stats, and build metadata.",
     parameters={},
 )
-def index_status_tool(
-    store: IndexStore, project_root: Path,
-) -> dict:
-    return {
-        "status": store.status_summary(),
+def index_status_tool(params: dict) -> dict:
+    store = _get_store()
+    session = _get_session()
+
+    response = {
         "version": store.meta.version,
         "files": store.meta.total_files,
         "functions": store.meta.total_functions,
         "edges": store.meta.total_edges,
         "languages": store.meta.languages,
         "build_time": f"{store.meta.build_duration_seconds:.2f}s",
+        "summaries": store.summaries.count,
+        "pending_summaries": store.summaries.pending_count,
+    }
+
+    if session.turn_count > 0:
+        s = session.stats
+        response["session"] = {
+            "turns": s.total_turns,
+            "tokens_used": s.total_sg_tokens,
+            "tokens_saved": s.total_saved_tokens,
+            "reduction_ratio": round(s.reduction_ratio, 1),
+        }
+
+    return response
+
+
+@tool(
+    name="review_delta",
+    description=(
+        "Diff-aware context assembly for code review. Parses git diff, "
+        "computes blast radius for every changed function, and assembles "
+        "a single 4-zone review context with risk scores."
+    ),
+    parameters={
+        "target": {
+            "type": "string",
+            "description": "Git diff target (default: HEAD). Examples: HEAD, main, HEAD~3",
+        },
+    },
+)
+def review_delta_tool(params: dict) -> dict:
+    store = _get_store()
+    root = _get_root()
+    target = params.get("target", "HEAD")
+
+    from ..retrieval.detect_changes import detect_changes
+    analysis = detect_changes(root, store, diff_target=target)
+
+    return {
+        "risk_summary": analysis.risk_summary,
+        "total_blast_radius": analysis.total_blast_radius,
+        "files_to_review": analysis.files_to_review[:20],
+        "changed_functions": [
+            {"fqn": fn.fqn, "file": fn.file_path, "type": fn.change_type}
+            for fn in analysis.changed_functions
+        ],
+        "affected_files": [
+            {
+                "file": af.file_path,
+                "risk_score": af.risk_score,
+                "risk_reason": af.risk_reason,
+                "affected_count": len(af.affected_fqns),
+                "distance": af.distance,
+            }
+            for af in analysis.affected_files[:20]
+        ],
     }
 
 
-# ── JSON-RPC Server ───────────────────────────────────────────────────
+@tool(
+    name="get_blast_radius",
+    description=(
+        "Compute the blast radius for a specific function — "
+        "everything that could be affected if this function changes."
+    ),
+    parameters={
+        "fqn": {"type": "string", "description": "Fully qualified name"},
+        "depth": {"type": "integer", "description": "Max depth (default: 2)"},
+    },
+)
+def get_blast_radius_tool(params: dict) -> dict:
+    store = _get_store()
+    fqn = params["fqn"]
+    depth = params.get("depth", 2)
 
-def _handle_request(
-    request: dict,
-    store: IndexStore,
-    project_root: Path,
-) -> dict:
+    affected = store.graph.blast_radius(fqn, max_depth=depth)
+    items = []
+    for affected_fqn, dist in sorted(affected.items(), key=lambda x: x[1]):
+        sk = store.get_skeleton(affected_fqn)
+        if sk:
+            items.append({
+                "fqn": affected_fqn,
+                "file": sk.file_path,
+                "distance": dist,
+                "is_exported": sk.is_exported,
+            })
+
+    return {
+        "source": fqn,
+        "affected": items,
+        "total_affected": len(items),
+    }
+
+
+@tool(
+    name="get_dependencies",
+    description="Show the dependency chain for a function — everything it depends on.",
+    parameters={
+        "fqn": {"type": "string", "description": "Fully qualified name"},
+        "depth": {"type": "integer", "description": "Max depth (default: 2)"},
+    },
+)
+def get_dependencies_tool(params: dict) -> dict:
+    store = _get_store()
+    fqn = params["fqn"]
+    depth = params.get("depth", 2)
+
+    deps = store.graph.dependency_chain(fqn, max_depth=depth)
+    items = []
+    for dep_fqn, dist in sorted(deps.items(), key=lambda x: x[1]):
+        sk = store.get_skeleton(dep_fqn)
+        if sk:
+            items.append({
+                "fqn": dep_fqn,
+                "file": sk.file_path,
+                "signature": sk.signature,
+                "distance": dist,
+            })
+
+    return {
+        "source": fqn,
+        "dependencies": items,
+        "total": len(items),
+    }
+
+
+@tool(
+    name="detect_changes",
+    description="Risk-scored change impact analysis. Shows which files need attention.",
+    parameters={
+        "target": {
+            "type": "string",
+            "description": "Git diff target (default: HEAD)",
+        },
+    },
+)
+def detect_changes_tool(params: dict) -> dict:
+    return review_delta_tool(params)
+
+
+@tool(
+    name="get_stats",
+    description="Get token savings statistics for this session.",
+    parameters={},
+)
+def get_stats_tool(params: dict) -> dict:
+    session = _get_session()
+    store = _get_store()
+
+    return {
+        "index": {
+            "files": store.meta.total_files,
+            "functions": store.meta.total_functions,
+            "edges": store.meta.total_edges,
+        },
+        "session": session.stats.to_dict(),
+    }
+
+
+# ── JSON-RPC Protocol ─────────────────────────────────────────────────
+
+def _handle_request(request: dict) -> dict:
     """Handle a single JSON-RPC request."""
     method = request.get("method", "")
     params = request.get("params", {})
     req_id = request.get("id")
 
     if method == "initialize":
-        return _jsonrpc_response(req_id, {
+        return _json_rpc_response(req_id, {
             "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "skeletongraph", "version": "0.1.0"},
+            "capabilities": {"tools": {}},
+            "serverInfo": {
+                "name": "skeletongraph",
+                "version": "0.1.0",
+            },
         })
 
     elif method == "tools/list":
-        tools_list = []
-        for name, tool_def in _TOOLS.items():
-            tools_list.append({
-                "name": tool_def["name"],
-                "description": tool_def["description"],
-                "inputSchema": tool_def["inputSchema"],
-            })
-        return _jsonrpc_response(req_id, {"tools": tools_list})
+        tools_list = [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "inputSchema": t["inputSchema"],
+            }
+            for t in _TOOLS.values()
+        ]
+        return _json_rpc_response(req_id, {"tools": tools_list})
 
     elif method == "tools/call":
         tool_name = params.get("name", "")
         tool_args = params.get("arguments", {})
 
         if tool_name not in _TOOLS:
-            return _jsonrpc_error(req_id, -32601, f"Unknown tool: {tool_name}")
+            return _json_rpc_error(req_id, -32601, f"Tool not found: {tool_name}")
 
-        handler = _TOOLS[tool_name]["handler"]
         try:
-            result = handler(store, project_root, **tool_args)
-            return _jsonrpc_response(req_id, {
-                "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+            result = _TOOLS[tool_name]["handler"](tool_args)
+            return _json_rpc_response(req_id, {
+                "content": [
+                    {"type": "text", "text": json.dumps(result, indent=2)},
+                ],
             })
         except Exception as e:
-            return _jsonrpc_error(req_id, -32000, str(e))
+            return _json_rpc_error(req_id, -32603, str(e))
 
     elif method == "notifications/initialized":
         return None  # No response for notifications
 
-    else:
-        return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
+    elif method == "ping":
+        return _json_rpc_response(req_id, {})
+
+    return _json_rpc_error(req_id, -32601, f"Unknown method: {method}")
 
 
-def _jsonrpc_response(req_id, result: dict) -> dict:
+def _json_rpc_response(req_id, result):
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
 
-def _jsonrpc_error(req_id, code: int, message: str) -> dict:
+def _json_rpc_error(req_id, code, message):
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
@@ -256,17 +479,17 @@ def start_server(
     project_root: Path,
     port: int = 3500,
 ) -> None:
-    """Start the MCP server, reading JSON-RPC from stdin, writing to stdout.
+    """Start the MCP server over stdio.
 
-    For stdio transport (used by Claude Code, Cursor, etc.):
-    Each message is a JSON object, one per line.
+    Reads JSON-RPC messages from stdin, dispatches to tool handlers,
+    writes responses to stdout.
     """
-    import sys
+    _server_state["store"] = store
+    _server_state["project_root"] = project_root
+    _server_state["session"] = Session.load(project_root)
+    _server_state["config"] = load_config(project_root)
 
-    # Stdio mode
-    sys.stderr.write(f"SkeletonGraph MCP server started. Index: {store.status_summary()}\n")
-    sys.stderr.flush()
-
+    # Stdio mode: read line-delimited JSON-RPC
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -277,7 +500,7 @@ def start_server(
         except json.JSONDecodeError:
             continue
 
-        response = _handle_request(request, store, project_root)
+        response = _handle_request(request)
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()

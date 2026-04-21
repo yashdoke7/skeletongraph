@@ -19,8 +19,9 @@ env/
 *.swp
 *.swo
 
-# SkeletonGraph session data (per-user, not committed)
-.skeletongraph/session/
+# SkeletonGraph index (generated, not committed)
+.skeletongraph/
+**/ .skeletongraph/
 
 # Environment
 .env

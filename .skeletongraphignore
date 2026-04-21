@@ -1,0 +1,3 @@
+# SkeletonGraph local index
+.skeletongraph/session/
+.skeletongraph/*.tmp

@@ -11,7 +11,7 @@ from __future__ import annotations
 import fnmatch
 import time
 from pathlib import Path
-from typing import Callable, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from .parser.ast_extractor import (
     extract_file,
@@ -19,7 +19,7 @@ from .parser.ast_extractor import (
     FileExtractionResult,
 )
 from .parser.edge_extractor import build_short_name_index, extract_edges
-from .parser.languages.python import extract_call_sites
+from .parser.import_resolver import ImportResolver
 from .parser.skeleton import FileSkeleton
 from .graph.bloom import BloomFilter
 from .graph.dependency import DependencyGraph
@@ -34,6 +34,8 @@ from .storage.local import (
     VERSION,
 )
 from .summary.summary_store import SummaryStore
+from .assembly.constraint_store import ConstraintStore
+from .config import SGConfig, load_config
 
 
 # Default ignore patterns (always excluded)
@@ -129,24 +131,27 @@ def _should_ignore(rel_path: str, patterns: List[str]) -> bool:
 def build_index(
     project_root: Path,
     on_progress: Optional[Callable[[str, int, int], None]] = None,
+    config: Optional[SGConfig] = None,
 ) -> IndexStore:
     """Full project build. Creates or replaces the index.
 
     Args:
         project_root: Root directory of the project.
         on_progress: Optional callback(file_path, current, total) for progress.
+        config: Optional configuration override.
 
     Returns:
         Complete IndexStore.
     """
     start_time = time.time()
+    cfg = config or load_config(project_root)
 
     store = create_empty_index()
     files = discover_files(project_root)
     languages_seen: Set[str] = set()
 
-    # Phase 1: Parse all files
-    results: List[FileExtractionResult] = []
+    # Phase 1: Parse all files — cache results for reuse in edge extraction
+    results: Dict[str, FileExtractionResult] = {}
     for i, file_path in enumerate(files):
         if on_progress:
             on_progress(file_path, i + 1, len(files))
@@ -155,7 +160,7 @@ def build_index(
         if result is None:
             continue
 
-        results.append(result)
+        results[file_path] = result
         languages_seen.add(result.language)
 
         # Convert to FileSkeleton and register
@@ -174,44 +179,47 @@ def build_index(
             {sk.fqn: sk.sha256 for sk in file_skel.all_skeletons},
         )
 
-    # Phase 2: Extract edges (needs all FQNs known)
+    # Phase 2: Extract edges using the import resolver (reuses cached results)
     all_fqns = set(store.skeleton_table.keys())
     short_name_index = build_short_name_index(all_fqns)
 
-    for result in results:
-        # Build import map for this file (simplified — maps imported name to FQN)
-        import_map = _build_import_map(result, all_fqns, short_name_index)
+    # Build the import resolver with full project knowledge
+    import_resolver = ImportResolver(all_fqns, set(files), short_name_index)
 
-        # Extract call sites
+    for file_path, result in results.items():
+        # Resolve imports using the proper import resolver
+        import_map = import_resolver.resolve_file_imports(
+            file_path, result.imports
+        )
+
+        # Extract call sites from the CACHED parse result
         func_ranges = [
             (sk.fqn, sk.line_start, sk.line_end)
-            for sk in store.file_skeletons[result.file_path].all_skeletons
+            for sk in store.file_skeletons[file_path].all_skeletons
         ]
 
-        source = (project_root / result.file_path).read_text(
+        source = (project_root / file_path).read_text(
             encoding="utf-8", errors="replace"
         )
         source_bytes = source.encode("utf-8")
 
         from .parser.ast_extractor import _get_parser, detect_language
-        lang = detect_language(result.file_path)
+        lang = detect_language(file_path)
         if lang:
             parser = _get_parser(lang)
             tree = parser.parse(source_bytes)
 
             if lang == "python":
+                from .parser.languages.python import extract_call_sites
                 call_sites = extract_call_sites(
-                    result.file_path, source_bytes, tree, func_ranges,
+                    file_path, source_bytes, tree, func_ranges,
                 )
             elif lang in ("javascript", "js", "typescript", "ts", "tsx"):
                 from .parser.languages.typescript import extract_call_sites_ts
                 call_sites = extract_call_sites_ts(
-                    result.file_path, source_bytes, tree, func_ranges,
+                    file_path, source_bytes, tree, func_ranges,
                 )
             else:
-                # Go, Java, Rust, C++, C#, Ruby, PHP — call_sites
-                # are already extracted by the language-specific parser
-                # in Phase 1 and stored in the FileExtractionResult.
                 call_sites = result.call_sites if hasattr(result, 'call_sites') else []
 
             # Convert to DependencyEdges
@@ -239,6 +247,10 @@ def build_index(
         name = fqn.split("::")[-1] if "::" in fqn else fqn
         store.inverted_index.add(fqn, name, sk.signature)
 
+    # Load constraints
+    store.constraints = ConstraintStore()
+    store.constraints.load(project_root)
+
     # Metadata
     store.meta = BuildMeta(
         version=VERSION,
@@ -259,19 +271,21 @@ def build_index(
 def update_index(
     project_root: Path,
     on_progress: Optional[Callable[[str, int, int], None]] = None,
+    config: Optional[SGConfig] = None,
 ) -> IndexStore:
     """Incremental update. Only re-processes changed files.
 
     Args:
         project_root: Root directory.
         on_progress: Optional progress callback.
+        config: Optional configuration override.
 
     Returns:
         Updated IndexStore.
     """
     store = load_index(project_root)
     if store is None:
-        return build_index(project_root, on_progress)
+        return build_index(project_root, on_progress, config)
 
     start_time = time.time()
     current_files = discover_files(project_root)
@@ -294,8 +308,10 @@ def update_index(
             store.summaries.remove(fqn)
         store.file_skeletons.pop(file_path, None)
 
-    # Process new and modified files
+    # Process new and modified files — cache results for edge phase
+    cached_results: Dict[str, FileExtractionResult] = {}
     files_to_process = new_files + modified_files
+
     for i, file_path in enumerate(files_to_process):
         if on_progress:
             on_progress(file_path, i + 1, len(files_to_process))
@@ -314,6 +330,8 @@ def update_index(
         if result is None:
             continue
 
+        cached_results[file_path] = result  # Cache for edge phase
+
         file_skel = result_to_file_skeleton(result)
         store.file_skeletons[file_path] = file_skel
 
@@ -331,25 +349,18 @@ def update_index(
             {sk.fqn: sk.sha256 for sk in file_skel.all_skeletons},
         )
 
-    # Rebuild edges for changed files (reuse cached results to avoid double-parse)
+    # Rebuild edges for changed files using CACHED results (no re-parse)
     all_fqns = set(store.skeleton_table.keys())
     short_name_index = build_short_name_index(all_fqns)
+    import_resolver = ImportResolver(all_fqns, set(current_files), short_name_index)
 
-    # Cache extraction results from the parse phase above
-    _cached_results = {}
-    for file_path in files_to_process:
+    for file_path, result in cached_results.items():
         if file_path not in store.file_skeletons:
             continue
 
-        # Reuse previous extraction if available, else parse once
-        if file_path not in _cached_results:
-            _cached_results[file_path] = extract_file(file_path, project_root)
-
-        result = _cached_results[file_path]
-        if result is None:
-            continue
-
-        import_map = _build_import_map(result, all_fqns, short_name_index)
+        import_map = import_resolver.resolve_file_imports(
+            file_path, result.imports
+        )
         func_ranges = [
             (sk.fqn, sk.line_start, sk.line_end)
             for sk in store.file_skeletons[file_path].all_skeletons
@@ -366,6 +377,7 @@ def update_index(
             tree = parser.parse(source_bytes)
 
             if lang == "python":
+                from .parser.languages.python import extract_call_sites
                 call_sites = extract_call_sites(
                     file_path, source_bytes, tree, func_ranges,
                 )
@@ -392,6 +404,10 @@ def update_index(
             if "." in short:
                 store.bloom.add(short.split(".")[-1])
 
+    # Reload constraints
+    store.constraints = ConstraintStore()
+    store.constraints.load(project_root)
+
     # Update meta
     store.meta.build_timestamp = time.time()
     store.meta.total_files = len(store.file_skeletons)
@@ -401,37 +417,3 @@ def update_index(
 
     save_index(store, project_root)
     return store
-
-
-def _build_import_map(
-    result: FileExtractionResult,
-    all_fqns: Set[str],
-    short_name_index: dict,
-) -> dict:
-    """Build a mapping of imported names → target FQNs for a file.
-
-    For `from auth.middleware import validate_token`:
-      → {"validate_token": "auth/middleware.py::validate_token"}
-    """
-    import_map = {}
-    for imp in result.imports:
-        for name in imp.names:
-            if name == "*":
-                continue
-
-            alias = imp.aliases.get(name, name)
-
-            # Try to resolve to a known FQN
-            candidates = short_name_index.get(name, [])
-            if len(candidates) == 1:
-                import_map[alias] = candidates[0]
-            elif candidates:
-                # Prefer candidates from the imported module path
-                module_path = imp.module.lstrip(".")
-                matched = [c for c in candidates if module_path in c]
-                if matched:
-                    import_map[alias] = matched[0]
-                else:
-                    import_map[alias] = candidates[0]
-
-    return import_map

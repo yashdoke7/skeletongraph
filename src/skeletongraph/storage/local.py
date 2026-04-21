@@ -30,6 +30,7 @@ from ..graph.inverted_index import InvertedIndex
 from ..parser.skeleton import FileSkeleton, SkeletonCore
 from ..storage.dirty import DirtyTracker
 from ..summary.summary_store import SummaryStore
+from ..assembly.constraint_store import ConstraintStore
 
 
 SKELETONGRAPH_DIR = ".skeletongraph"
@@ -86,6 +87,7 @@ class IndexStore:
     inverted_index: InvertedIndex
     bloom: BloomFilter
     dirty_tracker: DirtyTracker
+    constraints: Optional[ConstraintStore] = None  # Loaded at build time
 
     @property
     def function_count(self) -> int:
@@ -242,6 +244,10 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
     # Load dirty tracker
     dirty_tracker = DirtyTracker.load(sg_dir)
 
+    # Load constraints
+    constraints = ConstraintStore()
+    constraints.load(project_root)
+
     return IndexStore(
         meta=meta,
         file_skeletons=file_skeletons,
@@ -251,6 +257,7 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
         inverted_index=inverted_index,
         bloom=bloom,
         dirty_tracker=dirty_tracker,
+        constraints=constraints,
     )
 
 

@@ -1,6 +1,6 @@
-"""Cursor Integration — SkeletonGraph-Enhanced .cursorrules Template."""
+"""Codex (OpenAI) Integration — SkeletonGraph-Enhanced AGENTS.md Template."""
 
-CURSOR_RULES_TEMPLATE = """# Cursor Rules — SkeletonGraph-Enhanced
+CODEX_AGENTS_TEMPLATE = """# AGENTS.md — SkeletonGraph-Enhanced
 
 ## SkeletonGraph Context Assembly
 
