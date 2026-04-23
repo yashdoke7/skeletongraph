@@ -196,6 +196,28 @@ class ClassSkeleton:
     line_end: int = 0
 
     kind: NodeKind = NodeKind.CLASS
+    signature: str = ""  # Reconstructed on the fly if needed
+
+    def to_core(self) -> SkeletonCore:
+        """Convert to SkeletonCore for indexing and ranking."""
+        if not self.signature:
+            bases_str = f"({', '.join(self.bases)})" if self.bases else ""
+            sig = f"class {self.name}{bases_str}:"
+        else:
+            sig = self.signature
+
+        return SkeletonCore(
+            fqn=self.fqn,
+            file_path=self.file_path,
+            line_start=self.line_start,
+            line_end=self.line_end,
+            signature=sig,
+            kind=self.kind,
+            decorators=tuple(self.decorators),
+            is_exported=True,
+            complexity=1,
+            body_token_estimate=0, # Class header itself is small
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -264,9 +286,10 @@ class FileSkeleton:
 
     @property
     def all_skeletons(self) -> List[SkeletonCore]:
-        """All SkeletonCore entries in this file (top-level funcs + class methods)."""
+        """All SkeletonCore entries in this file (top-level funcs + classes + methods)."""
         result = list(self.functions)
         for cls in self.classes:
+            result.append(cls.to_core())
             result.extend(cls.methods)
         return result
 

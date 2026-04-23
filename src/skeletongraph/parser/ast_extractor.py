@@ -129,6 +129,7 @@ class RawClass:
     decorators: List[str] = field(default_factory=list)
     methods: List[RawFunction] = field(default_factory=list)
     kind: NodeKind = NodeKind.CLASS
+    signature: str = ""
 
 
 @dataclass
@@ -302,6 +303,7 @@ def result_to_file_skeleton(result: FileExtractionResult) -> FileSkeleton:
             line_start=raw_cls.line_start,
             line_end=raw_cls.line_end,
             kind=raw_cls.kind,
+            signature=raw_cls.signature,
         )
 
         # Extract constructor params and instance attrs

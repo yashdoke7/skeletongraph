@@ -277,6 +277,7 @@ def _extract_class(
         bases=bases,
         decorators=decs,
         kind=kind,
+        signature=f"class {name}{node_text(superclasses, source_bytes) if superclasses else ''}:",
     )
 
     # Extract methods

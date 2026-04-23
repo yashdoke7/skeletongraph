@@ -195,6 +195,7 @@ def resolve_context(
 
     elif intent.task_type == TaskType.EXPLAIN:
         for fqn in list(target_fqns):
+            # Dependency chain (what does this call?)
             deps = store.graph.dependency_chain(fqn, max_depth=max_depth + 1)
             for dep_fqn, dist in deps.items():
                 if dep_fqn not in candidates:
@@ -209,6 +210,22 @@ def resolve_context(
                                 target_file,
                             ),
                             reason=f"Dependency for explanation (depth {dist})",
+                        )
+            
+            # Shallow blast radius (who calls this?)
+            affected = store.graph.blast_radius(fqn, max_depth=1)
+            for affected_fqn, dist in affected.items():
+                if affected_fqn not in candidates:
+                    sk = store.skeleton_table.get(affected_fqn)
+                    if sk:
+                        candidates[affected_fqn] = RankedCandidate(
+                            skeleton=sk, tier=Tier.TIER2, distance=dist,
+                            score=ranker.score(
+                                affected_fqn, sk, dist,
+                                f"Explaining callers (depth {dist})",
+                                target_file,
+                            ),
+                            reason=f"Explaining callers (depth {dist})",
                         )
 
     elif intent.task_type == TaskType.CREATE:
@@ -275,9 +292,9 @@ def _resolve_entities(intent: Intent, store: IndexStore) -> Set[str]:
                     if short in intent.function_names or name in intent.function_names:
                         fqns.add(sk.fqn)
             else:
-                # No specific function → include top-level functions only
-                for fn in store.file_skeletons[file_path].functions:
-                    fqns.add(fn.fqn)
+                # No specific function → include all classes and functions in that file
+                for sk in store.file_skeletons[file_path].all_skeletons:
+                    fqns.add(sk.fqn)
 
     # Function name mentions not tied to a file
     if not fqns and intent.function_names:

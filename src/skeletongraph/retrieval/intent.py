@@ -94,10 +94,24 @@ def analyze_intent(prompt: str, known_files: Set[str] = frozenset(),
         if name.lower() in _COMMON_WORDS:
             continue
 
-        # Check if it matches a known FQN suffix
+        # Check if it matches a known file (basename match)
+        found_file = False
+        for kf in known_files:
+            kf_base = kf.split("/")[-1]
+            kf_name = kf_base.split(".")[0]
+            if kf_name == name.lower() or kf_base == name.lower():
+                entities.append(Entity(name, "file_path", confidence=0.85))
+                file_paths.append(kf)
+                found_file = True
+                break
+        
+        if found_file:
+            continue
+
+        # Check if it matches a known FQN suffix (case-insensitive)
         for fqn in known_fqns:
             short = fqn.split("::")[-1] if "::" in fqn else fqn
-            if short == name or short.endswith(f".{name}"):
+            if short.lower() == name.lower() or short.endswith(f".{name}"):
                 entities.append(Entity(name, "function_name", confidence=0.95))
                 function_names.append(name)
                 break
