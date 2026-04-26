@@ -210,10 +210,15 @@ def _classify_task(prompt_lower: str, entities: List[Entity]) -> TaskType:
         return TaskType.EDIT
 
     # Tie-breaking priority: DEBUG > EDIT > CREATE > REFACTOR > EXPLAIN > REVIEW
+    # Lower index in priority list = higher priority
     priority = [TaskType.DEBUG, TaskType.EDIT, TaskType.CREATE,
                 TaskType.REFACTOR, TaskType.EXPLAIN, TaskType.REVIEW]
 
-    best = max(scores, key=lambda t: (scores[t], -priority.index(t)))
+    # Sort by (score DESC, priority_index ASC) — higher score wins, then earlier in list wins
+    best = min(
+        (t for t in TaskType if scores[t] == max_score),
+        key=lambda t: priority.index(t),
+    )
     return best
 
 

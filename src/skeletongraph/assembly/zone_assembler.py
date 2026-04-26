@@ -367,7 +367,12 @@ def _estimate_raw_reading_tokens(
     candidates: List[RankedCandidate],
     project_root: Path,
 ) -> int:
-    """Estimate tokens if the agent had read all involved files fully."""
+    """Estimate tokens if the agent had read all involved files fully.
+
+    Uses a conservative 0.7 multiplier because real agents typically
+    grep first and then read targeted sections, not entire files.
+    This avoids inflating the Token Reduction Ratio (TRR) in evaluations.
+    """
     files_seen: Set[str] = set()
     total = 0
     for c in candidates:
@@ -381,7 +386,8 @@ def _estimate_raw_reading_tokens(
                     total += len(content) // 4
                 except Exception:
                     pass
-    return total
+    # Conservative multiplier: agents don't always read entire files
+    return int(total * 0.7)
 
 
 def _build_attention_map(
@@ -404,12 +410,12 @@ def _build_attention_map(
 
     def _bar(level: str) -> str:
         bars = {
-            "peak":     "██████████",
-            "high":     "████████░░",
-            "moderate": "█████░░░░░",
-            "valley":   "██░░░░░░░░",
+            "peak":     "##########",
+            "high":     "########..",
+            "moderate": "#####.....",
+            "valley":   "##........",
         }
-        return bars.get(level, "░░░░░░░░░░")
+        return bars.get(level, "..........")
 
     return [
         AttentionZone(

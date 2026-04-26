@@ -73,7 +73,8 @@ def resolve_context(
         ResolverResult with ranked candidates and confidence.
     """
     # Step 0: Session-based anaphora resolution
-    if session and _has_anaphora(prompt):
+    # Only trigger when session has previous turns (avoids phantom injection on Turn 1)
+    if session and session.turn_count > 0 and _has_anaphora(prompt):
         last_targets = session.get_last_target_fqns()
         if last_targets:
             # "it", "that", "this" → resolve to last turn's targets
@@ -343,10 +344,28 @@ def _auto_include_constructors(
 
 
 def _has_anaphora(prompt: str) -> bool:
-    """Check if prompt contains anaphoric references (it, that, this, etc.)."""
-    anaphora = {"it", "that", "this", "the same", "those"}
-    words = set(prompt.lower().split())
-    return bool(words & anaphora)
+    """Check if prompt contains anaphoric references (it, that, this, etc.).
+
+    Only matches standalone references, not words like 'with', 'within',
+    'itself'. Checks that the word appears at word boundaries.
+    """
+    import re
+    # Match standalone anaphoric words at word boundaries
+    anaphora_pattern = re.compile(r'\b(it|that|this|those|the same)\b', re.IGNORECASE)
+    matches = anaphora_pattern.findall(prompt)
+    if not matches:
+        return False
+    # Filter out "it" when part of common phrases like "Fix it" at sentence start
+    # Only consider anaphora if the word appears as a subject/reference
+    # Simple heuristic: "it" at the start of a sentence or after "fix/debug/update"
+    prompt_lower = prompt.lower().strip()
+    # If entire prompt is like "fix it" or "debug this", that's anaphora
+    if re.match(r'^(fix|debug|update|refactor|explain|test)\s+(it|this|that)\b', prompt_lower):
+        return True
+    # If "it" appears mid-sentence as a subject, likely anaphora
+    if re.search(r'\b(it|this|that)\s+(is|was|has|should|doesn|does|needs|fails)', prompt_lower):
+        return True
+    return False
 
 
 def _resolve_anaphora(
