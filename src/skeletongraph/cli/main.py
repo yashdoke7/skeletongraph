@@ -809,11 +809,13 @@ def parse_agent_log(log_path: str, agent: str, path: str, prompt: str):
             target_log = found_logs[-1]
         
     try:
-        from ..metrics.log_parser import parse_antigravity_log
+        from ..metrics.log_parser import parse_antigravity_log, parse_copilot_log
         from ..metrics.metrics_logger import MetricsLogger
         
         if agent == "antigravity":
             stats = parse_antigravity_log(target_log)
+        elif agent == "copilot":
+            stats = parse_copilot_log(target_log)
         else:
             console.print(f"[red]Parser for agent '{agent}' not implemented.[/red]")
             return
@@ -822,17 +824,17 @@ def parse_agent_log(log_path: str, agent: str, path: str, prompt: str):
         metrics.log_baseline_estimate(
             prompt=prompt,
             total_tokens=stats["total_native_tokens"],
-            files_read=stats["files_involved"],
-            files_grepped=stats["grep_searches"],
-            duration_ms=stats["duration_ms"]
+            files_read=stats.get("files_viewed", 0),
+            files_grepped=stats.get("grep_searches", 0),
+            duration_ms=stats.get("duration_ms", 0)
         )
         
         table = Table(title="[bold]True Empirical Baseline Generated[/bold]", show_header=False)
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="yellow")
         table.add_row("Agent parsed", agent)
-        table.add_row("Files viewed manually", str(stats["files_viewed"]))
-        table.add_row("Grep searches run", str(stats["grep_searches"]))
+        table.add_row("Files viewed manually", str(stats.get("files_viewed", 0)))
+        table.add_row("Grep searches run", str(stats.get("grep_searches", 0)))
         table.add_row("Total native tokens used", f"{stats['total_native_tokens']:,}")
         console.print(table)
         console.print("[dim][*] Real empirical baseline logged to JSONL.[/dim]")
@@ -997,10 +999,18 @@ def _claude_template() -> str:
 
 
 def _cursor_template() -> str:
-    return f"""# Cursor Rules - SkeletonGraph-Enhanced
+    return f"""
+# REPOSITORY PROTOCOL: SkeletonGraph (MANDATORY)
 
-{_sg_rules_block()}
-"""
+This repository is optimized for AI agents using the SkeletonGraph MCP server. To prevent token overflow and ensure structural integrity, you MUST follow these protocols:
+
+1. **INITIALIZATION**: Your very first action MUST be `skeletongraph:query_context`.
+2. **SEARCH RESTRICTION**: Native `grep_search` and `file_search` are deprecated in this environment. Use `skeletongraph:search_index` for discovery.
+3. **READ RESTRICTION**: Do NOT `view_file` on files larger than 100 lines. Use `skeletongraph:expand_function` to request only the specific logic you need.
+4. **CREDIBILITY**: For every action you take, mention the SkeletonGraph Tier (Zone 2/3) you are using to prove compliance.
+
+Failure to use SkeletonGraph tools will result in context truncation.
+""".strip()
 
 
 def _antigravity_template() -> str:

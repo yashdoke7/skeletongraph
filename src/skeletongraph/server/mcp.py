@@ -92,6 +92,10 @@ def _get_session() -> Session:
             "type": "integer",
             "description": "Model context limit in tokens (default: 128000)",
         },
+        "top_n": {
+            "type": "integer",
+            "description": "Max number of structural skeletons to include (default: 50)",
+        },
     },
 )
 def query_context_tool(params: dict) -> dict:
@@ -102,10 +106,11 @@ def query_context_tool(params: dict) -> dict:
 
     prompt = params["prompt"]
     budget = params.get("budget", 128_000)
+    top_n = params.get("top_n", 50)
 
     t0 = time.perf_counter()
 
-    result = resolve_context(prompt, store, session=session)
+    result = resolve_context(prompt, store, session=session, top_n=top_n)
     assembled = assemble_context(
         result, store, root,
         model_context_limit=budget,
@@ -184,8 +189,27 @@ def expand_function_tool(params: dict) -> dict:
 
     fqn = params["fqn"]
     sk = store.get_skeleton(fqn)
+    
+    # Fuzzy Resolution: If exact FQN fails, try to find the intended function
     if not sk:
-        return {"error": f"Function not found: {fqn}"}
+        # 1. Try stripping leading 'src/' or adding it
+        alt_fqn = f"src/{fqn}" if not fqn.startswith("src/") else fqn.replace("src/", "", 1)
+        sk = store.get_skeleton(alt_fqn)
+        
+        if not sk:
+            # 2. Extract function name and search all files
+            target_name = fqn.split("::")[-1]
+            matches = [
+                s for s in store.skeleton_table.values() 
+                if s.fqn.endswith(f"::{target_name}") or s.fqn.endswith(f".{target_name}")
+            ]
+            if matches:
+                # Pick the closest one (shortest path distance)
+                sk = sorted(matches, key=lambda x: len(x.file_path))[0]
+                fqn = sk.fqn
+
+    if not sk:
+        return {"error": f"Function not found: {fqn}. Did you mean one of: {[s.fqn for s in matches[:3]] if 'matches' in locals() else 'None'}"}
 
     file_path = root / sk.file_path
     if not file_path.exists():
@@ -530,3 +554,28 @@ def start_server(
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()
+def main():
+    """CLI entry point for the MCP server."""
+    import argparse
+    parser = argparse.ArgumentParser(description="SkeletonGraph MCP Server")
+    parser.add_argument("--path", default=".", help="Project root directory")
+    parser.add_argument("--port", type=int, default=3500, help="Management port")
+    args = parser.parse_args()
+
+    project_root = Path(args.path).resolve()
+    from ..storage.local import load_index
+    
+    # Use stderr for initialization logs to avoid polluting stdio (JSON-RPC)
+    print(f"Loading index from {project_root}...", file=sys.stderr)
+    store = load_index(project_root)
+    
+    if store is None:
+        print(f"Error: No index found at {project_root}. Run 'skeletongraph build' first.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Starting SkeletonGraph MCP server...", file=sys.stderr)
+    start_server(store, project_root, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

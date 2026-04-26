@@ -60,6 +60,7 @@ def resolve_context(
     store: IndexStore,
     max_depth: int = 2,
     session: Optional[Session] = None,
+    top_n: int = 50,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
@@ -268,7 +269,7 @@ def resolve_context(
     _auto_include_constructors(candidates, store, ranker, target_file)
 
     # Step 7: Rank and sort using the ranker
-    ranked = ranker.rank_candidates(candidates)
+    ranked = ranker.rank_candidates(candidates, top_n=top_n)
 
     return ResolverResult(
         candidates=ranked,

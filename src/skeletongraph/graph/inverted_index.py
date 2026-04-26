@@ -51,8 +51,8 @@ def tokenize_identifier(name: str) -> List[str]:
 
 def tokenize_text(text: str) -> List[str]:
     """Tokenize free text (summaries, prompts) into searchable terms."""
-    # Split on non-alphanumeric characters
-    raw = re.split(r"[^a-zA-Z0-9_]+", text.lower())
+    # Split on non-alphanumeric characters AND underscores for consistency
+    raw = re.split(r"[^a-zA-Z0-9]+", text.lower().replace("_", " "))
     return [t for t in raw if t and len(t) > 1 and t not in _STOP_WORDS]
 
 
@@ -120,7 +120,7 @@ class InvertedIndex:
         self,
         query: str,
         top_k: int = 10,
-        min_score: float = 0.5,
+        min_score: float = 0.1,
     ) -> List[Tuple[str, float]]:
         """Search the index with a free-text query.
 

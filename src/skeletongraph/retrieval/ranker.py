@@ -122,13 +122,16 @@ class Ranker:
     def rank_candidates(
         self,
         candidates: Dict[str, "RankedCandidate"],
+        top_n: int = 50,
     ) -> List["RankedCandidate"]:
-        """Sort candidates by tier (ascending) then score (descending).
+        """Sort candidates by tier (ascending) then score (descending) and truncate.
 
         Tier 1 always comes first, then Tier 2, then Tier 3.
         Within each tier, higher scores come first.
+        Truncates to top_n total candidates to prevent context bloat.
         """
-        return sorted(
+        sorted_candidates = sorted(
             candidates.values(),
             key=lambda c: (c.tier.value, -c.score),
         )
+        return sorted_candidates[:top_n]
