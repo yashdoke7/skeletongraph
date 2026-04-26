@@ -42,6 +42,10 @@ class QueryMetric:
     session_tokens_saved: int = 0
     files_involved: List[str] = field(default_factory=list)
     duration_ms: int = 0
+    # Information Retrieval (IR) Metrics
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    mrr: Optional[float] = None
 
 
 class MetricsLogger:
@@ -65,6 +69,9 @@ class MetricsLogger:
         session_tokens_saved: int = 0,
         files_involved: Optional[List[str]] = None,
         duration_ms: int = 0,
+        precision: Optional[float] = None,
+        recall: Optional[float] = None,
+        mrr: Optional[float] = None,
     ) -> None:
         """Log a SkeletonGraph query result."""
         metric = QueryMetric(
@@ -81,6 +88,9 @@ class MetricsLogger:
             session_tokens_saved=session_tokens_saved,
             files_involved=files_involved or [],
             duration_ms=duration_ms,
+            precision=precision,
+            recall=recall,
+            mrr=mrr,
         )
         self._append(metric)
 
@@ -137,6 +147,18 @@ class MetricsLogger:
                 "avg_native_estimated": round(avg_native),
                 "avg_reduction_ratio": round(avg_ratio, 1),
             }
+
+            # Calculate IR Metrics if logged (e.g. from eval runs)
+            ir_entries = [e for e in skeleton_entries if e.get("precision") is not None]
+            if ir_entries:
+                avg_prec = sum(e["precision"] for e in ir_entries) / len(ir_entries)
+                avg_rec = sum(e["recall"] for e in ir_entries) / len(ir_entries)
+                avg_mrr = sum(e["mrr"] for e in ir_entries) / len(ir_entries)
+                summary["skeleton"]["ir_metrics"] = {
+                    "avg_precision": round(avg_prec, 2),
+                    "avg_recall": round(avg_rec, 2),
+                    "avg_mrr": round(avg_mrr, 2),
+                }
 
         if baseline_entries:
             avg_baseline = sum(e.get("native_tokens_estimated", 0) for e in baseline_entries) / len(baseline_entries)

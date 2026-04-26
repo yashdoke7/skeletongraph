@@ -39,6 +39,7 @@ class EvalResult:
     missing_fqns: List[str]
     precision: float
     recall: float
+    mrr: float
     success: bool              # All expected FQNs found
 
 
@@ -52,6 +53,7 @@ class EvalSummary:
     avg_tokens: float
     avg_precision: float
     avg_recall: float
+    avg_mrr: float
     results: List[EvalResult]
     duration_seconds: float
 
@@ -147,6 +149,12 @@ def run_evaluation(
         found = [fqn for fqn in case.expected_fqns if fqn in returned_fqns]
         missing = [fqn for fqn in case.expected_fqns if fqn not in returned_fqns]
 
+        mrr = 0.0
+        for i, cand in enumerate(result.candidates):
+            if cand.skeleton.fqn in case.expected_fqns:
+                mrr = 1.0 / (i + 1)
+                break
+
         precision = len(found) / max(len(returned_fqns), 1)
         recall = len(found) / max(len(case.expected_fqns), 1)
         success = len(missing) == 0
@@ -165,6 +173,7 @@ def run_evaluation(
             missing_fqns=missing,
             precision=precision,
             recall=recall,
+            mrr=mrr,
             success=success,
         ))
 
@@ -179,6 +188,7 @@ def run_evaluation(
         avg_tokens=sum(r.token_count for r in results) / max(total, 1),
         avg_precision=sum(r.precision for r in results) / max(total, 1),
         avg_recall=sum(r.recall for r in results) / max(total, 1),
+        avg_mrr=sum(r.mrr for r in results) / max(total, 1),
         results=results,
         duration_seconds=duration,
     )

@@ -579,6 +579,17 @@ def metrics(path: str):
         table.add_row("Avg reduction ratio", f"{sk['avg_reduction_ratio']}x")
         console.print(table)
 
+        # IR stats (Only displayed if eval runs were logged)
+        if "ir_metrics" in sk:
+            ir = sk["ir_metrics"]
+            ir_table = Table(title="Information Retrieval (IR) Benchmarks", show_header=False)
+            ir_table.add_column("Metric", style="cyan")
+            ir_table.add_column("Value", style="magenta")
+            ir_table.add_row("Avg Precision", f"{ir['avg_precision']:.2f}")
+            ir_table.add_row("Avg Recall", f"{ir['avg_recall']:.2f}")
+            ir_table.add_row("Mean Reciprocal Rank (MRR)", f"{ir['avg_mrr']:.2f}")
+            console.print(ir_table)
+
     # Baseline stats
     if "baseline" in summary:
         bl = summary["baseline"]
@@ -608,12 +619,91 @@ def run_eval(path: str):
     console.print("[bold]> Running SkeletonGraph evaluation[/bold]")
     try:
         from ..eval_runner import run_evaluation
+        from ..metrics.metrics_logger import MetricsLogger
+        
         results = run_evaluation(project_root)
-        console.print(f"[green]Evaluation complete.[/green] See results above.")
+        metrics = MetricsLogger(project_root)
+        
+        # Log all evaluative queries silently to the JSONL database
+        for r in results.results:
+            metrics.log_skeleton_query(
+                prompt=r.prompt,
+                sg_tokens=r.token_count,
+                native_tokens_estimated=0, # Eval cases don't simulate baseline natively
+                reduction_ratio=r.reduction_ratio,
+                confidence=r.confidence,
+                entities_matched=r.found_fqns,
+                zone_breakdown={},
+                precision=r.precision,
+                recall=r.recall,
+                mrr=r.mrr,
+            )
+
+        # Print the formal evaluation dashboard output
+        console.print(f"\n[bold green]Evaluation Complete ({results.duration_seconds:.1f}s)[/bold green]")
+        table = Table(show_header=False)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="yellow")
+        table.add_row("Total Cases", str(results.total_cases))
+        table.add_row("Success Rate", f"{results.success_rate * 100:.1f}%")
+        table.add_row("Avg Node Precision", f"{results.avg_precision:.2f}")
+        table.add_row("Avg Node Recall", f"{results.avg_recall:.2f}")
+        table.add_row("Mean Reciprocal Rank (MRR)", f"{results.avg_mrr:.2f}")
+        table.add_row("Avg Reduction Ratio", f"{results.avg_reduction_ratio:.1f}x")
+        console.print(table)
+        console.print("[dim][*] IR Metrics seamlessly logged to background database.[/dim]")
+
     except ImportError:
         console.print("[yellow]Evaluation module not found. Ensure eval/ is set up.[/yellow]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
+
+
+@app.command(name="parse-agent-log")
+@click.argument("log_path")
+@click.option("--agent", "-a", default="antigravity", help="Agent standard to parse (e.g. antigravity)")
+@click.option("--path", "-p", default=".", help="Project root directory for logging")
+@click.option("--prompt", default="Manual Baseline Log", help="Original task prompt")
+def parse_agent_log(log_path: str, agent: str, path: str, prompt: str):
+    """Parse an agent's true conversation log to dump exact 'empirical baseline' metrics."""
+    project_root = Path(path).resolve()
+    target_log = Path(log_path)
+    
+    if not target_log.exists():
+        console.print(f"[red]Could not find log file at {log_path}[/red]")
+        return
+        
+    try:
+        from ..metrics.log_parser import parse_antigravity_log
+        from ..metrics.metrics_logger import MetricsLogger
+        
+        if agent == "antigravity":
+            stats = parse_antigravity_log(target_log)
+        else:
+            console.print(f"[red]Parser for agent '{agent}' not implemented.[/red]")
+            return
+            
+        metrics = MetricsLogger(project_root)
+        metrics.log_baseline_estimate(
+            prompt=prompt,
+            total_tokens=stats["total_native_tokens"],
+            files_read=stats["files_involved"],
+            files_grepped=stats["grep_searches"],
+            duration_ms=stats["duration_ms"]
+        )
+        
+        table = Table(title="[bold]True Empirical Baseline Generated[/bold]", show_header=False)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="yellow")
+        table.add_row("Agent parsed", agent)
+        table.add_row("Files viewed manually", str(stats["files_viewed"]))
+        table.add_row("Grep searches run", str(stats["grep_searches"]))
+        table.add_row("Total native tokens used", f"{stats['total_native_tokens']:,}")
+        console.print(table)
+        console.print("[dim][*] Real empirical baseline logged to JSONL.[/dim]")
+        
+    except Exception as e:
+        console.print(f"[red]Failed to parse log: {e}[/red]")
 
 
 @app.command()
