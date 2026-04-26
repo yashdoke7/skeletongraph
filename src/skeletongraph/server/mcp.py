@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -28,6 +29,7 @@ from ..retrieval.resolver import resolve_context
 from ..assembly.zone_assembler import assemble_context
 from ..retrieval.session import Session
 from ..config import SGConfig, load_config
+from ..metrics.metrics_logger import MetricsLogger
 
 
 # ── Tool Registry ──────────────────────────────────────────────────────
@@ -58,6 +60,7 @@ _server_state: Dict[str, Any] = {
     "project_root": None,
     "session": None,
     "config": None,
+    "metrics": None,
 }
 
 
@@ -95,9 +98,12 @@ def query_context_tool(params: dict) -> dict:
     store = _get_store()
     root = _get_root()
     session = _get_session()
+    metrics: MetricsLogger = _server_state["metrics"]
 
     prompt = params["prompt"]
     budget = params.get("budget", 128_000)
+
+    t0 = time.perf_counter()
 
     result = resolve_context(prompt, store, session=session)
     assembled = assemble_context(
@@ -106,8 +112,27 @@ def query_context_tool(params: dict) -> dict:
         session=session,
     )
 
+    duration_ms = int((time.perf_counter() - t0) * 1000)
+
     # Save session after each query
     session.save(root)
+
+    # Log metrics
+    if metrics:
+        files_involved = list({c.skeleton.file_path for c in result.candidates})
+        metrics.log_skeleton_query(
+            prompt=prompt,
+            sg_tokens=assembled.token_count,
+            native_tokens_estimated=int(assembled.reduction_ratio * assembled.token_count) if assembled.reduction_ratio > 0 else 0,
+            reduction_ratio=assembled.reduction_ratio,
+            confidence=assembled.confidence,
+            entities_matched=assembled.entities_matched,
+            zone_breakdown=assembled.zone_breakdown,
+            session_dedup_count=assembled.session_dedup_count,
+            session_tokens_saved=assembled.session_tokens_saved,
+            files_involved=files_involved,
+            duration_ms=duration_ms,
+        )
 
     response = {
         "context": assembled.text,
@@ -488,6 +513,7 @@ def start_server(
     _server_state["project_root"] = project_root
     _server_state["session"] = Session.load(project_root)
     _server_state["config"] = load_config(project_root)
+    _server_state["metrics"] = MetricsLogger(project_root)
 
     # Stdio mode: read line-delimited JSON-RPC
     for line in sys.stdin:

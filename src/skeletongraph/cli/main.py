@@ -107,7 +107,7 @@ def update(path: str):
     elapsed = time.time() - start
 
     console.print(
-        f"[green]✓[/green] Updated in {elapsed:.2f}s — "
+        f"[green][OK][/green] Updated in {elapsed:.2f}s - "
         f"{store.meta.total_functions} functions, "
         f"{store.meta.total_edges} edges"
     )
@@ -134,8 +134,9 @@ def status(path: str):
 @click.argument("prompt")
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--budget", "-b", default=128000, help="Model context limit")
+@click.option("--out", "-o", help="Save context to file")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
-def query(prompt: str, path: str, budget: int, verbose: bool):
+def query(prompt: str, path: str, budget: int, out: str | None, verbose: bool):
     """Query the index with a natural language prompt."""
     project_root = Path(path).resolve()
 
@@ -143,6 +144,7 @@ def query(prompt: str, path: str, budget: int, verbose: bool):
     from ..retrieval.resolver import resolve_context
     from ..assembly.zone_assembler import assemble_context
     from ..retrieval.session import Session
+    from ..metrics.metrics_logger import MetricsLogger
 
     store = load_index(project_root)
     if store is None:
@@ -151,6 +153,9 @@ def query(prompt: str, path: str, budget: int, verbose: bool):
 
     # Load session for cross-turn memory
     session = Session.load(project_root)
+    metrics = MetricsLogger(project_root)
+
+    t0 = time.time()
 
     # Resolve and assemble
     result = resolve_context(prompt, store, session=session)
@@ -159,8 +164,26 @@ def query(prompt: str, path: str, budget: int, verbose: bool):
         model_context_limit=budget, session=session,
     )
 
+    duration_ms = int((time.time() - t0) * 1000)
+
     # Save session
     session.save(project_root)
+
+    # Log metrics
+    files_involved = list({c.skeleton.file_path for c in result.candidates})
+    metrics.log_skeleton_query(
+        prompt=prompt,
+        sg_tokens=assembled.token_count,
+        native_tokens_estimated=int(assembled.reduction_ratio * assembled.token_count) if assembled.reduction_ratio > 0 else 0,
+        reduction_ratio=assembled.reduction_ratio,
+        confidence=assembled.confidence,
+        entities_matched=assembled.entities_matched,
+        zone_breakdown=assembled.zone_breakdown,
+        session_dedup_count=assembled.session_dedup_count,
+        session_tokens_saved=assembled.session_tokens_saved,
+        files_involved=files_involved,
+        duration_ms=duration_ms,
+    )
 
     # Output
     if verbose:
@@ -178,7 +201,7 @@ def query(prompt: str, path: str, budget: int, verbose: bool):
             table.add_row(zone, str(tokens))
         table.add_row("Total", str(assembled.token_count), style="bold")
         if assembled.reduction_ratio > 0:
-            table.add_row("Reduction", f"{assembled.reduction_ratio}×")
+            table.add_row("Reduction", f"{assembled.reduction_ratio}x")
         console.print(table)
 
         # Attention heatmap
@@ -202,10 +225,17 @@ def query(prompt: str, path: str, budget: int, verbose: bool):
             )
 
         if assembled.warning:
-            console.print(f"\n[yellow]⚠ {assembled.warning}[/yellow]")
+            console.print(f"\n[yellow][WARNING] {assembled.warning}[/yellow]")
 
-    console.print(f"\n[dim]--- Assembled Context ({assembled.token_count} tokens) ---[/dim]\n")
-    console.print(assembled.text)
+    if out:
+        out_path = Path(out).resolve()
+        out_path.write_text(assembled.text, encoding="utf-8")
+        console.print(f"\n[green][OK][/green] Saved assembled context to {out_path}")
+    else:
+        console.print(f"\n[dim]--- Assembled Context ({assembled.token_count} tokens) ---[/dim]\n")
+        console.print(assembled.text)
+
+    console.print("\n[dim][*] Metrics logged to .skeletongraph/metrics/query_log.jsonl[/dim]")
 
 
 @app.command()
@@ -263,17 +293,22 @@ def summarize(path: str, model: str, force: bool):
 @click.option("--port", default=3500, help="Server port")
 def serve(path: str, port: int):
     """Start the MCP server for IDE integration."""
+    import sys as _sys
+    from rich.console import Console as _Console
+    stderr_console = _Console(stderr=True)
+
     project_root = Path(path).resolve()
 
     from ..storage.local import load_index
 
     store = load_index(project_root)
     if store is None:
-        console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
-        return
+        stderr_console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
+        _sys.exit(1)
 
-    console.print(f"[bold]> Starting MCP server on port {port}[/bold]")
-    console.print(f"  Index: {store.status_summary()}")
+    stderr_console.print(f"[bold]> Starting MCP server[/bold]")
+    stderr_console.print(f"  Index: {store.status_summary()}")
+    stderr_console.print(f"  Metrics: .skeletongraph/metrics/query_log.jsonl")
 
     from ..server.mcp import start_server
     start_server(store, project_root, port=port)
@@ -303,7 +338,7 @@ def install(platform: str, path: str):
     # Also write the MCP config
     _write_mcp_config(project_root)
     console.print(
-        f"\n[bold green]✓ Configuration complete.[/bold green] "
+        f"\n[bold green][OK] Configuration complete.[/bold green] "
         f"Restart your editor to activate SkeletonGraph."
     )
 
@@ -343,7 +378,7 @@ def stats(path: str):
         table.add_row("Tokens saved", f"{s.total_saved_tokens:,}")
         table.add_row(
             "Reduction ratio",
-            f"{s.reduction_ratio:.1f}×" if s.reduction_ratio > 0 else "N/A",
+            f"{s.reduction_ratio:.1f}x" if s.reduction_ratio > 0 else "N/A",
         )
         table.add_row(
             "Estimated cost saved",
@@ -407,6 +442,163 @@ def review(path: str, target: str, verbose: bool):
             console.print(f"  [{fn.change_type}] {fn.fqn}")
 
 
+@app.command()
+@click.argument("prompt")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
+def baseline(prompt: str, path: str, verbose: bool):
+    """Simulate a baseline agent's file-reading cost for a prompt.
+
+    Estimates what a naive agent (no SkeletonGraph) would need to read
+    to answer the same prompt using grep + full file reading. Logs the
+    result to the same metrics file for comparison.
+    """
+    project_root = Path(path).resolve()
+
+    from ..build import discover_files
+    from ..metrics.metrics_logger import MetricsLogger
+    import re
+    import time
+
+    metrics = MetricsLogger(project_root)
+    t0 = time.time()
+
+    # Extract keywords from prompt (same logic an agent would use to grep)
+    words = set(re.findall(r'\b[a-zA-Z_]\w{2,}\b', prompt))
+    stop_words = {
+        "the", "this", "that", "with", "from", "into", "when", "then",
+        "fix", "add", "create", "ensure", "check", "use", "using",
+        "not", "and", "for", "are", "was", "has", "have", "should",
+        "global", "config", "logic", "init", "code", "file", "function",
+    }
+    keywords = {w.lower() for w in words} - stop_words
+
+    if verbose:
+        console.print(f"[bold]> Simulating baseline for:[/bold] {prompt}")
+        console.print(f"  Keywords: {', '.join(sorted(keywords))}")
+
+    # Phase 1: Grep - scan all files for keyword matches
+    all_files = discover_files(project_root)
+    matched_files = []
+    total_grep_tokens = 0
+
+    for file_path in all_files:
+        full_path = project_root / file_path
+        if not full_path.exists():
+            continue
+        try:
+            content = full_path.read_text(encoding="utf-8", errors="replace")
+            content_lower = content.lower()
+            if any(kw in content_lower for kw in keywords):
+                matched_files.append(file_path)
+                # Grep results cost: ~50 tokens per matching file (line snippets)
+                total_grep_tokens += 50
+        except Exception:
+            continue
+
+    # Phase 2: File reading - agent reads matched files fully
+    total_read_tokens = 0
+    files_read = []
+
+    for file_path in matched_files:
+        full_path = project_root / file_path
+        try:
+            content = full_path.read_text(encoding="utf-8", errors="replace")
+            file_tokens = len(content) // 4
+            total_read_tokens += file_tokens
+            files_read.append(file_path)
+        except Exception:
+            continue
+
+    total_tokens = total_grep_tokens + total_read_tokens
+    duration_ms = int((time.time() - t0) * 1000)
+
+    # Log to metrics
+    metrics.log_baseline_estimate(
+        prompt=prompt,
+        total_tokens=total_tokens,
+        files_read=files_read,
+        files_grepped=len(all_files),
+        duration_ms=duration_ms,
+    )
+
+    # Output
+    table = Table(title="Baseline Estimation", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Files scanned (grep)", str(len(all_files)))
+    table.add_row("Files matched", str(len(matched_files)))
+    table.add_row("Grep tokens", f"{total_grep_tokens:,}")
+    table.add_row("File read tokens", f"{total_read_tokens:,}")
+    table.add_row("Total native tokens", f"{total_tokens:,}", style="bold")
+    table.add_row("Duration", f"{duration_ms}ms")
+    console.print(table)
+
+    if verbose:
+        console.print("\n[bold]Files that would be read:[/bold]")
+        for fp in files_read[:20]:
+            console.print(f"  {fp}")
+        if len(files_read) > 20:
+            console.print(f"  ... and {len(files_read) - 20} more")
+
+    console.print("\n[dim][*] Baseline logged to .skeletongraph/metrics/query_log.jsonl[/dim]")
+
+
+@app.command()
+@click.option("--path", "-p", default=".", help="Project root directory")
+def metrics(path: str):
+    """Show evaluation comparison between skeleton and baseline runs."""
+    project_root = Path(path).resolve()
+
+    from ..metrics.metrics_logger import MetricsLogger
+    logger = MetricsLogger(project_root)
+    summary = logger.get_comparison_summary()
+
+    if "error" in summary:
+        console.print(f"[yellow]{summary['error']}[/yellow]")
+        return
+
+    console.print(Panel("[bold]SkeletonGraph Evaluation Metrics[/bold]", style="cyan"))
+
+    # Overview
+    table = Table(title="Query Counts", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Skeleton queries", str(summary.get("total_skeleton_queries", 0)))
+    table.add_row("Baseline estimates", str(summary.get("total_baseline_queries", 0)))
+    console.print(table)
+
+    # Skeleton stats
+    if "skeleton" in summary:
+        sk = summary["skeleton"]
+        table = Table(title="SkeletonGraph Performance", show_header=False)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Avg SG tokens", f"{sk['avg_sg_tokens']:,}")
+        table.add_row("Avg native estimated", f"{sk['avg_native_estimated']:,}")
+        table.add_row("Avg reduction ratio", f"{sk['avg_reduction_ratio']}x")
+        console.print(table)
+
+    # Baseline stats
+    if "baseline" in summary:
+        bl = summary["baseline"]
+        table = Table(title="Baseline Performance", show_header=False)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Avg native tokens", f"{bl['avg_tokens']:,}")
+        console.print(table)
+
+    # Cross comparison
+    if "cross_comparison" in summary:
+        cc = summary["cross_comparison"]
+        table = Table(title="[+] Head-to-Head Comparison", show_header=False)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="bold green")
+        table.add_row("Actual reduction ratio", f"{cc['actual_reduction_ratio']}x")
+        table.add_row("Tokens saved per query", f"{cc['tokens_saved_per_query']:,}")
+        console.print(table)
+
+
 @app.command(name="eval")
 @click.option("--path", "-p", default=".", help="Project root directory")
 def run_eval(path: str):
@@ -433,7 +625,7 @@ def watch(path: str):
     start_daemon(project_root)
 
 
-# ── Helper functions ───────────────────────────────────────────────────
+# -- Helper functions ---------------------------------------------------
 
 def _detect_platforms(project_root: Path) -> list:
     """Auto-detect which AI coding tools are configured."""
@@ -497,7 +689,7 @@ def _install_platform(platform: str, project_root: Path):
         content = existing.rstrip() + "\n\n" + content
 
     target.write_text(content, encoding="utf-8")
-    console.print(f"  [green]✓[/green] Installed SkeletonGraph rules to {filename}")
+    console.print(f"  [green][OK][/green] Installed SkeletonGraph rules to {filename}")
 
 
 def _write_mcp_config(project_root: Path):
@@ -514,7 +706,7 @@ def _write_mcp_config(project_root: Path):
     mcp_file = project_root / "mcp.json"
     if not mcp_file.exists():
         mcp_file.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
-        console.print(f"  [green]✓[/green] Created mcp.json")
+        console.print(f"  [green][OK][/green] Created mcp.json")
 
 
 def _sg_rules_block() -> str:
@@ -531,60 +723,60 @@ This project uses SkeletonGraph for intelligent, token-minimal context assembly.
 3. **RESPECT** the constraints in Zone 1 of every context response.
 4. If context confidence is LOW, use `search_index` to find the right entry point.
 5. Use `expand_function` for page-fault expansion when you need a specific function body.
-6. Use `review_delta` when reviewing code changes — it computes blast radius automatically.
+6. Use `review_delta` when reviewing code changes - it computes blast radius automatically.
 
 ### What SkeletonGraph provides:
-- Zone 1: Project constraints (primacy position — always read these first)
-- Zone 2: Target code bodies (near prompt — strongest attention)
+- Zone 1: Project constraints (primacy position - always read these first)
+- Zone 2: Target code bodies (near prompt - strongest attention)
 - Zone 3: Structural context (compressed neighbors and dependencies)
 - Zone 4: Your current task (recency position)
 """.strip()
 
 
 def _claude_template() -> str:
-    return f"""# CLAUDE.md — SkeletonGraph-Enhanced Rules
+    return f"""# CLAUDE.md - SkeletonGraph-Enhanced Rules
 
 {_sg_rules_block()}
 """
 
 
 def _cursor_template() -> str:
-    return f"""# Cursor Rules — SkeletonGraph-Enhanced
+    return f"""# Cursor Rules - SkeletonGraph-Enhanced
 
 {_sg_rules_block()}
 """
 
 
 def _antigravity_template() -> str:
-    return f"""# Antigravity Rules — SkeletonGraph-Enhanced
+    return f"""# Antigravity Rules - SkeletonGraph-Enhanced
 
 {_sg_rules_block()}
 """
 
 
 def _codex_template() -> str:
-    return f"""# AGENTS.md — SkeletonGraph-Enhanced
+    return f"""# AGENTS.md - SkeletonGraph-Enhanced
 
 {_sg_rules_block()}
 """
 
 
 def _windsurf_template() -> str:
-    return f"""# Windsurf Rules — SkeletonGraph-Enhanced
+    return f"""# Windsurf Rules - SkeletonGraph-Enhanced
 
 {_sg_rules_block()}
 """
 
 
 def _kiro_template() -> str:
-    return f"""# Kiro Rules — SkeletonGraph-Enhanced
+    return f"""# Kiro Rules - SkeletonGraph-Enhanced
 
 {_sg_rules_block()}
 """
 
 
 def _opencode_template() -> str:
-    return f"""# OpenCode Rules — SkeletonGraph-Enhanced
+    return f"""# OpenCode Rules - SkeletonGraph-Enhanced
 
 {_sg_rules_block()}
 """
