@@ -106,11 +106,13 @@ def resolve_context(
 
         # Fallback 2: Keyword search on Inverted Index (if BM25 fails or no summaries)
         if not target_fqns:
-            search_results = store.inverted_index.search(prompt, top_k=5)
+            # Discovery Phase: Search more broadly if we don't have direct entity matches.
+            # Increase top_k to 15 to ensure better coverage for cross-file configs.
+            search_results = store.inverted_index.search(prompt, top_k=15)
             if search_results:
                 target_fqns = {fqn for fqn, _ in search_results}
-                confidence = "MEDIUM"
-                confidence_reason = "Matched via keyword search"
+                confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
+                confidence_reason = f"Matched {len(search_results)} entities via discovery keyword search"
             else:
                 confidence = "LOW"
                 confidence_reason = "No entity, semantic, or keyword matches found"

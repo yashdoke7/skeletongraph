@@ -610,6 +610,107 @@ def metrics(path: str):
         console.print(table)
 
 
+@app.command(name="hotspots")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--limit", "-n", default=10, help="Number of hotspots to show")
+def find_hotspots(path: str, limit: int):
+    """Identify 'Load-Bearing' files in the project using graph centrality."""
+    project_root = Path(path).resolve()
+    from ..build import build_index
+    from ..analytics.centrality import get_top_hotspots
+    
+    console.print("[bold yellow]> Analysing project topology hotspots...[/bold yellow]")
+    
+    with console.status("[dim]Computing PageRank over dependency graph...[/dim]"):
+        store = build_index(project_root)
+        hotspots = get_top_hotspots(store, top_n=limit)
+    
+    if not hotspots:
+        console.print("[yellow]Graph is too small or has no edges to compute centrality.[/yellow]")
+        return
+        
+    table = Table(title=f"Architectural Hotspots (Top {limit})")
+    table.add_column("Rank", style="dim", justify="right")
+    table.add_column("File Path", style="cyan")
+    table.add_column("Score", style="magenta", justify="right")
+    
+    for i, (file_path, score) in enumerate(hotspots):
+        display_score = f"{score * 100:.2f}"
+        table.add_row(str(i+1), file_path, display_score)
+        
+    console.print(table)
+    console.print("[dim][*] High scores indicate 'Load-Bearing' files with heavy downstream impact.[/dim]")
+
+
+@app.command(name="visualize")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--format", "-f", "out_format", default="mermaid", type=click.Choice(["mermaid", "json"]))
+def visualize_graph(path: str, out_format: str):
+    """Generate a visual architecture map (Mermaid) for Vision models."""
+    project_root = Path(path).resolve()
+    from ..build import build_index
+    from ..analytics.visualizer import generate_mermaid_flowchart
+    import pyperclip
+    
+    console.print("[bold magenta]> Rendering multi-modal architecture map...[/bold magenta]")
+    
+    with console.status("[dim]Assembling top-level dependency tree...[/dim]"):
+        store = build_index(project_root)
+        diagram = generate_mermaid_flowchart(store)
+    
+    if not diagram or diagram == "graph TD":
+        console.print("[yellow]Project has no cross-file dependencies to visualize.[/yellow]")
+        return
+        
+    pyperclip.copy(diagram)
+    
+    table = Table(title="Architecture Map Generated", show_header=False)
+    table.add_column("Property", style="magenta")
+    table.add_column("Status", style="green")
+    table.add_row("Engine", "Mermaid.js Flowchart")
+    table.add_row("Status", "Copied to Clipboard")
+    console.print(table)
+    
+    console.print("\n[bold green][DONE][/bold green] Mermaid diagram is on your clipboard!")
+    console.print("[dim]Next Step: Paste this into ChatGPT/Claude and ask: 'Here is my repository map. Where is the bug?'[/dim]")
+    
+    # Context summary
+    console.print(f"[dim]Nodes: {len(store.skeleton_table)} | Edges: {store.meta.total_edges}[/dim]")
+
+
+@app.command(name="pack")
+@click.argument("prompt")
+@click.option("--path", "-p", default=".", help="Project root directory")
+def pack_context(prompt: str, path: str):
+    """Assemble optimized context for a prompt and copy to clipboard (for Web UI)."""
+    project_root = Path(path).resolve()
+    from ..build import build_index
+    from ..retrieval.resolver import resolve_context
+    from ..assembly.zone_assembler import assemble_context
+    import pyperclip
+
+    console.print(f"[bold cyan]> Assembling context for: \"{prompt}\"[/bold cyan]")
+    
+    with console.status("[dim]Building context map...[/dim]"):
+        store = build_index(project_root)
+        result = resolve_context(prompt, store)
+        assembled = assemble_context(result, store, project_root)
+    
+    # Payload for clipboard
+    pyperclip.copy(assembled.text)
+    
+    table = Table(title="Context Packed Successfully", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Total tokens", f"{assembled.token_count:,}")
+    table.add_row("Entities caught", str(len(assembled.entities_matched)))
+    table.add_row("Reduction ratio", f"{assembled.reduction_ratio:.1f}x")
+    console.print(table)
+    
+    console.print("\n[bold green][DONE][/bold green] Optimized context copied to clipboard!")
+    console.print("[dim]Paste this into ChatGPT/Claude for a token-minimal, high-precision session.[/dim]")
+
+
 @app.command(name="eval")
 @click.option("--path", "-p", default=".", help="Project root directory")
 def run_eval(path: str):
@@ -670,8 +771,42 @@ def parse_agent_log(log_path: str, agent: str, path: str, prompt: str):
     target_log = Path(log_path)
     
     if not target_log.exists():
-        console.print(f"[red]Could not find log file at {log_path}[/red]")
-        return
+        console.print(f"[yellow]! Initial path failed: {target_log}[/yellow]", highlight=False)
+        console.print("[dim]Attempting smart search for conversation logs...[/dim]")
+        
+        # Smart search: look for log files in common Antigravity locations
+        home = Path.home()
+        possible_roots = [
+            home / ".gemini" / "antigravity" / "brain",
+            Path("C:/Users/ASUS/.gemini/antigravity/brain"), # Explicit fallback for user's machine
+        ]
+        
+        found_logs = []
+        for root in possible_roots:
+            if root.exists():
+                # Strictly search for overview.txt or explicit exported logs
+                found_logs.extend(list(root.rglob("overview.txt")))
+        
+        if not found_logs:
+            console.print("[red]Critical: Could not find any Antigravity conversation logs automatically.[/red]")
+            console.print("[dim]Antigravity may no longer save txt logs automatically in this version.[/dim]")
+            console.print("[dim]Please explicitly click 'Export Chat' in the IDE, save as a .txt file, and provide that path.[/dim]")
+            return
+            
+        # Try to find one that matches the ID in the provided path if possible
+        id_match = None
+        for fl in found_logs:
+            if any(part in str(fl) for part in target_log.parts):
+                id_match = fl
+                break
+        
+        if id_match:
+            console.print(f"[green]Found matching log at:[/green] {id_match}")
+            target_log = id_match
+        else:
+            console.print(f"[yellow]Found {len(found_logs)} logs, but none match the provided ID path.[/yellow]")
+            console.print(f"Latest log found: {found_logs[-1]}")
+            target_log = found_logs[-1]
         
     try:
         from ..metrics.log_parser import parse_antigravity_log
@@ -704,6 +839,32 @@ def parse_agent_log(log_path: str, agent: str, path: str, prompt: str):
         
     except Exception as e:
         console.print(f"[red]Failed to parse log: {e}[/red]")
+
+
+@app.command(name="log-manual")
+@click.option("--agent", "-a", required=True, help="Agent name (e.g. cursor, windsurf)")
+@click.option("--tokens", "-t", type=int, required=True, help="Raw token count observed in UI")
+@click.option("--prompt", "-m", default="Manual Entry", help="Task prompt for this run")
+@click.option("--path", "-p", default=".", help="Project root directory")
+def log_manual(agent: str, tokens: int, prompt: str, path: str):
+    """Manually log a token count from an agent's UI for the dashboard."""
+    project_root = Path(path).resolve()
+    from ..metrics.metrics_logger import MetricsLogger
+    
+    try:
+        metrics = MetricsLogger(project_root)
+        metrics.log_baseline_estimate(
+            prompt=prompt,
+            total_tokens=tokens,
+            files_read=0,      # Unknown in manual entry
+            files_grepped=0,   # Unknown in manual entry
+            duration_ms=0      # Unknown in manual entry
+        )
+        
+        console.print(f"[green][OK][/green] Manually logged [bold]{tokens:,}[/bold] tokens for [bold]{agent}[/bold].")
+        console.print("[dim][*] You can now see this in 'skeletongraph metrics'[/dim]")
+    except Exception as e:
+        console.print(f"[red]Error logging manual entry: {e}[/red]")
 
 
 @app.command()
@@ -783,20 +944,31 @@ def _install_platform(platform: str, project_root: Path):
 
 
 def _write_mcp_config(project_root: Path):
-    """Write MCP server configuration."""
-    mcp_config = {
-        "mcpServers": {
-            "skeletongraph": {
-                "command": "skeletongraph",
-                "args": ["serve", "--path", str(project_root)],
-            }
-        }
+    """Write MCP server configuration to local and global (Antigravity) configs."""
+    mcp_exe = "C:\\Users\\ASUS\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\skeletongraph.exe"
+    
+    server_config = {
+        "command": mcp_exe,
+        "args": ["serve", "--path", str(project_root)],
     }
 
-    mcp_file = project_root / "mcp.json"
-    if not mcp_file.exists():
-        mcp_file.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
-        console.print(f"  [green][OK][/green] Created mcp.json")
+    # 1. Write local mcp.json
+    local_config = {"mcpServers": {"skeletongraph": server_config}}
+    (project_root / "mcp.json").write_text(json.dumps(local_config, indent=2), encoding="utf-8")
+    console.print(f"  [green][OK][/green] Updated local mcp.json")
+
+    # 2. Write global Antigravity config
+    ag_config_path = Path("C:/Users/ASUS/.gemini/antigravity/mcp_config.json")
+    if ag_config_path.exists():
+        try:
+            ag_data = json.loads(ag_config_path.read_text(encoding="utf-8"))
+            if "mcpServers" not in ag_data:
+                ag_data["mcpServers"] = {}
+            ag_data["mcpServers"]["skeletongraph"] = server_config
+            ag_config_path.write_text(json.dumps(ag_data, indent=2), encoding="utf-8")
+            console.print(f"  [green][OK][/green] Updated global Antigravity MCP config.")
+        except Exception as e:
+            console.print(f"[red]Failed to update Antigravity config: {e}[/red]")
 
 
 def _sg_rules_block() -> str:
@@ -804,22 +976,16 @@ def _sg_rules_block() -> str:
     return """
 ## SkeletonGraph Context Assembly
 
-This project uses SkeletonGraph for intelligent, token-minimal context assembly.
+This project restricts native searching tools. You MUST use SkeletonGraph's MCP tools for ALL codebase discovery.
 
-### Rules:
-1. **ALWAYS** use the `query_context` MCP tool before reading files manually.
-   It returns attention-optimized context with constraints, target code, and structure.
-2. **NEVER** read more than 3 files manually if SkeletonGraph is available.
-3. **RESPECT** the constraints in Zone 1 of every context response.
-4. If context confidence is LOW, use `search_index` to find the right entry point.
-5. Use `expand_function` for page-fault expansion when you need a specific function body.
-6. Use `review_delta` when reviewing code changes - it computes blast radius automatically.
+### CRITICAL RULES:
+1. **DO NOT USE** `grep_search` or manual `view_file` commands unless explicitly ordered.
+2. **USE `query_context`** as your VERY FIRST action to get an optimized structural map.
+3. **USE `search_index`** instead of grep if you need to find where a variable, constant, or function is used.
+4. **USE `expand_function`** if you need to read the full body of a function you found in the graph. Do NOT read the entire file just for one function.
+5. **RESPECT** the constraints listed in Zone 1 of any context response.
 
-### What SkeletonGraph provides:
-- Zone 1: Project constraints (primacy position - always read these first)
-- Zone 2: Target code bodies (near prompt - strongest attention)
-- Zone 3: Structural context (compressed neighbors and dependencies)
-- Zone 4: Your current task (recency position)
+If you violate Rule 1, you will damage the evaluation telemetry. ONLY use the `skeletongraph` MCP tools provided.
 """.strip()
 
 

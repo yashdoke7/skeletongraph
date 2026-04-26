@@ -247,6 +247,20 @@ def build_index(
         name = fqn.split("::")[-1] if "::" in fqn else fqn
         store.inverted_index.add(fqn, name, sk.signature)
 
+    # Navigational indexing: Include constants and class attributes as beacons
+    for file_path, file_sk in store.file_skeletons.items():
+        # Index file-level constants
+        for const_name, _ in file_sk.constants:
+            store.inverted_index.add(file_path, const_name, f"constant {const_name}")
+            
+        # Index class-level attributes
+        for cls_sk in file_sk.classes:
+            for attr_name in cls_sk.class_attrs:
+                store.inverted_index.add(cls_sk.fqn, attr_name, f"attribute {attr_name}")
+            for attr_name in cls_sk.instance_attrs:
+                # Often contains state names that agents search for
+                store.inverted_index.add(cls_sk.fqn, attr_name, f"attribute {attr_name}")
+
     # Load constraints
     store.constraints = ConstraintStore()
     store.constraints.load(project_root)
