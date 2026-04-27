@@ -878,6 +878,285 @@ def watch(path: str):
     start_daemon(project_root)
 
 
+# -- Evaluation commands ------------------------------------------------
+
+SUPPORTED_AGENTS = ["antigravity", "claude_code", "cursor", "codex", "copilot"]
+
+@app.command(name="eval-parse")
+@click.option("--agent", "-a", required=True, type=click.Choice(SUPPORTED_AGENTS), help="Agent to parse")
+@click.option("--file", "-f", "file_path", default=None, help="Path to exported chat file (auto-discovers if omitted)")
+@click.option("--mode", "-m", default="native", type=click.Choice(["native", "skeletongraph"]), help="Was this a native or SG session?")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--project", default="", help="Project name (e.g. flask, fastapi)")
+@click.option("--prompt", default="", help="Original task prompt")
+def eval_parse(agent: str, file_path: str, mode: str, path: str, project: str, prompt: str):
+    """Parse an agent's exported chat into a standardized trace JSON."""
+    project_root = Path(path).resolve()
+
+    # Auto-discover if no file provided
+    if not file_path:
+        if mode == "skeletongraph":
+            # SG mode: parse from current.json
+            try:
+                from ..eval.parsers.antigravity import parse_antigravity_sg_session
+                trace = parse_antigravity_sg_session(project_root, project)
+                _save_and_display_trace(trace, project_root)
+                return
+            except FileNotFoundError as e:
+                console.print(f"[red]No SG session found: {e}[/red]")
+                return
+
+        discovered = _discover_agent_file(agent)
+        if discovered:
+            file_path = str(discovered)
+            console.print(f"[green]Auto-discovered:[/green] {file_path}")
+        else:
+            console.print(f"[red]No export file found for {agent}. Use --file to specify.[/red]")
+            console.print(f"[dim]Tip: Export your chat and provide the path.[/dim]")
+            return
+
+    export_path = Path(file_path)
+    if not export_path.exists():
+        console.print(f"[red]File not found: {export_path}[/red]")
+        return
+
+    # Parse based on agent type
+    trace = _parse_agent_export(agent, export_path, project_root, prompt, mode, project)
+    if trace:
+        _save_and_display_trace(trace, project_root)
+
+
+@app.command(name="eval-compare")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--sg-file", default=None, help="SG trace JSON (auto-discovers if omitted)")
+@click.option("--native-file", default=None, help="Native trace JSON (auto-discovers if omitted)")
+@click.option("--output", "-o", default=None, help="Output report path")
+def eval_compare(path: str, sg_file: str, native_file: str, output: str):
+    """Compare SG vs Native traces and generate a report."""
+    project_root = Path(path).resolve()
+    eval_dir = project_root / ".skeletongraph" / "eval"
+
+    from ..eval.schema import AgentTrace
+    from ..eval.comparison import compare_traces
+    from ..eval.report import generate_report, save_report
+
+    # Auto-discover traces
+    if not sg_file:
+        sg_path = eval_dir / "sg_trace.json"
+        if not sg_path.exists():
+            # Try parsing from current.json
+            try:
+                from ..eval.parsers.antigravity import parse_antigravity_sg_session
+                sg_trace = parse_antigravity_sg_session(project_root)
+                sg_path.parent.mkdir(parents=True, exist_ok=True)
+                sg_path.write_text(sg_trace.to_json(), encoding="utf-8")
+            except FileNotFoundError:
+                console.print("[red]No SG trace found. Run eval-parse --mode skeletongraph first.[/red]")
+                return
+    else:
+        sg_path = Path(sg_file)
+
+    if not native_file:
+        native_path = eval_dir / "native_trace.json"
+        if not native_path.exists():
+            console.print("[red]No native trace found. Run eval-parse --mode native first.[/red]")
+            return
+    else:
+        native_path = Path(native_file)
+
+    # Load traces
+    sg_data = json.loads(sg_path.read_text(encoding="utf-8"))
+    native_data = json.loads(native_path.read_text(encoding="utf-8"))
+    sg_trace = AgentTrace.from_dict(sg_data)
+    native_trace = AgentTrace.from_dict(native_data)
+
+    # Compare
+    result = compare_traces(sg_trace, native_trace)
+
+    # Display summary
+    d = result.to_dict()
+    ta = d["tier_a_retrieval"]
+    tb = d["tier_b_conversation"]
+    tc = d["tier_c_efficiency"]
+
+    table = Table(title="[bold]SkeletonGraph Evaluation Results[/bold]", show_header=True)
+    table.add_column("Metric", style="cyan")
+    table.add_column("SkeletonGraph", style="green", justify="right")
+    table.add_column("Native Agent", style="yellow", justify="right")
+    table.add_column("Reduction", style="bold magenta", justify="right")
+
+    table.add_row("Retrieval Tokens", f"{ta['sg_tokens']:,}", f"{ta['native_tokens']:,}", f"{ta['reduction_ratio']}x")
+    table.add_row("Conversation Tokens", f"{tb['sg_tokens']:,}", f"{tb['native_tokens']:,}", f"{tb['reduction_ratio']}x")
+    table.add_row("Tool Calls", str(tc['sg_tool_calls']), str(tc['native_tool_calls']), "")
+    table.add_row("Turns", str(tc['sg_turns']), str(tc['native_turns']), "")
+    table.add_row("Repeated Views", "0", str(tc['native_repeated_views']), "")
+
+    console.print(table)
+
+    # Save report
+    if output:
+        report_path = Path(output)
+    else:
+        report_path = eval_dir / "report.md"
+    save_report(result, report_path)
+    console.print(f"\n[green]Report saved to:[/green] {report_path}")
+
+    # Also save comparison JSON
+    comp_path = eval_dir / "comparison.json"
+    comp_path.write_text(result.to_json(), encoding="utf-8")
+    console.print(f"[green]JSON saved to:[/green] {comp_path}")
+
+
+@app.command(name="eval")
+@click.option("--agent", "-a", default="antigravity", type=click.Choice(SUPPORTED_AGENTS), help="Agent to evaluate")
+@click.option("--native-file", "-f", default=None, help="Path to native exported chat")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--project", default="", help="Project name")
+def eval_full(agent: str, native_file: str, path: str, project: str):
+    """One-command evaluation: parse SG session + native export -> comparison report."""
+    project_root = Path(path).resolve()
+    eval_dir = project_root / ".skeletongraph" / "eval"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    from ..eval.parsers.antigravity import parse_antigravity_sg_session
+    from ..eval.comparison import compare_traces
+    from ..eval.report import generate_report, save_report
+
+    # Step 1: Parse SG session
+    console.print("[bold]Step 1:[/bold] Parsing SkeletonGraph session...")
+    try:
+        sg_trace = parse_antigravity_sg_session(project_root, project)
+        console.print(f"  [green][OK][/green] SG trace: {sg_trace.total_tool_output_tokens:,} tokens across {sg_trace.tool_call_count} calls")
+    except FileNotFoundError as e:
+        console.print(f"  [red][X] No SG session found: {e}[/red]")
+        return
+
+    # Step 2: Parse native baseline
+    console.print("[bold]Step 2:[/bold] Parsing native baseline...")
+    if not native_file:
+        discovered = _discover_agent_file(agent)
+        if discovered:
+            native_file = str(discovered)
+            console.print(f"  [green]Auto-discovered:[/green] {native_file}")
+        else:
+            console.print(f"  [red]No export found. Provide --native-file path.[/red]")
+            _print_export_instructions(agent)
+            return
+
+    native_trace = _parse_agent_export(agent, Path(native_file), project_root, "", "native", project)
+    if not native_trace:
+        return
+    console.print(f"  [green][OK][/green] Native trace: {native_trace.total_tool_output_tokens:,} tokens across {native_trace.tool_call_count} calls")
+
+    # Step 3: Compare
+    console.print("[bold]Step 3:[/bold] Generating comparison...")
+    result = compare_traces(sg_trace, native_trace)
+
+    # Save everything
+    (eval_dir / "sg_trace.json").write_text(sg_trace.to_json(), encoding="utf-8")
+    (eval_dir / "native_trace.json").write_text(native_trace.to_json(), encoding="utf-8")
+    (eval_dir / "comparison.json").write_text(result.to_json(), encoding="utf-8")
+    save_report(result, eval_dir / "report.md")
+
+    # Display results
+    d = result.to_dict()
+    ta = d["tier_a_retrieval"]
+    tb = d["tier_b_conversation"]
+
+    console.print()
+    panel = Panel(
+        f"[bold green]Retrieval:[/bold green] {ta['reduction_ratio']}x reduction "
+        f"({ta['native_tokens']:,} -> {ta['sg_tokens']:,} tokens)\n"
+        f"[bold blue]Conversation:[/bold blue] {tb['reduction_ratio']}x reduction "
+        f"({tb['native_tokens']:,} -> {tb['sg_tokens']:,} tokens)\n"
+        f"[bold yellow]Tokens Saved:[/bold yellow] {ta['tokens_saved']:,}",
+        title="[bold]Evaluation Results[/bold]",
+    )
+    console.print(panel)
+    console.print(f"\n[dim]Full report: {eval_dir / 'report.md'}[/dim]")
+
+
+def _discover_agent_file(agent: str):
+    """Auto-discover the latest export file for an agent."""
+    if agent == "antigravity":
+        from ..eval.parsers.antigravity import discover_latest_log
+        return discover_latest_log()
+    elif agent == "copilot":
+        from ..eval.parsers.copilot import discover_copilot_sessions
+        sessions = discover_copilot_sessions()
+        return sessions[0] if sessions else None
+    elif agent == "cursor":
+        from ..eval.parsers.cursor import discover_cursor_sessions
+        sessions = discover_cursor_sessions()
+        return sessions[0] if sessions else None
+    elif agent == "codex":
+        from ..eval.parsers.codex import discover_codex_sessions
+        sessions = discover_codex_sessions()
+        return sessions[0] if sessions else None
+    elif agent == "claude_code":
+        from ..eval.parsers.claude_code import discover_claude_code_sessions
+        sessions = discover_claude_code_sessions()
+        return sessions[0] if sessions else None
+    return None
+
+
+def _parse_agent_export(agent, export_path, project_root, prompt, mode, project_name):
+    """Route to the correct parser for the agent."""
+    if agent == "antigravity":
+        from ..eval.parsers.antigravity import parse_antigravity_export
+        return parse_antigravity_export(export_path, project_root, prompt, mode, project_name)
+    elif agent == "copilot":
+        from ..eval.parsers.copilot import parse_copilot_json_export
+        return parse_copilot_json_export(export_path, project_root, prompt, mode, project_name)
+    elif agent == "cursor":
+        from ..eval.parsers.cursor import parse_cursor_session
+        return parse_cursor_session(export_path, project_root, prompt, mode, project_name)
+    elif agent == "codex":
+        from ..eval.parsers.codex import parse_codex_session
+        return parse_codex_session(export_path, project_root, prompt, mode, project_name)
+    elif agent == "claude_code":
+        from ..eval.parsers.claude_code import parse_claude_code_export
+        return parse_claude_code_export(export_path, project_root, prompt, mode, project_name)
+    console.print(f"[red]Unknown agent: {agent}[/red]")
+    return None
+
+
+def _save_and_display_trace(trace, project_root):
+    """Save trace JSON and display summary."""
+    eval_dir = project_root / ".skeletongraph" / "eval"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{trace.mode}_trace.json"
+    output_path = eval_dir / filename
+    output_path.write_text(trace.to_json(), encoding="utf-8")
+
+    table = Table(title=f"[bold]Parsed: {trace.agent} ({trace.mode})[/bold]", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="yellow")
+    table.add_row("Tool Output Tokens (L1)", f"{trace.total_tool_output_tokens:,}")
+    table.add_row("Response Tokens (L2)", f"{trace.total_response_tokens:,}")
+    table.add_row("History Tokens (L3)", f"{trace.estimated_history_tokens:,}")
+    table.add_row("Total Conversation", f"{trace.total_conversation_tokens:,}")
+    table.add_row("Tool Calls", str(trace.tool_call_count))
+    table.add_row("File Views", str(trace.view_file_count))
+    table.add_row("Grep Searches", str(trace.grep_count))
+    console.print(table)
+    console.print(f"[green]Saved to:[/green] {output_path}")
+
+
+def _print_export_instructions(agent: str):
+    """Print how to export chat for each agent."""
+    instructions = {
+        "antigravity": "In Antigravity, click the Export button at the top of the chat.",
+        "claude_code": "In Claude Code CLI, type: /export my_session.md",
+        "cursor": "In Cursor, the SQLite DB is auto-discovered. Or copy the chat text to a file.",
+        "codex": "Codex logs are at ~/.codex/. Or run: npx @ccusage/codex@latest",
+        "copilot": "In VS Code, press Ctrl+Shift+P -> 'Chat: Export Session...'",
+    }
+    msg = instructions.get(agent, f"Export your {agent} chat to a file.")
+    console.print(f"[dim]How to export: {msg}[/dim]")
+
+
 # -- Helper functions ---------------------------------------------------
 
 def _detect_platforms(project_root: Path) -> list:
@@ -947,14 +1226,14 @@ def _install_platform(platform: str, project_root: Path):
 
 def _write_mcp_config(project_root: Path):
     """Write MCP server configuration to local and global (Antigravity) configs."""
-    mcp_exe = "C:\\Users\\ASUS\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\skeletongraph.exe"
+    python_exe = "C:\\Users\\ASUS\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
     
     server_config = {
-        "command": mcp_exe,
-        "args": ["serve", "--path", str(project_root)],
+        "command": python_exe,
+        "args": ["-m", "skeletongraph.server.mcp", "--path", str(project_root)],
     }
 
-    # 1. Write local mcp.json
+    # 1. Write local mcp.json (always uses 'skeletongraph' as tool prefix)
     local_config = {"mcpServers": {"skeletongraph": server_config}}
     (project_root / "mcp.json").write_text(json.dumps(local_config, indent=2), encoding="utf-8")
     console.print(f"  [green][OK][/green] Updated local mcp.json")
@@ -966,6 +1245,7 @@ def _write_mcp_config(project_root: Path):
             ag_data = json.loads(ag_config_path.read_text(encoding="utf-8"))
             if "mcpServers" not in ag_data:
                 ag_data["mcpServers"] = {}
+            
             ag_data["mcpServers"]["skeletongraph"] = server_config
             ag_config_path.write_text(json.dumps(ag_data, indent=2), encoding="utf-8")
             console.print(f"  [green][OK][/green] Updated global Antigravity MCP config.")
@@ -982,12 +1262,13 @@ This project restricts native searching tools. You MUST use SkeletonGraph's MCP 
 
 ### CRITICAL RULES:
 1. **DO NOT USE** `grep_search` or manual `view_file` commands unless explicitly ordered.
-2. **USE `query_context`** as your VERY FIRST action to get an optimized structural map.
-3. **USE `search_index`** instead of grep if you need to find where a variable, constant, or function is used.
-4. **USE `expand_function`** if you need to read the full body of a function you found in the graph. Do NOT read the entire file just for one function.
-5. **RESPECT** the constraints listed in Zone 1 of any context response.
+2. **TOOL DISCOVERY**: Depending on your IDE, the tools may be automatically prefixed. Look for tools containing `query_context`, `search_index`, or `expand_function` in your available tool list (e.g., `mcp_skeletongraph_flask_query_context` or `query_context`).
+3. **USE the `query_context` tool** as your VERY FIRST action to get an optimized structural map.
+4. **USE the `search_index` tool** instead of grep if you need to find where a variable, constant, or function is used.
+5. **USE the `expand_function` tool** if you need to read the full body of a function you found in the graph. Do NOT read the entire file just for one function.
+6. **RESPECT** the constraints listed in Zone 1 of any context response.
 
-If you violate Rule 1, you will damage the evaluation telemetry. ONLY use the `skeletongraph` MCP tools provided.
+If you violate Rule 1, you will damage the evaluation telemetry. ONLY use the SkeletonGraph MCP tools provided.
 """.strip()
 
 
