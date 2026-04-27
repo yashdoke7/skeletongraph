@@ -55,6 +55,18 @@ skeletongraph stats
 git diff | skeletongraph review
 ```
 
+## Cross-Agent Evaluation
+
+SkeletonGraph includes a unified evaluation module to compare LLM agent token consumption (Antigravity, Cursor, Claude Code, Copilot, Codex) before and after using the Graph.
+
+Run an identical prompt twice in your IDE (once with SG enabled, once native), export the chats, and generate a 4-tier comparison report (Retrieval, Conversation, Turn Efficiency, Quality):
+
+```powershell
+skeletongraph eval --agent antigravity --native-file ./native_chat.txt --project flask
+```
+
+See [EVALUATION_WORKFLOW.md](EVALUATION_WORKFLOW.md) for exporting instructions per agent.
+
 ## Python API
 
 ```python
