@@ -46,6 +46,7 @@ def tool(name: str, description: str, parameters: dict):
             "inputSchema": {
                 "type": "object",
                 "properties": parameters,
+                "required": list(parameters.keys()),
             },
             "handler": func,
         }
@@ -105,8 +106,8 @@ def query_context_tool(params: dict) -> dict:
     metrics: MetricsLogger = _server_state["metrics"]
 
     prompt = params["prompt"]
-    budget = params.get("budget", 128_000)
-    top_n = params.get("top_n", 50)
+    budget = int(params.get("budget", 128_000))
+    top_n = int(params.get("top_n", 50))
 
     t0 = time.perf_counter()
 
@@ -239,7 +240,7 @@ def expand_function_tool(params: dict) -> dict:
 def show_graph_tool(params: dict) -> dict:
     store = _get_store()
     fqn = params["fqn"]
-    depth = params.get("depth", 2)
+    depth = int(params.get("depth", 2))
 
     # Forward deps (what this calls)
     deps = store.graph.dependency_chain(fqn, max_depth=depth)
@@ -267,7 +268,7 @@ def show_graph_tool(params: dict) -> dict:
 def search_index_tool(params: dict) -> dict:
     store = _get_store()
     query = params["query"]
-    top_k = params.get("top_k", 10)
+    top_k = int(params.get("top_k", 10))
 
     results = store.inverted_index.search(query, top_k=top_k)
     items = []
@@ -374,7 +375,7 @@ def review_delta_tool(params: dict) -> dict:
 def get_blast_radius_tool(params: dict) -> dict:
     store = _get_store()
     fqn = params["fqn"]
-    depth = params.get("depth", 2)
+    depth = int(params.get("depth", 2))
 
     affected = store.graph.blast_radius(fqn, max_depth=depth)
     items = []
@@ -406,7 +407,7 @@ def get_blast_radius_tool(params: dict) -> dict:
 def get_dependencies_tool(params: dict) -> dict:
     store = _get_store()
     fqn = params["fqn"]
-    depth = params.get("depth", 2)
+    depth = int(params.get("depth", 2))
 
     deps = store.graph.dependency_chain(fqn, max_depth=depth)
     items = []
@@ -565,15 +566,12 @@ def main():
     project_root = Path(args.path).resolve()
     from ..storage.local import load_index
     
-    # Use stderr for initialization logs to avoid polluting stdio (JSON-RPC)
-    print(f"Loading index from {project_root}...", file=sys.stderr)
+    # Must be completely silent so we don't break JSON-RPC over stdio
     store = load_index(project_root)
     
     if store is None:
-        print(f"Error: No index found at {project_root}. Run 'skeletongraph build' first.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Starting SkeletonGraph MCP server...", file=sys.stderr)
     start_server(store, project_root, port=args.port)
 
 
