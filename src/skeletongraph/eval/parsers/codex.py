@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 from ..schema import AgentTrace, ToolCall, AgentResponse
-from ..token_counter import measure_file_tokens, measure_text_tokens
+from ..token_counter import (
+    measure_file_tokens, measure_text_tokens,
+    measure_grep_output_tokens, measure_directory_listing_tokens,
+)
 
 
 def discover_codex_sessions() -> list[Path]:
@@ -110,11 +113,24 @@ def _parse_jsonl(
                 tokens = measure_file_tokens(local, cap_lines=800)
                 tool_calls.append(ToolCall("view_file", target, tokens))
             elif any(kw in name.lower() for kw in ("search", "grep", "find")):
-                tool_calls.append(ToolCall("grep_search", target, 100))
+                # Use actual result content if available
+                result_content = entry.get("result", entry.get("output", ""))
+                if result_content and isinstance(result_content, str) and len(result_content) > 10:
+                    out_tokens = measure_text_tokens(result_content)
+                else:
+                    out_tokens = measure_grep_output_tokens()
+                tool_calls.append(ToolCall("grep_search", target, out_tokens))
             elif any(kw in name.lower() for kw in ("write", "edit", "patch")):
                 tool_calls.append(ToolCall("edit_file", target, 0))
             elif any(kw in name.lower() for kw in ("run", "exec", "shell")):
-                tool_calls.append(ToolCall("run_command", target, 50))
+                result_content = entry.get("result", entry.get("output", ""))
+                if result_content and isinstance(result_content, str) and len(result_content) > 10:
+                    out_tokens = measure_text_tokens(result_content)
+                else:
+                    out_tokens = 50
+                tool_calls.append(ToolCall("run_command", target, out_tokens))
+            elif any(kw in name.lower() for kw in ("list", "dir", "ls")):
+                tool_calls.append(ToolCall("list_dir", target, measure_directory_listing_tokens()))
             else:
                 tool_calls.append(ToolCall(name, target, 50))
 

@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Optional
 
 from ..schema import AgentTrace, ToolCall, AgentResponse
-from ..token_counter import measure_file_tokens, measure_text_tokens
+from ..token_counter import (
+    measure_file_tokens, measure_text_tokens,
+    measure_grep_output_tokens, measure_directory_listing_tokens,
+)
 
 
 def discover_cursor_sessions() -> list[Path]:
@@ -155,9 +158,24 @@ def _parse_sqlite(
                         tokens = measure_file_tokens(local, cap_lines=800)
                         tool_calls.append(ToolCall("view_file", target or "", tokens))
                     elif any(kw in tool_name.lower() for kw in ("search", "grep", "find", "codebase")):
-                        tool_calls.append(ToolCall("grep_search", target or "", 100))
+                        # Measure actual result content if available
+                        result_content = event.get("result", event.get("output", ""))
+                        if result_content and isinstance(result_content, str) and len(result_content) > 10:
+                            out_tokens = measure_text_tokens(result_content)
+                        else:
+                            out_tokens = measure_grep_output_tokens()
+                        tool_calls.append(ToolCall("grep_search", target or "", out_tokens))
                     elif any(kw in tool_name.lower() for kw in ("terminal", "run", "exec", "bash")):
-                        tool_calls.append(ToolCall("run_command", target or "", 50))
+                        result_content = event.get("result", event.get("output", ""))
+                        if result_content and isinstance(result_content, str) and len(result_content) > 10:
+                            out_tokens = measure_text_tokens(result_content)
+                        else:
+                            out_tokens = 50
+                        tool_calls.append(ToolCall("run_command", target or "", out_tokens))
+                    elif any(kw in tool_name.lower() for kw in ("write", "edit", "patch", "insert")):
+                        tool_calls.append(ToolCall("edit_file", target or "", 0))
+                    elif any(kw in tool_name.lower() for kw in ("list", "dir", "ls")):
+                        tool_calls.append(ToolCall("list_dir", target or "", measure_directory_listing_tokens()))
                     elif tool_name:
                         tool_calls.append(ToolCall(tool_name, target or "", 50))
             break  # stop at first pattern that returned data
@@ -196,7 +214,7 @@ def _parse_text(
 
     # Look for search actions
     for match in re.finditer(r'(?:Search|Grep|Find)(?:ed|ing)?\s', content):
-        tool_calls.append(ToolCall("grep_search", "", 100))
+        tool_calls.append(ToolCall("grep_search", "", measure_grep_output_tokens()))
 
     return AgentTrace(
         agent="cursor", mode=mode, task_prompt=task_prompt or "Unknown",

@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 from ..schema import AgentTrace, ToolCall, AgentResponse
-from ..token_counter import measure_file_tokens, measure_text_tokens
+from ..token_counter import (
+    measure_file_tokens, measure_text_tokens,
+    measure_grep_output_tokens, measure_directory_listing_tokens,
+)
 
 
 def discover_claude_code_sessions() -> list[Path]:
@@ -85,7 +88,7 @@ def _parse_markdown(
         tool_calls.append(ToolCall(
             tool_type="grep_search",
             target=match.group(1),
-            output_tokens=100,
+            output_tokens=measure_grep_output_tokens(),
         ))
 
     # List files/directories
@@ -93,7 +96,7 @@ def _parse_markdown(
         tool_calls.append(ToolCall(
             tool_type="list_dir",
             target="",
-            output_tokens=50,
+            output_tokens=measure_directory_listing_tokens(),
         ))
 
     # Edits
@@ -141,8 +144,14 @@ def _parse_jsonl(
 ) -> AgentTrace:
     """Parse Claude Code's JSONL session log format.
 
-    Also extracts the Anthropic API `usage` object from JSONL entries
-    for Layer 4 ground truth (reasoning/compute tokens).
+    Data flow:
+      1. `tool_use` entries → record the invocation with tool name + args
+      2. `tool_result` entries → contain the ACTUAL tool output text
+      3. `usage` entries → API token counts (L4 ground truth)
+      4. `assistant` entries → agent response text (L2)
+
+    We match tool_use → tool_result by tool_use_id to get actual
+    L1 measurements instead of estimates.
     """
     tool_calls: list[ToolCall] = []
     agent_responses: list[AgentResponse] = []
@@ -152,6 +161,10 @@ def _parse_jsonl(
     total_output_tokens = 0
     total_cache_read = 0
     total_cache_write = 0
+
+    # Track pending tool_use calls waiting for their tool_result
+    # Maps tool_use_id -> index in tool_calls list
+    pending_tool_results: dict[str, int] = {}
 
     turn_id = 0
     for line in jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -165,10 +178,11 @@ def _parse_jsonl(
         msg_type = entry.get("type", entry.get("role", ""))
         content = entry.get("content", entry.get("text", ""))
 
-        # ── Tool calls ─────────────────────────────────────────
+        # ── Tool invocations ──────────────────────────────────
         if msg_type == "tool_use":
             tool_name = entry.get("name", "unknown")
             tool_input = entry.get("input", {})
+            tool_use_id = entry.get("id", entry.get("tool_use_id", ""))
             target = tool_input.get("path", tool_input.get("query", ""))
 
             if "read" in tool_name.lower() or "view" in tool_name.lower():
@@ -178,13 +192,55 @@ def _parse_jsonl(
                     tool_type="view_file", target=target, output_tokens=tokens
                 ))
             elif "search" in tool_name.lower() or "grep" in tool_name.lower():
+                # Placeholder — will be overwritten if tool_result arrives
                 tool_calls.append(ToolCall(
-                    tool_type="grep_search", target=target, output_tokens=100
+                    tool_type="grep_search", target=target,
+                    output_tokens=measure_grep_output_tokens(),
+                ))
+            elif any(kw in tool_name.lower() for kw in ("write", "edit", "patch", "create")):
+                tool_calls.append(ToolCall(
+                    tool_type="edit_file", target=target, output_tokens=0,
+                ))
+            elif any(kw in tool_name.lower() for kw in ("run", "exec", "bash", "shell")):
+                tool_calls.append(ToolCall(
+                    tool_type="run_command", target=target, output_tokens=50,
+                ))
+            elif any(kw in tool_name.lower() for kw in ("list", "dir", "ls")):
+                tool_calls.append(ToolCall(
+                    tool_type="list_dir", target=target,
+                    output_tokens=measure_directory_listing_tokens(),
                 ))
             else:
                 tool_calls.append(ToolCall(
                     tool_type=tool_name, target=target, output_tokens=50
                 ))
+
+            # Track for tool_result matching
+            if tool_use_id and tool_calls:
+                pending_tool_results[tool_use_id] = len(tool_calls) - 1
+
+        # ── Tool results (ACTUAL output content) ──────────────
+        elif msg_type == "tool_result":
+            tool_use_id = entry.get("tool_use_id", "")
+            result_content = entry.get("content", "")
+
+            # Extract text from content (can be string or list of blocks)
+            result_text = ""
+            if isinstance(result_content, str):
+                result_text = result_content
+            elif isinstance(result_content, list):
+                for block in result_content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        result_text += block.get("text", "")
+                    elif isinstance(block, str):
+                        result_text += block
+
+            # Overwrite the placeholder with actual measured tokens
+            if result_text and tool_use_id in pending_tool_results:
+                idx = pending_tool_results[tool_use_id]
+                if idx < len(tool_calls):
+                    actual_tokens = measure_text_tokens(result_text)
+                    tool_calls[idx].output_tokens = actual_tokens
 
         # ── Agent responses ────────────────────────────────────
         elif msg_type in ("assistant", "model"):

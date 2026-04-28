@@ -23,7 +23,10 @@ from pathlib import Path
 from typing import Optional
 
 from ..schema import AgentTrace, ToolCall, AgentResponse
-from ..token_counter import measure_file_tokens, measure_text_tokens
+from ..token_counter import (
+    measure_file_tokens, measure_text_tokens,
+    measure_grep_output_tokens, measure_directory_listing_tokens,
+)
 
 
 # ── Auto-discovery ─────────────────────────────────────────────────────
@@ -112,14 +115,14 @@ def parse_antigravity_export(
         tool_calls.append(ToolCall(
             tool_type="grep_search",
             target="",
-            output_tokens=100,  # Conservative default
+            output_tokens=measure_grep_output_tokens(),
         ))
 
     for match in LIST_DIR_PATTERN.finditer(content):
         tool_calls.append(ToolCall(
             tool_type="list_dir",
             target=match.group(1),
-            output_tokens=50,
+            output_tokens=measure_directory_listing_tokens(),
         ))
 
     for match in EDIT_PATTERN.finditer(content):

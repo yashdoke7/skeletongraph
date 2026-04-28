@@ -44,5 +44,6 @@ docs/blueprint.md
 docs/plan.md
 docs/*.local.md
 EVALUATION_WORKFLOW.md
+evaluation_dataset.md
 
 eval_logs/
