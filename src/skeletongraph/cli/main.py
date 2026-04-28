@@ -1136,6 +1136,7 @@ def _save_and_display_trace(trace, project_root):
     table.add_row("Tool Output Tokens (L1)", f"{trace.total_tool_output_tokens:,}")
     table.add_row("Response Tokens (L2)", f"{trace.total_response_tokens:,}")
     table.add_row("History Tokens (L3)", f"{trace.estimated_history_tokens:,}")
+    table.add_row("MCP Schema Overhead (L5)", f"{trace.mcp_schema_overhead_tokens:,}")
     table.add_row("Total Conversation", f"{trace.total_conversation_tokens:,}")
     table.add_row("Tool Calls", str(trace.tool_call_count))
     table.add_row("File Views", str(trace.view_file_count))

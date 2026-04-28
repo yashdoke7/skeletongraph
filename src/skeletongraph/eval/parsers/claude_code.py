@@ -139,9 +139,19 @@ def _parse_jsonl(
     mode: str,
     project_name: str,
 ) -> AgentTrace:
-    """Parse Claude Code's JSONL session log format."""
+    """Parse Claude Code's JSONL session log format.
+
+    Also extracts the Anthropic API `usage` object from JSONL entries
+    for Layer 4 ground truth (reasoning/compute tokens).
+    """
     tool_calls: list[ToolCall] = []
     agent_responses: list[AgentResponse] = []
+
+    # Accumulate API usage across all turns (L4 ground truth)
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cache_read = 0
+    total_cache_write = 0
 
     turn_id = 0
     for line in jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -155,6 +165,7 @@ def _parse_jsonl(
         msg_type = entry.get("type", entry.get("role", ""))
         content = entry.get("content", entry.get("text", ""))
 
+        # ── Tool calls ─────────────────────────────────────────
         if msg_type == "tool_use":
             tool_name = entry.get("name", "unknown")
             tool_input = entry.get("input", {})
@@ -175,6 +186,7 @@ def _parse_jsonl(
                     tool_type=tool_name, target=target, output_tokens=50
                 ))
 
+        # ── Agent responses ────────────────────────────────────
         elif msg_type in ("assistant", "model"):
             if content:
                 turn_id += 1
@@ -185,10 +197,21 @@ def _parse_jsonl(
                     token_count=measure_text_tokens(text),
                 ))
 
+        # ── API usage object (L4 ground truth) ─────────────────
+        # Claude Code JSONL logs the Anthropic API response including
+        # the usage field: {input_tokens, output_tokens,
+        # cache_read_input_tokens, cache_creation_input_tokens}
+        elif msg_type == "usage" or "usage" in entry:
+            usage = entry.get("usage", entry) if msg_type != "usage" else entry
+            total_input_tokens += usage.get("input_tokens", 0)
+            total_output_tokens += usage.get("output_tokens", 0)
+            total_cache_read += usage.get("cache_read_input_tokens", 0)
+            total_cache_write += usage.get("cache_creation_input_tokens", 0)
+
         elif msg_type in ("human", "user") and not task_prompt:
             task_prompt = (content if isinstance(content, str) else str(content))[:200]
 
-    return AgentTrace(
+    trace = AgentTrace(
         agent="claude_code",
         mode=mode,
         task_prompt=task_prompt or "Unknown",
@@ -197,6 +220,12 @@ def _parse_jsonl(
         agent_responses=agent_responses,
         task_completed=True,
     )
+
+    # If we captured real API usage, store it as L4 ground truth
+    if total_output_tokens > 0:
+        trace.reasoning_tokens = total_output_tokens
+
+    return trace
 
 
 def _resolve(filepath: str, project_root: Path) -> Path:

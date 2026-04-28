@@ -20,6 +20,10 @@ def generate_report(result: ComparisonResult) -> str:
     tc = d["tier_c_efficiency"]
     td = d["tier_d_quality"]
 
+    # Format optional Layer 4 values
+    sg_l4 = f"{result.sg_layer4:,}" if result.sg_layer4 is not None else "N/A"
+    native_l4 = f"{result.native_layer4:,}" if result.native_layer4 is not None else "N/A"
+
     report = f"""# SkeletonGraph Evaluation Report
 *Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*
 
@@ -33,26 +37,28 @@ def generate_report(result: ComparisonResult) -> str:
 ## Tier A: Retrieval Efficiency
 *Measures: Token cost of tool outputs only (view_file, grep, query_context)*
 
-| Metric | SkeletonGraph | Native Agent | Δ |
+| Metric | SkeletonGraph | Native Agent | Delta |
 |:---|---:|---:|:---|
 | **Tool Output Tokens** | {ta['sg_tokens']:,} | {ta['native_tokens']:,} | **{ta['reduction_ratio']}x reduction** |
-| **Tokens Saved** | — | — | **{ta['tokens_saved']:,}** |
+| **Tokens Saved** | -- | -- | **{ta['tokens_saved']:,}** |
 
 ## Tier B: Full Conversation Cost
-*Measures: Tool outputs + agent responses + cumulative history re-submission*
+*Measures: Tool outputs + agent responses + history compounding + MCP schema overhead*
 
-| Metric | SkeletonGraph | Native Agent | Δ |
+| Metric | SkeletonGraph | Native Agent | Delta |
 |:---|---:|---:|:---|
 | **Total Conversation Tokens** | {tb['sg_tokens']:,} | {tb['native_tokens']:,} | **{tb['reduction_ratio']}x reduction** |
 
-### Breakdown
+### Per-Layer Breakdown
 
-| Layer | SkeletonGraph | Native Agent |
-|:---|---:|---:|
-| Layer 1: Tool Output | {result.sg_trace.total_tool_output_tokens:,} | {result.native_trace.total_tool_output_tokens:,} |
-| Layer 2: Agent Responses | {result.sg_trace.total_response_tokens:,} | {result.native_trace.total_response_tokens:,} |
-| Layer 3: History Re-submission | {result.sg_trace.estimated_history_tokens:,} | {result.native_trace.estimated_history_tokens:,} |
-| Layer 4: Reasoning | {result.sg_trace.reasoning_tokens or 'N/A'} | {result.native_trace.reasoning_tokens or 'N/A'} |
+| Layer | What it measures | SG | Native |
+|:---|:---|---:|---:|
+| L1: Tool output | File reads, grep, query_context | {result.sg_layer1:,} | {result.native_layer1:,} |
+| L2: Agent responses | Text the agent sent to user | {result.sg_layer2:,} | {result.native_layer2:,} |
+| L3: History compounding | Prior turns re-sent each call | {result.sg_layer3:,} | {result.native_layer3:,} |
+| L4: Reasoning | Internal chain-of-thought | {sg_l4} | {native_l4} |
+| L5: MCP schema | Tool schema load per turn | {result.sg_layer5:,} | 0 |
+| **Total** | | **{result.sg_conversation_tokens:,}** | **{result.native_conversation_tokens:,}** |
 
 ## Tier C: Turn Efficiency
 *Measures: Agent actions and round-trip overhead*
@@ -63,24 +69,26 @@ def generate_report(result: ComparisonResult) -> str:
 | Total Tool Calls | {tc['sg_tool_calls']} | {tc['native_tool_calls']} |
 | File Views | {result.sg_trace.view_file_count} | {result.native_trace.view_file_count} |
 | Grep Searches | {result.sg_trace.grep_count} | {result.native_trace.grep_count} |
-| SG Tool Calls | {result.sg_trace.sg_tool_count} | — |
-| Repeated File Views | — | {tc['native_repeated_views']} |
+| SG Tool Calls | {result.sg_trace.sg_tool_count} | -- |
+| Repeated File Views | -- | {tc['native_repeated_views']} |
 
 ## Tier D: Task Completion Quality
 
 | Metric | SkeletonGraph | Native Agent |
 |:---|:---|:---|
-| Task Completed | {'✅' if td['sg_completed'] else '❌'} | {'✅' if td['native_completed'] else '❌'} |
+| Task Completed | {'Yes' if td['sg_completed'] else 'No'} | {'Yes' if td['native_completed'] else 'No'} |
 | Files Modified | {len(result.sg_trace.files_modified)} | {len(result.native_trace.files_modified)} |
-| Tests Passed | {'✅' if result.sg_trace.test_passed else 'N/A'} | {'✅' if result.native_trace.test_passed else 'N/A'} |
+| Tests Passed | {'Yes' if result.sg_trace.test_passed else 'N/A'} | {'Yes' if result.native_trace.test_passed else 'N/A'} |
 
 ---
 
 ## Methodology
-- **Layer 1 (Tool Output):** Measured by reading actual file sizes from disk (800-line cap per view), counting repeated views.
-- **Layer 2 (Agent Responses):** Measured from exported chat text (`len(text) // 4`).
-- **Layer 3 (History):** Computed as cumulative sum of prior turns' content (Layers 1+2) re-submitted per turn.
-- **Layer 4 (Reasoning):** Available only for agents that expose API-level token breakdowns (Codex, Copilot w/ debug mode). Reported as N/A otherwise.
+- **L1 (Tool Output):** Actual file sizes from disk (tiktoken BPE, 800-line cap per view). Repeated views counted separately.
+- **L2 (Agent Responses):** Measured from exported chat text (tiktoken BPE).
+- **L3 (History):** Cumulative sum -- at each turn, all prior turns' (L1+L2) content re-submitted.
+- **L4 (Reasoning):** Available for Claude Code (JSONL usage field) and Codex. N/A for Antigravity (Gemini internal), Cursor (not exposed).
+- **L5 (MCP Schema):** SG tool schemas loaded per turn. Measured from actual JSON schema encoding. Native side = 0.
+- **Token counter:** tiktoken cl100k_base (fallback: len//4 if tiktoken unavailable).
 """
     return report
 

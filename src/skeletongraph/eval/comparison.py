@@ -56,6 +56,49 @@ class ComparisonResult:
             return 0.0
         return self.native_conversation_tokens / self.sg_conversation_tokens
 
+    # ── Per-layer breakdown for SG side ─────────────────────────
+    @property
+    def sg_layer1(self) -> int:
+        return self.sg_trace.total_tool_output_tokens
+
+    @property
+    def sg_layer2(self) -> int:
+        return self.sg_trace.total_response_tokens
+
+    @property
+    def sg_layer3(self) -> int:
+        return self.sg_trace.estimated_history_tokens
+
+    @property
+    def sg_layer4(self) -> Optional[int]:
+        return self.sg_trace.reasoning_tokens
+
+    @property
+    def sg_layer5(self) -> int:
+        return self.sg_trace.mcp_schema_overhead_tokens
+
+    # ── Per-layer breakdown for native side ─────────────────────
+    @property
+    def native_layer1(self) -> int:
+        return self.native_trace.total_tool_output_tokens
+
+    @property
+    def native_layer2(self) -> int:
+        return self.native_trace.total_response_tokens
+
+    @property
+    def native_layer3(self) -> int:
+        return self.native_trace.estimated_history_tokens
+
+    @property
+    def native_layer4(self) -> Optional[int]:
+        return self.native_trace.reasoning_tokens
+
+    @property
+    def native_layer5(self) -> int:
+        # Native side has no MCP schema overhead (it doesn't use SG)
+        return 0
+
     # ── Tier C: Turn Efficiency ───────────────────────────────────
     @property
     def sg_turns(self) -> int:
@@ -101,6 +144,24 @@ class ComparisonResult:
                 "sg_tokens": self.sg_conversation_tokens,
                 "native_tokens": self.native_conversation_tokens,
                 "reduction_ratio": round(self.conversation_reduction_ratio, 1),
+            },
+            "tier_b_breakdown": {
+                "sg": {
+                    "layer1_tool_output": self.sg_layer1,
+                    "layer2_responses":   self.sg_layer2,
+                    "layer3_history":     self.sg_layer3,
+                    "layer4_reasoning":   self.sg_layer4,
+                    "layer5_mcp_schema":  self.sg_layer5,
+                    "total":              self.sg_conversation_tokens,
+                },
+                "native": {
+                    "layer1_tool_output": self.native_layer1,
+                    "layer2_responses":   self.native_layer2,
+                    "layer3_history":     self.native_layer3,
+                    "layer4_reasoning":   self.native_layer4,
+                    "layer5_mcp_schema":  0,
+                    "total":              self.native_conversation_tokens,
+                },
             },
             "tier_c_efficiency": {
                 "sg_turns": self.sg_turns,

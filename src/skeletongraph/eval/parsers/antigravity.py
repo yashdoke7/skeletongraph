@@ -186,9 +186,16 @@ def parse_antigravity_sg_session(
 ) -> AgentTrace:
     """Parse the SkeletonGraph session data from current.json.
 
-    This gives us the SG side of the comparison directly from
-    the MCP server's own telemetry — no estimation needed.
+    Captures ALL layers for the SG side:
+      L1: query_context tool output tokens (already working)
+      L2: agent response tokens (from response_text if available)
+      L3: history compounding (computed from L1+L2 per turn, same as native)
+      L5: MCP schema overhead (num_turns x schema cost per turn)
+
+    Layer 4 (reasoning) is not available for Antigravity (Gemini internal).
     """
+    from ..token_counter import measure_text_tokens, measure_mcp_schema_overhead
+
     session_path = project_root / ".skeletongraph" / "session" / "current.json"
     if not session_path.exists():
         raise FileNotFoundError(f"No SG session found at {session_path}")
@@ -204,13 +211,25 @@ def parse_antigravity_sg_session(
         if not task_prompt:
             task_prompt = turn.get("prompt", "")
 
+        # L1: The assembled context payload sent to the agent
         tool_calls.append(ToolCall(
             tool_type="query_context",
             target=turn.get("prompt", ""),
             output_tokens=turn.get("token_count", 0),
         ))
 
-    stats = data.get("stats", {})
+        # L2: The agent's response to this turn (from CHANGE 8 field)
+        response_text = turn.get("response_text", "")
+        if response_text:
+            agent_responses.append(AgentResponse(
+                turn_id=len(agent_responses) + 1,
+                text=response_text,
+                token_count=measure_text_tokens(response_text),
+            ))
+
+    # L5: Schema overhead — every turn loads all tool schemas
+    num_turns = len(data.get("turns", []))
+    schema_overhead = measure_mcp_schema_overhead(num_turns=num_turns)
 
     return AgentTrace(
         agent="antigravity",
@@ -220,6 +239,7 @@ def parse_antigravity_sg_session(
         tool_calls=tool_calls,
         agent_responses=agent_responses,
         task_completed=True,
+        mcp_schema_overhead_tokens=schema_overhead,
     )
 
 

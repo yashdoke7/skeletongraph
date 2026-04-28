@@ -62,22 +62,31 @@ def _parse_sqlite(
     mode: str,
     project_name: str,
 ) -> AgentTrace:
-    """Parse Cursor's SQLite database for chat history."""
+    """Parse Cursor's SQLite database for chat history AND tool calls.
+
+    Cursor stores data in state.vscdb under these key patterns:
+      - 'workbench.panel.chat*'  -> message text
+      - 'aidevent*'              -> tool calls (file reads, searches)
+      - 'interactive.sessions'   -> session list
+
+    Run this to discover keys in your own Cursor DB:
+      sqlite3 state.vscdb ".tables"
+      sqlite3 state.vscdb "SELECT DISTINCT key FROM ItemTable LIMIT 50"
+    """
     tool_calls: list[ToolCall] = []
     agent_responses: list[AgentResponse] = []
 
     try:
         conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
+        cursor_db = conn.cursor()
 
-        # Cursor stores chat data in the ItemTable with keys like
-        # 'workbench.panel.chat*' or 'interactive.sessions'
-        cursor.execute(
+        # ── Step 1: Get chat messages ──────────────────────────────
+        cursor_db.execute(
             "SELECT key, value FROM ItemTable WHERE key LIKE '%chat%' OR key LIKE '%composer%'"
         )
 
         turn_id = 0
-        for key, value in cursor.fetchall():
+        for key, value in cursor_db.fetchall():
             if not value:
                 continue
 
@@ -86,7 +95,6 @@ def _parse_sqlite(
             except (json.JSONDecodeError, TypeError):
                 continue
 
-            # Navigate the nested structure for chat messages
             messages = _extract_messages(data)
             for msg in messages:
                 role = msg.get("role", "")
@@ -100,23 +108,64 @@ def _parse_sqlite(
                     agent_responses.append(AgentResponse(
                         turn_id, content, measure_text_tokens(content)
                     ))
-
-                    # Extract file mentions from response
-                    for file_match in re.finditer(r'`([^\s`]+\.(?:py|ts|js|tsx|jsx))`', content):
-                        local = project_root / file_match.group(1)
-                        if local.exists():
-                            tool_calls.append(ToolCall(
-                                "view_file", file_match.group(1),
-                                measure_file_tokens(local, cap_lines=800)
-                            ))
-
                 elif role in ("user", "human") and not task_prompt:
                     task_prompt = content.strip()[:200]
 
+        # ── Step 2: Get tool call events ───────────────────────────
+        # Cursor logs tool invocations separately from chat messages.
+        # The key name varies by Cursor version — try multiple patterns.
+        TOOL_KEY_PATTERNS = [
+            "aidevent%",
+            "%toolcall%",
+            "%tool_result%",
+            "%composer.tool%",
+        ]
+        for pattern in TOOL_KEY_PATTERNS:
+            cursor_db.execute(
+                f"SELECT key, value FROM ItemTable WHERE key LIKE '{pattern}'"
+            )
+            rows = cursor_db.fetchall()
+            if not rows:
+                continue
+
+            for key, value in rows:
+                if not value:
+                    continue
+                try:
+                    events = json.loads(value)
+                    if not isinstance(events, list):
+                        events = [events]
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                for event in events:
+                    tool_name = event.get("toolName", event.get("name", ""))
+                    tool_input = event.get("input", event.get("args", {}))
+                    if isinstance(tool_input, str):
+                        try:
+                            tool_input = json.loads(tool_input)
+                        except Exception:
+                            tool_input = {}
+
+                    target = tool_input.get("path", tool_input.get("file_path",
+                             tool_input.get("query", tool_input.get("pattern", ""))))
+
+                    if any(kw in tool_name.lower() for kw in ("read", "view", "file", "open")):
+                        local = project_root / target if target else Path("")
+                        tokens = measure_file_tokens(local, cap_lines=800)
+                        tool_calls.append(ToolCall("view_file", target or "", tokens))
+                    elif any(kw in tool_name.lower() for kw in ("search", "grep", "find", "codebase")):
+                        tool_calls.append(ToolCall("grep_search", target or "", 100))
+                    elif any(kw in tool_name.lower() for kw in ("terminal", "run", "exec", "bash")):
+                        tool_calls.append(ToolCall("run_command", target or "", 50))
+                    elif tool_name:
+                        tool_calls.append(ToolCall(tool_name, target or "", 50))
+            break  # stop at first pattern that returned data
+
         conn.close()
 
-    except (sqlite3.Error, OSError) as e:
-        pass  # Gracefully handle DB access errors
+    except (sqlite3.Error, OSError):
+        pass
 
     return AgentTrace(
         agent="cursor", mode=mode, task_prompt=task_prompt or "Unknown",

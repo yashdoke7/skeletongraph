@@ -70,6 +70,12 @@ class AgentTrace:
     # Layer 3: Reasoning Tokens (if available from API)
     reasoning_tokens: Optional[int] = None
 
+    # Layer 5: MCP schema overhead (only non-zero for SG mode)
+    # This is the token cost of loading SG tool schemas every turn.
+    # For native runs this is 0. For SG runs we calculate it from
+    # the number of turns x schema cost per turn.
+    mcp_schema_overhead_tokens: int = 0
+
     # Layer 4: Quality annotations (filled manually or by judge)
     task_completed: Optional[bool] = None       # Did the fix work?
     files_modified: List[str] = field(default_factory=list)
@@ -162,11 +168,15 @@ class AgentTrace:
 
     @property
     def total_conversation_tokens(self) -> int:
-        """Total measurable tokens: Layers 1 + 2 + 3."""
+        """Total measurable tokens: Layers 1 + 2 + 3 + 5.
+        Layer 4 (reasoning) is additive but optional -- included
+        separately in the report since it's only available for some agents.
+        """
         return (
-            self.total_tool_output_tokens
-            + self.total_response_tokens
-            + self.estimated_history_tokens
+            self.total_tool_output_tokens       # L1
+            + self.total_response_tokens        # L2
+            + self.estimated_history_tokens     # L3
+            + self.mcp_schema_overhead_tokens   # L5
         )
 
     # ── Serialization ──────────────────────────────────────────────────
@@ -183,6 +193,7 @@ class AgentTrace:
                 "layer2_response_tokens": self.total_response_tokens,
                 "layer3_history_tokens": self.estimated_history_tokens,
                 "layer4_reasoning_tokens": self.reasoning_tokens,
+                "layer5_mcp_schema_overhead": self.mcp_schema_overhead_tokens,
                 "total_conversation_tokens": self.total_conversation_tokens,
                 "total_turns": self.total_turns,
                 "total_tool_calls": self.tool_call_count,
@@ -221,6 +232,7 @@ class AgentTrace:
         trace.test_passed = data.get("quality", {}).get("test_passed")
         trace.wall_clock_seconds = data.get("metrics", {}).get("wall_clock_seconds")
         trace.reasoning_tokens = data.get("metrics", {}).get("layer4_reasoning_tokens")
+        trace.mcp_schema_overhead_tokens = data.get("metrics", {}).get("layer5_mcp_schema_overhead", 0)
 
         for tc_data in data.get("tool_calls", []):
             trace.tool_calls.append(ToolCall(
