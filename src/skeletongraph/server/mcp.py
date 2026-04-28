@@ -97,6 +97,13 @@ def _get_session() -> Session:
             "type": "integer",
             "description": "Max number of structural skeletons to include (default: 50)",
         },
+        "previous_response": {
+            "type": "string",
+            "description": (
+                "Optional. Your previous response to the user. "
+                "Used only for token accounting -- does not affect context assembly."
+            ),
+        },
     },
 )
 def query_context_tool(params: dict) -> dict:
@@ -108,8 +115,16 @@ def query_context_tool(params: dict) -> dict:
     prompt = params["prompt"]
     budget = int(params.get("budget", 128_000))
     top_n = int(params.get("top_n", 50))
+    previous_response = params.get("previous_response", "")
 
     t0 = time.perf_counter()
+
+    # If agent passed previous_response, retroactively record it
+    # onto the LAST turn in the session. This gives us L2 data.
+    if previous_response and session._turns:
+        last_turn = session._turns[-1]
+        last_turn.response_text = previous_response
+        last_turn.response_tokens = len(previous_response) // 4
 
     result = resolve_context(prompt, store, session=session, top_n=top_n)
     assembled = assemble_context(

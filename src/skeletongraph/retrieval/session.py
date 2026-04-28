@@ -37,6 +37,9 @@ class TurnRecord:
     token_count: int                     # Tokens in the assembled context
     estimated_native_tokens: int         # Estimated if agent used grep/read
     confidence: str = ""
+    # Agent response captured via previous_response parameter (L2 data)
+    response_text: str = ""
+    response_tokens: int = 0
 
 
 @dataclass
@@ -192,6 +195,8 @@ class Session:
                     "token_count": t.token_count,
                     "estimated_native_tokens": t.estimated_native_tokens,
                     "confidence": t.confidence,
+                    "response_text": t.response_text,
+                    "response_tokens": t.response_tokens,
                 }
                 for t in self._turns[-10:]  # Only persist last 10 turns
             ],
@@ -237,6 +242,8 @@ class Session:
                     token_count=t.get("token_count", 0),
                     estimated_native_tokens=t.get("estimated_native_tokens", 0),
                     confidence=t.get("confidence", ""),
+                    response_text=t.get("response_text", ""),
+                    response_tokens=t.get("response_tokens", 0),
                 ))
 
         except (json.JSONDecodeError, KeyError, OSError):
