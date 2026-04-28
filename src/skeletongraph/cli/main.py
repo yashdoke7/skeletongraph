@@ -1008,7 +1008,7 @@ def eval_compare(path: str, sg_file: str, native_file: str, output: str):
 
 
 @app.command(name="eval-benchmark")
-@click.option("--dataset", "-d", default="swe-bench-verified", type=click.Choice(["swe-bench-verified", "custom"]), help="Dataset to evaluate against")
+@click.option("--dataset", "-d", default="swe-bench-verified", type=click.Choice(["swe-bench-verified", "crg-compat", "custom"]), help="Dataset to evaluate against")
 @click.option("--repos", "-r", default=None, help="Comma-separated repo filter (e.g. 'django/django,psf/requests')")
 @click.option("--limit", "-n", default=None, type=int, help="Max tasks to evaluate")
 @click.option("--traces-dir", "-t", required=True, help="Directory containing agent traces (sg_trace.json + native_trace.json)")
@@ -1040,6 +1040,9 @@ def eval_benchmark(dataset: str, repos: str, limit: int, traces_dir: str, repos_
             console.print(f"[red]Error:[/red] {e}")
             console.print("[dim]Install datasets: pip install datasets[/dim]")
             return
+    elif dataset == "crg-compat":
+        from ..eval.datasets.crg_compat import load_crg_compat
+        tasks = load_crg_compat(repos=repo_list)
     elif dataset == "custom" and dataset_file:
         import json as _json
         from ..eval.datasets.base import EvalTask
@@ -1128,6 +1131,27 @@ def eval_list(dataset: str):
             table.add_row(repo, str(count), size)
         
         console.print(table)
+    elif dataset == "crg-compat":
+        from ..eval.datasets.crg_compat import CRG_CONFIGS, CRG_PUBLISHED_RESULTS
+        
+        table = Table(title="[bold]CRG-Compatible Repos[/bold]", show_header=True)
+        table.add_column("Repo", style="cyan")
+        table.add_column("Commits", style="yellow", justify="right")
+        table.add_column("Language", style="dim")
+        table.add_column("CRG Claimed", style="magenta", justify="right")
+        
+        for name, config in CRG_CONFIGS.items():
+            crg_result = CRG_PUBLISHED_RESULTS.get(name, {})
+            reduction = crg_result.get("reduction", "?")
+            table.add_row(
+                name,
+                str(len(config["test_commits"])),
+                config["language"],
+                f"{reduction}x",
+            )
+        
+        console.print(table)
+        console.print("\n[dim]Note: CRG uses len(text)//4 for tokens. We use tiktoken BPE.[/dim]")
     else:
         console.print(f"[yellow]Dataset '{dataset}' not supported for listing.[/yellow]")
 

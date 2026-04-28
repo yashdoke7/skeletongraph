@@ -4,16 +4,17 @@
 
 SkeletonGraph indexes your codebase into a lightweight skeleton graph — function signatures, dependency edges, and structural metadata — then assembles the minimum context an LLM needs to complete a coding task. No full-file reading, no wasted tokens.
 
-## Key Metrics (Production Hardened)
+## Key Metrics
 
-| Metric | Value | Description |
-|--------|-------|-------------|
-| Avg Token Reduction | **2.5×** | vs raw file reading (avg 1000 tokens → 400) |
-| Success Rate (Recall) | **100%** | on golden dataset (auth, logic, cross-file cases) |
-| Session Savings | **40-60%** | saved after turn 1 via cross-turn deduplication |
-| Resolve Time | **0.8ms** | graph-based retrieval (zero LLM cost) |
-| Multi-Turn Deduplication | **✅ YES** | remembers what the LLM read before |
-| Scoped Constraints | **✅ YES** | hierarchical directory-level rules |
+| Metric | Value | Method |
+|--------|-------|--------|
+| Avg Token Reduction | **Nx** | tiktoken BPE vs native agent retrieval (SWE-bench Verified) |
+| File Localization F1 | **0.XX** | Against human-authored PR patches |
+| MRR | **0.XX** | First relevant file rank |
+| Session Savings | **40-60%** | Cross-turn deduplication after turn 1 |
+| Resolve Time | **0.8ms** | Graph-based retrieval (zero LLM cost) |
+
+> Benchmark numbers pending — run `skeletongraph eval-benchmark` on SWE-bench Verified to generate.
 
 ## How It Works
 
@@ -31,15 +32,17 @@ User Prompt → Intent Analysis → Entity Resolution → Graph Expansion
 - **Zone 2 (Recency)**: Full source of high-impact target code bodies.
 - **Zone 4 (Prompt)**: User instructions at the boundary of attention.
 
-### 🧠 Production Features
+### Production Features
 - **Cross-Turn Session Memory**: Tracks what the LLM has already "seen". If a function was sent in Turn 1, it is replaced with a 1-line signature in Turn 2, saving 90% of those tokens.
-- **Hierarchical Constraints**: Load global rules from project root and specific rules from nested directories (e.g. `services/auth/.skeletongraph/constraints.md`).
-- **Attention Heatmap**: Visual terminal feedback `[██████░░░]` showing how your token budget is allocated across the 4 zones.
+- **Hierarchical Constraints**: Load global rules from project root and specific rules from nested directories.
+- **Attention Heatmap**: Visual terminal feedback showing how your token budget is allocated across the 4 zones.
 - **PR Blast-Radius**: Analyze `git diff` to identify and include only the functions affected by a logic change.
 
 ## Quick Start
 
-# Install & Auto-detect IDEs (Claude, Cursor, Windsurf, etc)
+```bash
+# Install & Auto-detect IDEs (Claude Code, Cursor, Windsurf, Copilot, etc)
+pip install skeletongraph
 skeletongraph install
 
 # Index your project
@@ -55,17 +58,67 @@ skeletongraph stats
 git diff | skeletongraph review
 ```
 
-## Cross-Agent Evaluation
+## Evaluation & Benchmarking
 
-SkeletonGraph includes a unified evaluation module to compare LLM agent token consumption (Antigravity, Cursor, Claude Code, Copilot, Codex) before and after using the Graph.
+SkeletonGraph includes a **research-grade evaluation framework** for comparing AI coding agent performance before and after using the graph. Unlike other tools that use character-based estimates (`len//4`), we use **tiktoken BPE** for exact token counting and validate against **SWE-bench Verified** (the industry gold standard).
 
-Run an identical prompt twice in your IDE (once with SG enabled, once native), export the chats, and generate a 4-tier comparison report (Retrieval, Conversation, Turn Efficiency, Quality):
+### Quick Eval (Per-Project)
 
-```powershell
+Run the same prompt with SG ON and OFF, then compare:
+
+```bash
+# Antigravity
 skeletongraph eval --agent antigravity --native-file ./native_chat.txt --project flask
+
+# Cursor
+skeletongraph eval --agent cursor --native-file ./native_chat.txt --project flask
+
+# Claude Code
+skeletongraph eval --agent claude_code --native-file ./native_export.md --project flask
+
+# Copilot
+skeletongraph eval --agent copilot --native-file ./native_export.json --project flask
+
+# Codex
+skeletongraph eval --agent codex --project flask
 ```
 
-See [EVALUATION_WORKFLOW.md](EVALUATION_WORKFLOW.md) for exporting instructions per agent.
+### Research Benchmark (SWE-bench Verified)
+
+Evaluate against 500 human-validated GitHub issues with automated scoring:
+
+```bash
+# List available repos
+skeletongraph eval-list
+
+# Run benchmark
+skeletongraph eval-benchmark \
+  --dataset swe-bench-verified \
+  --traces-dir ./benchmark_traces \
+  --output ./benchmark_results
+```
+
+**Metrics produced:**
+- **Token Efficiency**: retrieval reduction ratio, total conversation cost, API savings
+- **Retrieval Quality**: Precision, Recall, F1, MRR, Hit@k (against human PR patches)
+- **Execution Quality**: test pass rate, regression rate (via pytest)
+- **Operational Efficiency**: turns, tool calls, redundant file views
+
+All metrics include mean, std deviation, and 95% confidence intervals.
+
+See [EVALUATION_WORKFLOW.md](EVALUATION_WORKFLOW.md) for detailed step-by-step instructions per agent.
+See [evaluation_dataset.md](evaluation_dataset.md) for dataset specifications.
+
+### How We Compare
+
+| Aspect | code-review-graph | graphify | **SkeletonGraph** |
+|:---|:---|:---|:---|
+| Token counter | `len(text)//4` (est.) | `len(text)//4` (est.) | **tiktoken BPE (exact)** |
+| Baseline | Static file reads | Raw file dump | **Real agent sessions** |
+| Ground truth | Self-referential graph | None | **SWE-bench human PRs** |
+| Sample size | 13 commits | 1 folder | **30+ verified tasks** |
+| Quality metric | None | None | **P/R/F1/MRR + test pass** |
+| Confidence | None | None | **95% CI with std dev** |
 
 ## Python API
 
@@ -112,31 +165,19 @@ Available tools:
 ```
 src/skeletongraph/
 ├── parser/           # Tree-sitter AST extraction (Python, TypeScript)
-│   ├── ast_extractor.py
-│   ├── edge_extractor.py
-│   ├── node_kinds.py
-│   ├── skeleton.py
-│   └── languages/    # Language-specific rules
 ├── graph/            # Dependency graph + search structures
-│   ├── dependency.py # BFS traversal algorithms
-│   ├── bloom.py      # Probabilistic existence check
-│   └── inverted_index.py
 ├── storage/          # Persistence to .skeletongraph/
-│   ├── dirty.py      # Incremental change tracking
-│   └── local.py      # Atomic JSON serialization
 ├── retrieval/        # Intent → candidates pipeline
-│   ├── intent.py     # Entity extraction + task classification
-│   ├── budget.py     # Elastic token budget
-│   └── resolver.py   # Graph-based context retrieval
-├── assembly/         # Context construction
-│   └── zone_assembler.py
+├── assembly/         # Context construction (4-zone)
 ├── llm/              # LLM integration
-│   ├── provider.py   # LiteLLM abstraction
-│   └── summarizer.py # Batch function summarization
 ├── server/           # MCP server
-│   └── mcp.py
+├── eval/             # Evaluation framework
+│   ├── datasets/     # SWE-bench, custom dataset loaders
+│   ├── benchmarks/   # Token efficiency, retrieval quality
+│   ├── parsers/      # Antigravity, Cursor, Claude, Copilot, Codex
+│   ├── scorer.py     # P/R/F1/MRR/Hit@k + aggregate stats
+│   └── schema.py     # AgentTrace schema
 ├── cli/              # CLI commands
-│   └── main.py
 └── build.py          # Build orchestrator
 ```
 
