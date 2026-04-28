@@ -8,21 +8,27 @@ from datetime import datetime
 from pathlib import Path
 
 from .comparison import ComparisonResult
-from .schema import AgentTrace
 
 
 def generate_report(result: ComparisonResult) -> str:
     """Generate a full markdown comparison report."""
     d = result.to_dict()
     comp = d["comparison"]
-    ta = d["tier_a_retrieval"]
     tb = d["tier_b_conversation"]
     tc = d["tier_c_efficiency"]
     td = d["tier_d_quality"]
 
-    # Format optional Layer 4 values
-    sg_l4 = f"{result.sg_layer4:,}" if result.sg_layer4 is not None else "N/A"
-    native_l4 = f"{result.native_layer4:,}" if result.native_layer4 is not None else "N/A"
+    # Calculate costs ($3.00 per 1M input tokens, assume generation is separate but we just use flat for context scaling demo)
+    PRICE_PER_M = 3.00
+    whole_cost = (tb['whole_codebase_tokens'] / 1_000_000) * PRICE_PER_M
+    native_cost = (tb['native_tokens'] / 1_000_000) * PRICE_PER_M
+    sg_cost = (tb['sg_tokens'] / 1_000_000) * PRICE_PER_M
+
+    # Format tokens with N/A handler
+    sg_l4 = f"{result.sg_layer4:,}" if result.sg_layer4 is not None else "Hidden"
+    native_l4 = f"{result.native_layer4:,}" if result.native_layer4 is not None else "Hidden"
+    
+    whole_codebase_str = f"{tb['whole_codebase_tokens']:,}" if tb['whole_codebase_tokens'] else "N/A"
 
     report = f"""# SkeletonGraph Evaluation Report
 *Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*
@@ -34,61 +40,60 @@ def generate_report(result: ComparisonResult) -> str:
 
 ---
 
-## Tier A: Retrieval Efficiency
-*Measures: Token cost of tool outputs only (view_file, grep, query_context)*
+## Token Efficiency matrix (The 3 Planes)
+*Measures Input Context Window Load: Tool outputs + agent responses + history + schema overhead.*
 
-| Metric | SkeletonGraph | Native Agent | Delta |
-|:---|---:|---:|:---|
-| **Tool Output Tokens** | {ta['sg_tokens']:,} | {ta['native_tokens']:,} | **{ta['reduction_ratio']}x reduction** |
-| **Tokens Saved** | -- | -- | **{ta['tokens_saved']:,}** |
+| Metric | 1. Whole Codebase (Static) | 2. Native Agent (Dynamic) | 3. SkeletonGraph (Optimized) |
+|:---|---:|---:|---:|
+| **Total Context Tokens** | {whole_codebase_str} | {tb['native_tokens']:,} | {tb['sg_tokens']:,} |
+| **Reduction vs Codebase** | -- | **{tb.get('static_to_native_reduction_ratio', 0)}x** | **{tb.get('static_to_sg_reduction_ratio', 0)}x** |
+| **Reduction vs Native** | -- | -- | **{tb['native_to_sg_reduction_ratio']}x** |
+| **Estimated API Cost** | ${whole_cost:.4f} | ${native_cost:.4f} | ${sg_cost:.4f} |
 
-## Tier B: Full Conversation Cost
-*Measures: Tool outputs + agent responses + history compounding + MCP schema overhead*
+### Token Breakdown by Pricing Category
 
-| Metric | SkeletonGraph | Native Agent | Delta |
-|:---|---:|---:|:---|
-| **Total Conversation Tokens** | {tb['sg_tokens']:,} | {tb['native_tokens']:,} | **{tb['reduction_ratio']}x reduction** |
-
-### Per-Layer Breakdown
-
-| Layer | What it measures | SG | Native |
+| Component | What it measures | Native Agent | SkeletonGraph |
 |:---|:---|---:|---:|
-| L1: Tool output | File reads, grep, query_context | {result.sg_layer1:,} | {result.native_layer1:,} |
-| L2: Agent responses | Text the agent sent to user | {result.sg_layer2:,} | {result.native_layer2:,} |
-| L3: History compounding | Prior turns re-sent each call | {result.sg_layer3:,} | {result.native_layer3:,} |
-| L4: Reasoning | Internal chain-of-thought | {sg_l4} | {native_l4} |
-| L5: MCP schema | Tool schema load per turn | {result.sg_layer5:,} | 0 |
-| **Total** | | **{result.sg_conversation_tokens:,}** | **{result.native_conversation_tokens:,}** |
+| **Context Assembly** | All text retrieved via tools (reads, grep, SG) | {result.native_layer1:,} | {result.sg_layer1:,} |
+| **History Compounding** | Cumulative cost of chatting over multiple turns | {result.native_layer3:,} | {result.sg_layer3:,} |
+| **Schema Overhead** | Token cost to load MCP protocol definitions | 0 | {result.sg_layer5:,} |
+| **Output Text** | The actual text the agent wrote to the user | {result.native_layer2:,} | {result.sg_layer2:,} |
+| **Total Measurable** | Sum of above rows | **{tb['native_tokens']:,}** | **{tb['sg_tokens']:,}** |
+| **Reasoning Tax\*** | *Hidden <thinking> steps agent takes internally* | *{native_l4}* | *{sg_l4}* |
 
-## Tier C: Turn Efficiency
-*Measures: Agent actions and round-trip overhead*
+*\*Reasoning tokens are excluded from the main summation because closed-models (like Gemini/Cursor) do not expose them, preventing apples-to-apples contextual load comparisons.*
 
-| Metric | SkeletonGraph | Native Agent |
+---
+
+## Behavioral Efficiency
+*Measures agent actions and round-trip overhead*
+
+| Metric | Native Agent | SkeletonGraph |
 |:---|---:|---:|
-| Total Turns | {tc['sg_turns']} | {tc['native_turns']} |
-| Total Tool Calls | {tc['sg_tool_calls']} | {tc['native_tool_calls']} |
-| File Views | {result.sg_trace.view_file_count} | {result.native_trace.view_file_count} |
-| Grep Searches | {result.sg_trace.grep_count} | {result.native_trace.grep_count} |
-| SG Tool Calls | {result.sg_trace.sg_tool_count} | -- |
-| Repeated File Views | -- | {tc['native_repeated_views']} |
+| Total Agent Turns | {tc['native_turns']} | {tc['sg_turns']} |
+| Total Tool Calls | {tc['native_tool_calls']} | {tc['sg_tool_calls']} |
+| SG Context Queries | -- | {result.sg_trace.sg_tool_count} |
+| File Views | {result.native_trace.view_file_count} | {result.sg_trace.view_file_count} |
+| Grep Searches | {result.native_trace.grep_count} | {result.sg_trace.grep_count} |
 
-## Tier D: Task Completion Quality
+---
 
-| Metric | SkeletonGraph | Native Agent |
+## Execution Quality
+*Measures accuracy against historical ground truth*
+
+| Metric | Native Agent | SkeletonGraph |
 |:---|:---|:---|
-| Task Completed | {'Yes' if td['sg_completed'] else 'No'} | {'Yes' if td['native_completed'] else 'No'} |
-| Files Modified | {len(result.sg_trace.files_modified)} | {len(result.native_trace.files_modified)} |
-| Tests Passed | {'Yes' if result.sg_trace.test_passed else 'N/A'} | {'Yes' if result.native_trace.test_passed else 'N/A'} |
+| **Task Completed** | {'Yes' if td['native_completed'] else 'No'} | {'Yes' if td['sg_completed'] else 'No'} |
+| **Files Modified** | {len(result.native_trace.files_modified)} | {len(result.sg_trace.files_modified)} |
+| **F1 / Precision / Recall** | N/A *(Coming Soon)* | N/A *(Coming Soon)* |
 
 ---
 
 ## Methodology
-- **L1 (Tool Output):** Actual file sizes from disk (tiktoken BPE, 800-line cap per view). Repeated views counted separately.
-- **L2 (Agent Responses):** Measured from exported chat text (tiktoken BPE).
-- **L3 (History):** Cumulative sum -- at each turn, all prior turns' (L1+L2) content re-submitted.
-- **L4 (Reasoning):** Available for Claude Code (JSONL usage field) and Codex. N/A for Antigravity (Gemini internal), Cursor (not exposed).
-- **L5 (MCP Schema):** SG tool schemas loaded per turn. Measured from actual JSON schema encoding. Native side = 0.
-- **Token counter:** tiktoken cl100k_base (fallback: len//4 if tiktoken unavailable).
+- **Whole Codebase:** Literal BPE tokenization of all readable, non-ignored files in the repository.
+- **Context Assembly:** True byte-size of the exact strings returned by VS Code / IDE to the LLM (tiktoken cl100k_base).
+- **History Compounding:** Cumulative sum. At each turn > 1, all prior turns' context is appended again as input.
+- **Token Pricing:** Modeled at a flat $3.00 / 1M tokens.
 """
     return report
 

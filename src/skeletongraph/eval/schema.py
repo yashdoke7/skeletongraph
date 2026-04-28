@@ -60,6 +60,7 @@ class AgentTrace:
     mode: str                           # "skeletongraph" or "native"
     task_prompt: str                    # The original user request
     project: str = ""                   # e.g. "flask", "fastapi"
+    repo_total_tokens: Optional[int] = None # Whole codebase size limit
 
     # Layer 1: Tool Output Tokens (retrieval cost)
     tool_calls: List[ToolCall] = field(default_factory=list)
@@ -188,6 +189,7 @@ class AgentTrace:
             "mode": self.mode,
             "task_prompt": self.task_prompt,
             "project": self.project,
+            "repo_total_tokens": self.repo_total_tokens,
             "metrics": {
                 "layer1_tool_output_tokens": self.total_tool_output_tokens,
                 "layer2_response_tokens": self.total_response_tokens,
@@ -226,6 +228,7 @@ class AgentTrace:
             mode=data["mode"],
             task_prompt=data["task_prompt"],
             project=data.get("project", ""),
+            repo_total_tokens=data.get("repo_total_tokens"),
         )
         trace.task_completed = data.get("quality", {}).get("task_completed")
         trace.files_modified = data.get("quality", {}).get("files_modified", [])

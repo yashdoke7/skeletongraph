@@ -21,6 +21,7 @@ class ComparisonResult:
 
     sg_trace: AgentTrace
     native_trace: AgentTrace
+    whole_codebase_tokens: Optional[int] = None
 
     # ── Tier A: Retrieval Efficiency ───────────────────────────────
     @property
@@ -55,6 +56,18 @@ class ComparisonResult:
         if self.sg_conversation_tokens == 0:
             return 0.0
         return self.native_conversation_tokens / self.sg_conversation_tokens
+
+    @property
+    def static_to_native_reduction_ratio(self) -> float:
+        if not self.whole_codebase_tokens or self.native_conversation_tokens == 0:
+            return 0.0
+        return self.whole_codebase_tokens / self.native_conversation_tokens
+
+    @property
+    def static_to_sg_reduction_ratio(self) -> float:
+        if not self.whole_codebase_tokens or self.sg_conversation_tokens == 0:
+            return 0.0
+        return self.whole_codebase_tokens / self.sg_conversation_tokens
 
     # ── Per-layer breakdown for SG side ─────────────────────────
     @property
@@ -141,9 +154,12 @@ class ComparisonResult:
                 "tokens_saved": self.retrieval_tokens_saved,
             },
             "tier_b_conversation": {
+                "whole_codebase_tokens": self.whole_codebase_tokens or 0,
                 "sg_tokens": self.sg_conversation_tokens,
                 "native_tokens": self.native_conversation_tokens,
-                "reduction_ratio": round(self.conversation_reduction_ratio, 1),
+                "native_to_sg_reduction_ratio": round(self.conversation_reduction_ratio, 1),
+                "static_to_native_reduction_ratio": round(self.static_to_native_reduction_ratio, 1),
+                "static_to_sg_reduction_ratio": round(self.static_to_sg_reduction_ratio, 1),
             },
             "tier_b_breakdown": {
                 "sg": {
@@ -181,9 +197,9 @@ class ComparisonResult:
         return json.dumps(self.to_dict(), indent=indent)
 
 
-def compare_traces(sg_trace: AgentTrace, native_trace: AgentTrace) -> ComparisonResult:
+def compare_traces(sg_trace: AgentTrace, native_trace: AgentTrace, whole_codebase_tokens: Optional[int] = None) -> ComparisonResult:
     """Compare an SG trace against a native trace."""
-    return ComparisonResult(sg_trace=sg_trace, native_trace=native_trace)
+    return ComparisonResult(sg_trace=sg_trace, native_trace=native_trace, whole_codebase_tokens=whole_codebase_tokens)
 
 
 def save_comparison(

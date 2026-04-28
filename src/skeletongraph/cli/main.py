@@ -1021,9 +1021,15 @@ def eval_full(agent: str, native_file: str, path: str, project: str):
     from ..eval.parsers.antigravity import parse_antigravity_sg_session
     from ..eval.comparison import compare_traces
     from ..eval.report import generate_report, save_report
+    from ..eval.token_counter import measure_codebase_tokens
 
-    # Step 1: Parse SG session
-    console.print("[bold]Step 1:[/bold] Parsing SkeletonGraph session...")
+    # Step 1: Measure Whole Codebase ceiling
+    console.print("[bold]Step 1:[/bold] Measuring static codebase limit...")
+    whole_codebase_tokens = measure_codebase_tokens(project_root)
+    console.print(f"  [green][OK][/green] Codebase ceiling: {whole_codebase_tokens:,} tokens")
+
+    # Step 2: Parse SG session
+    console.print("[bold]Step 2:[/bold] Parsing SkeletonGraph session...")
     try:
         sg_trace = parse_antigravity_sg_session(project_root, project)
         console.print(f"  [green][OK][/green] SG trace: {sg_trace.total_tool_output_tokens:,} tokens across {sg_trace.tool_call_count} calls")
@@ -1031,8 +1037,8 @@ def eval_full(agent: str, native_file: str, path: str, project: str):
         console.print(f"  [red][X] No SG session found: {e}[/red]")
         return
 
-    # Step 2: Parse native baseline
-    console.print("[bold]Step 2:[/bold] Parsing native baseline...")
+    # Step 3: Parse native baseline
+    console.print("[bold]Step 3:[/bold] Parsing native baseline...")
     if not native_file:
         discovered = _discover_agent_file(agent)
         if discovered:
@@ -1048,9 +1054,9 @@ def eval_full(agent: str, native_file: str, path: str, project: str):
         return
     console.print(f"  [green][OK][/green] Native trace: {native_trace.total_tool_output_tokens:,} tokens across {native_trace.tool_call_count} calls")
 
-    # Step 3: Compare
-    console.print("[bold]Step 3:[/bold] Generating comparison...")
-    result = compare_traces(sg_trace, native_trace)
+    # Step 4: Compare
+    console.print("[bold]Step 4:[/bold] Generating comparison...")
+    result = compare_traces(sg_trace, native_trace, whole_codebase_tokens)
 
     # Save everything
     (eval_dir / "sg_trace.json").write_text(sg_trace.to_json(), encoding="utf-8")
@@ -1065,12 +1071,14 @@ def eval_full(agent: str, native_file: str, path: str, project: str):
 
     console.print()
     panel = Panel(
-        f"[bold green]Retrieval:[/bold green] {ta['reduction_ratio']}x reduction "
-        f"({ta['native_tokens']:,} -> {ta['sg_tokens']:,} tokens)\n"
-        f"[bold blue]Conversation:[/bold blue] {tb['reduction_ratio']}x reduction "
+        f"[bold cyan]Static vs Dynamic:[/bold cyan] {tb.get('static_to_native_reduction_ratio', 0)}x reduction "
+        f"({tb['whole_codebase_tokens']:,} -> {tb['native_tokens']:,} tokens)\n"
+        f"[bold blue]Static vs SG:[/bold blue] {tb.get('static_to_sg_reduction_ratio', 0)}x reduction "
+        f"({tb['whole_codebase_tokens']:,} -> {tb['sg_tokens']:,} tokens)\n"
+        f"[bold green]Native vs SG:[/bold green] {tb.get('native_to_sg_reduction_ratio', 0)}x reduction "
         f"({tb['native_tokens']:,} -> {tb['sg_tokens']:,} tokens)\n"
-        f"[bold yellow]Tokens Saved:[/bold yellow] {ta['tokens_saved']:,}",
-        title="[bold]Evaluation Results[/bold]",
+        f"[bold yellow]Tokens Saved (vs Native):[/bold yellow] {ta['tokens_saved']:,}",
+        title="[bold]Context Window Scaling Results[/bold]",
     )
     console.print(panel)
     console.print(f"\n[dim]Full report: {eval_dir / 'report.md'}[/dim]")

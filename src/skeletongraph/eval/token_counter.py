@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import subprocess
 
 # ── Token counting engine ──────────────────────────────────────────────
 
@@ -138,3 +139,55 @@ def measure_directory_listing_tokens(num_entries: int = 0) -> int:
     if num_entries > 0:
         return num_entries * 40 // 4
     return 50
+
+
+def measure_codebase_tokens(project_root: Path) -> int:
+    """Measure the absolute token size of the entire readable codebase.
+    
+    This acts as the static 'Total Repo Baseline' for evaluation reports.
+    Attempts to read tracked files via `git ls-files`, with a fallback 
+    to standard recursive iteration for non-git folders.
+    """
+    if not project_root.exists() or not project_root.is_dir():
+        return 0
+
+    files_to_measure = []
+    
+    # Try git ls-files first to automatically respect .gitignore
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"], 
+            cwd=project_root, 
+            capture_output=True, 
+            text=True, 
+            check=True
+        )
+        for line in result.stdout.splitlines():
+            file_path = project_root / line.strip()
+            if file_path.is_file():
+                files_to_measure.append(file_path)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Fallback: scan directory manually, ignoring hidden folders and common binaries
+        ignore_dirs = {".git", ".venv", "venv", "node_modules", "__pycache__", ".next", ".pytest_cache"}
+        for fp in project_root.rglob("*"):
+            if not fp.is_file():
+                continue
+            if any(part in ignore_dirs for part in fp.parts):
+                continue
+            # Skip likely binary/media files
+            if fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".tar", ".gz", ".mp4", ".mov", ".db", ".sqlite"}:
+                continue
+            files_to_measure.append(fp)
+
+    total_tokens = 0
+    for fp in files_to_measure:
+        # We don't cap lines for the codebase baseline, we want the true size
+        if fp.exists():
+            try:
+                # Use measure_text_tokens to avoid the cap_lines logic in measure_file_tokens
+                text = fp.read_text(encoding="utf-8", errors="ignore")
+                total_tokens += measure_text_tokens(text)
+            except Exception:
+                pass
+
+    return total_tokens
