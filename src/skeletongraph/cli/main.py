@@ -1007,6 +1007,131 @@ def eval_compare(path: str, sg_file: str, native_file: str, output: str):
     console.print(f"[green]JSON saved to:[/green] {comp_path}")
 
 
+@app.command(name="eval-benchmark")
+@click.option("--dataset", "-d", default="swe-bench-verified", type=click.Choice(["swe-bench-verified", "custom"]), help="Dataset to evaluate against")
+@click.option("--repos", "-r", default=None, help="Comma-separated repo filter (e.g. 'django/django,psf/requests')")
+@click.option("--limit", "-n", default=None, type=int, help="Max tasks to evaluate")
+@click.option("--traces-dir", "-t", required=True, help="Directory containing agent traces (sg_trace.json + native_trace.json)")
+@click.option("--repos-dir", default=None, help="Directory containing cloned repos (for codebase measurement)")
+@click.option("--output", "-o", default=None, help="Output directory for results")
+@click.option("--dataset-file", default=None, help="Path to custom dataset JSONL file")
+def eval_benchmark(dataset: str, repos: str, limit: int, traces_dir: str, repos_dir: str, output: str, dataset_file: str):
+    """Run research-grade benchmarks against SWE-bench Verified or custom datasets.
+    
+    Requires REAL agent session traces — does not simulate or estimate.
+    """
+    from ..eval.datasets.swe_bench import load_swe_bench, list_available_repos, download_swe_bench
+    from ..eval.benchmarks.runner import BenchmarkRunner
+    
+    traces_path = Path(traces_dir).resolve()
+    repos_path = Path(repos_dir).resolve() if repos_dir else None
+    output_path = Path(output).resolve() if output else Path(".skeletongraph/benchmark")
+    
+    # Parse repo filter
+    repo_list = [r.strip() for r in repos.split(",")] if repos else None
+    
+    # Load dataset
+    console.print("[bold]Step 1:[/bold] Loading evaluation dataset...")
+    
+    if dataset == "swe-bench-verified":
+        try:
+            tasks = load_swe_bench(repos=repo_list, limit=limit)
+        except ImportError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            console.print("[dim]Install datasets: pip install datasets[/dim]")
+            return
+    elif dataset == "custom" and dataset_file:
+        import json as _json
+        from ..eval.datasets.base import EvalTask
+        tasks = []
+        with open(dataset_file, "r", encoding="utf-8") as f:
+            for line in f:
+                raw = _json.loads(line)
+                tasks.append(EvalTask(**raw))
+    else:
+        console.print("[red]Error: specify --dataset-file for custom datasets[/red]")
+        return
+    
+    console.print(f"  [green][OK][/green] Loaded {len(tasks)} tasks")
+    
+    if not tasks:
+        console.print("[yellow]No tasks loaded. Check your filters.[/yellow]")
+        return
+    
+    # List repos
+    repo_summary = {}
+    for t in tasks:
+        repo_summary[t.repo] = repo_summary.get(t.repo, 0) + 1
+    for repo, count in sorted(repo_summary.items()):
+        console.print(f"  [dim]{repo}: {count} tasks[/dim]")
+    
+    # Run benchmarks
+    console.print("[bold]Step 2:[/bold] Loading agent traces...")
+    runner = BenchmarkRunner(tasks, traces_path, repos_path)
+    
+    if not runner.sg_traces and not runner.native_traces:
+        console.print("[red]No traces found in the specified directory.[/red]")
+        console.print(f"[dim]Expected structure: {traces_path}/{{task_id}}/sg_trace.json[/dim]")
+        return
+    
+    console.print("[bold]Step 3:[/bold] Running benchmarks...")
+    summary = runner.run_all()
+    
+    # Save results
+    console.print("[bold]Step 4:[/bold] Saving results...")
+    runner.save_results(output_path)
+    
+    # Display summary
+    console.print()
+    te = summary.get("token_efficiency", {})
+    rq_sg = summary.get("retrieval_quality", {}).get("sg", {})
+    
+    panel_text = ""
+    rr = te.get("retrieval_reduction_ratio", {})
+    if rr:
+        panel_text += f"[bold green]Token Reduction:[/bold green] {rr.get('mean', 0):.1f}x average\n"
+    
+    cs = te.get("cost_savings_pct", {})
+    if cs:
+        panel_text += f"[bold blue]Cost Savings:[/bold blue] {cs.get('mean', 0):.1f}% average\n"
+    
+    f1 = rq_sg.get("f1", {})
+    if f1:
+        panel_text += f"[bold yellow]SG File F1:[/bold yellow] {f1.get('mean', 0):.3f} ± {f1.get('std', 0):.3f}\n"
+    
+    mrr = rq_sg.get("mrr", {})
+    if mrr:
+        panel_text += f"[bold cyan]SG MRR:[/bold cyan] {mrr.get('mean', 0):.3f}"
+    
+    if panel_text:
+        console.print(Panel(panel_text, title="[bold]Benchmark Results[/bold]"))
+    
+    console.print(f"\n[dim]Full report: {output_path / 'benchmark_report.md'}[/dim]")
+    console.print(f"[dim]Raw JSON: {output_path / 'benchmark_results.json'}[/dim]")
+
+
+@app.command(name="eval-list")
+@click.option("--dataset", "-d", default="swe-bench-verified", help="Dataset to list repos for")
+def eval_list(dataset: str):
+    """List available repos and task counts in a dataset."""
+    if dataset == "swe-bench-verified":
+        from ..eval.datasets.swe_bench import list_available_repos, REPO_SIZES
+        repos = list_available_repos()
+        
+        table = Table(title="[bold]SWE-bench Verified Repos[/bold]", show_header=True)
+        table.add_column("Repo", style="cyan")
+        table.add_column("Tasks", style="yellow", justify="right")
+        table.add_column("Size", style="dim")
+        
+        for repo, count in repos.items():
+            size = REPO_SIZES.get(repo, "?")
+            table.add_row(repo, str(count), size)
+        
+        console.print(table)
+    else:
+        console.print(f"[yellow]Dataset '{dataset}' not supported for listing.[/yellow]")
+
+
 @app.command(name="eval")
 @click.option("--agent", "-a", default="antigravity", type=click.Choice(SUPPORTED_AGENTS), help="Agent to evaluate")
 @click.option("--native-file", "-f", default=None, help="Path to native exported chat")

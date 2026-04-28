@@ -245,3 +245,9 @@ class AgentTrace:
             ))
 
         return trace
+
+    @classmethod
+    def from_json(cls, json_str: str) -> AgentTrace:
+        """Deserialize from JSON string."""
+        return cls.from_dict(json.loads(json_str))
+
