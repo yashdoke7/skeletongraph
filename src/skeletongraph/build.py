@@ -245,7 +245,7 @@ def build_index(
     store.inverted_index = InvertedIndex()
     for fqn, sk in store.skeleton_table.items():
         name = fqn.split("::")[-1] if "::" in fqn else fqn
-        store.inverted_index.add(fqn, name, sk.signature)
+        store.inverted_index.add(fqn, name, sk.signature, docstring=sk.docstring)
 
     # Navigational indexing: Include constants and class attributes as beacons
     for file_path, file_sk in store.file_skeletons.items():
@@ -355,7 +355,7 @@ def update_index(
 
             # Update inverted index
             name = sk.fqn.split("::")[-1] if "::" in sk.fqn else sk.fqn
-            store.inverted_index.add(sk.fqn, name, sk.signature)
+            store.inverted_index.add(sk.fqn, name, sk.signature, docstring=sk.docstring)
 
         store.dirty_tracker.update_file(
             file_path,

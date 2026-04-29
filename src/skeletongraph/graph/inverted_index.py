@@ -68,14 +68,15 @@ class InvertedIndex:
         self._fqn_tokens: Dict[str, Set[str]] = {}  # For removal during updates
 
     def add(self, fqn: str, name: str, signature: str = "",
-            summary: str = "") -> None:
-        """Index a function by its name, signature, and summary.
+            summary: str = "", docstring: str = "") -> None:
+        """Index a function by its name, signature, summary, and docstring.
 
         Args:
             fqn: Fully qualified name (the value stored in the index).
             name: Function/class name (e.g., 'validate_token').
             signature: Full signature for additional keyword extraction.
             summary: Function summary text.
+            docstring: First line of docstring (high-signal, low-noise).
         """
         tokens: Set[str] = set()
 
@@ -95,6 +96,10 @@ class InvertedIndex:
         # Tokenize summary
         if summary:
             tokens.update(tokenize_text(summary))
+
+        # Tokenize docstring (high signal: describes what the function does)
+        if docstring:
+            tokens.update(tokenize_text(docstring))
 
         # Also index the full function name as-is (for exact matches)
         full_name = fqn.split("::")[-1] if "::" in fqn else fqn
