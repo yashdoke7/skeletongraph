@@ -31,6 +31,7 @@ from ..summary.summary_store import SummaryStore
 from ..parser.skeleton import SkeletonCore
 from ..assembly.constraint_store import ConstraintStore
 from ..config import SGConfig, load_config
+from ..eval.token_counter import measure_text_tokens
 
 
 @dataclass
@@ -359,8 +360,8 @@ def _focused_extract(
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars per token."""
-    return max(0, len(text) // 4)
+    """Precise token estimate using project's tiktoken implementation."""
+    return estimate_tokens(text)
 
 
 def _estimate_raw_reading_tokens(
@@ -383,7 +384,7 @@ def _estimate_raw_reading_tokens(
             if full_path.exists():
                 try:
                     content = full_path.read_text(encoding="utf-8", errors="replace")
-                    total += len(content) // 4
+                    total += estimate_tokens(content)
                 except Exception:
                     pass
     # Conservative multiplier: agents don't always read entire files
