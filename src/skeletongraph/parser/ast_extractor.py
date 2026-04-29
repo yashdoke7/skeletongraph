@@ -115,6 +115,7 @@ class RawFunction:
     body_text: str = ""
     is_exported: bool = False
     parent_class: Optional[str] = None
+    docstring: str = ""  # First line of docstring (for search indexing)
 
 
 @dataclass
@@ -209,9 +210,11 @@ def count_branches(node: Node) -> int:
     return count + 1  # Base complexity
 
 
+from ..eval.token_counter import measure_text_tokens
+
 def estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars per token (GPT tokenizer average)."""
-    return max(1, len(text) // 4)
+    """Precise token estimate using project's tiktoken implementation."""
+    return measure_text_tokens(text)
 
 
 def _hash_text(text: str) -> str:
@@ -363,6 +366,7 @@ def _raw_to_skeleton(raw: RawFunction) -> SkeletonCore:
         is_exported=raw.is_exported,
         complexity=_estimate_complexity_from_text(raw.body_text),
         body_token_estimate=estimate_tokens(raw.body_text),
+        docstring=raw.docstring,
         sha256=_hash_text(raw.body_text) if raw.body_text else "",
     )
 

@@ -32,6 +32,19 @@ def _get_name(node: Node, source_bytes: bytes) -> str:
         return node_text(name_node, source_bytes)
     return ""
 
+def _extract_javadoc_before(node: Node, source_bytes: bytes) -> str:
+    """Extract the first line of a Javadoc comment preceding a node."""
+    prev = node.prev_named_sibling
+    if prev and prev.type in ("block_comment", "comment"):
+        text = node_text(prev, source_bytes).strip()
+        if text.startswith("/**"):
+            text = text.lstrip("/").lstrip("*").rstrip("*").rstrip("/").strip()
+            for line in text.split("\n"):
+                line = line.strip().lstrip("*").strip()
+                if line and not line.startswith("@"):
+                    return line[:200]
+    return ""
+
 def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> Optional[FileExtractionResult]:
     root_node = tree.root_node
     
@@ -110,6 +123,9 @@ def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                 
                 body_text = node_text(block_node, source_bytes) if block_node else ""
                 
+                # Extract Javadoc
+                docstring = _extract_javadoc_before(node, source_bytes)
+                
                 # Check modifiers for export status
                 is_exported = False
                 mods = _get_child_by_type(node, "modifiers")
@@ -134,7 +150,8 @@ def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                     kind=kind,
                     body_text=body_text,
                     is_exported=is_exported,
-                    parent_class=current_class.name if current_class else None
+                    parent_class=current_class.name if current_class else None,
+                    docstring=docstring,
                 )
                 
                 if current_class:

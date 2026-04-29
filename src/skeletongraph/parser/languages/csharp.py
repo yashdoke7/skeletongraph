@@ -32,6 +32,18 @@ def _get_name(node: Node, source_bytes: bytes) -> str:
         return node_text(name_node, source_bytes)
     return ""
 
+def _extract_csharp_doc(node: Node, source_bytes: bytes) -> str:
+    """Extract C# /// XML doc comment preceding a node."""
+    prev = node.prev_named_sibling
+    if prev and prev.type == "comment":
+        text = node_text(prev, source_bytes).strip()
+        if text.startswith("///"):
+            import re
+            # Strip XML tags like <summary>
+            clean = re.sub(r'<[^>]+>', '', text.lstrip("/").strip())
+            return clean.strip()[:200]
+    return ""
+
 def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> Optional[FileExtractionResult]:
     root_node = tree.root_node
     
@@ -133,7 +145,8 @@ def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree)
                     kind=kind,
                     body_text=body_text,
                     is_exported=is_exported,
-                    parent_class=current_class.name if current_class else None
+                    parent_class=current_class.name if current_class else None,
+                    docstring=_extract_csharp_doc(node, source_bytes),
                 )
                 
                 if current_class:

@@ -31,6 +31,26 @@ from ..ast_extractor import (
 from ..node_kinds import NodeKind
 
 
+def _extract_jsdoc_before(node: Node, source_bytes: bytes) -> str:
+    """Extract the first line of a JSDoc comment preceding a node.
+
+    Looks at the previous sibling for a /** ... */ comment block.
+    Returns the first meaningful line, capped at 200 chars.
+    """
+    prev = node.prev_named_sibling
+    if prev and prev.type == "comment":
+        text = node_text(prev, source_bytes).strip()
+        if text.startswith("/**"):
+            # Strip /** and */ delimiters
+            text = text.lstrip("/").lstrip("*").rstrip("*").rstrip("/").strip()
+            # Take the first non-empty line
+            for line in text.split("\n"):
+                line = line.strip().lstrip("*").strip()
+                if line and not line.startswith("@"):
+                    return line[:200]
+    return ""
+
+
 def extract_typescript(
     file_path: str,
     source: str,
@@ -157,6 +177,9 @@ def _extract_function_decl(
     body_node = node.child_by_field_name("body")
     body_text = node_text(body_node, source_bytes) if body_node else ""
 
+    # JSDoc docstring
+    docstring = _extract_jsdoc_before(node, source_bytes)
+
     return RawFunction(
         name=name,
         fqn=fqn,
@@ -168,6 +191,7 @@ def _extract_function_decl(
         body_text=body_text,
         is_exported=is_exported or not name.startswith("_"),
         parent_class=parent_class,
+        docstring=docstring,
     )
 
 
@@ -244,6 +268,9 @@ def _extract_method_def(
     body_node = node.child_by_field_name("body")
     body_text = node_text(body_node, source_bytes) if body_node else ""
 
+    # JSDoc docstring
+    docstring = _extract_jsdoc_before(node, source_bytes)
+
     return RawFunction(
         name=name,
         fqn=fqn,
@@ -254,6 +281,7 @@ def _extract_method_def(
         kind=kind,
         body_text=body_text,
         parent_class=parent_class,
+        docstring=docstring,
     )
 
 

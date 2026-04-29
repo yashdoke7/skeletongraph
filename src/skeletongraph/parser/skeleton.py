@@ -78,6 +78,11 @@ class SkeletonCore:
     """Approximate token count of the full function body. Used by the
     budget manager to decide if page-fault expansion fits the budget."""
 
+    # ── Documentation ──────────────────────────────────────────────────────
+    docstring: str = ""
+    """First line of the function/class docstring. Used for search indexing
+    (inverted index + BM25). NOT sent to LLM context — purely for retrieval."""
+
     # ── Dirty tracking ─────────────────────────────────────────────────────
     sha256: str = ""
     """Hash of the function body text. Only re-summarize if changed.
@@ -126,7 +131,7 @@ class SkeletonCore:
 
     def to_dict(self) -> dict:
         """Serialize for JSON storage."""
-        return {
+        d = {
             "fqn": self.fqn,
             "file_path": self.file_path,
             "line_start": self.line_start,
@@ -139,6 +144,9 @@ class SkeletonCore:
             "body_token_estimate": self.body_token_estimate,
             "sha256": self.sha256,
         }
+        if self.docstring:
+            d["docstring"] = self.docstring
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> SkeletonCore:
@@ -154,6 +162,7 @@ class SkeletonCore:
             is_exported=data.get("is_exported", False),
             complexity=data.get("complexity", 1),
             body_token_estimate=data.get("body_token_estimate", 0),
+            docstring=data.get("docstring", ""),
             sha256=data.get("sha256", ""),
         )
 

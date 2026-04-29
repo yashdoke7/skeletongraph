@@ -32,6 +32,21 @@ def _get_name(node: Node, source_bytes: bytes) -> str:
         return node_text(name_node, source_bytes)
     return ""
 
+def _extract_cpp_doc(node: Node, source_bytes: bytes) -> str:
+    """Extract C++ doc comment (/// or /** */) preceding a node."""
+    prev = node.prev_named_sibling
+    if prev and prev.type == "comment":
+        text = node_text(prev, source_bytes).strip()
+        if text.startswith("///"):
+            return text.lstrip("/").strip()[:200]
+        if text.startswith("/**"):
+            text = text.lstrip("/").lstrip("*").rstrip("*").rstrip("/").strip()
+            for line in text.split("\n"):
+                line = line.strip().lstrip("*").strip()
+                if line and not line.startswith("@"):
+                    return line[:200]
+    return ""
+
 def extract_cpp(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> Optional[FileExtractionResult]:
     root_node = tree.root_node
     
@@ -139,8 +154,9 @@ def extract_cpp(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
                     signature=sig_text,
                     kind=kind,
                     body_text=body_text,
-                    is_exported=True, # C++ typically depends on header vs src rather than modifiers
-                    parent_class=parent_cls
+                    is_exported=True,
+                    parent_class=parent_cls,
+                    docstring=_extract_cpp_doc(node, source_bytes),
                 )
                 
                 # Try to bind to local class if we are parsing the header

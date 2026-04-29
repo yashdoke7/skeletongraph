@@ -214,6 +214,19 @@ def _extract_function(
     body_node = node.child_by_field_name("body")
     body_text = node_text(body_node, source_bytes) if body_node else ""
 
+    # Extract first-line docstring for search indexing
+    docstring = ""
+    if body_node:
+        for child in body_node.children:
+            if child.type == "expression_statement":
+                expr = child.children[0] if child.children else None
+                if expr and expr.type == "string":
+                    raw_doc = node_text(expr, source_bytes)
+                    # Strip triple quotes and single quotes
+                    raw_doc = raw_doc.strip("'\"").strip()
+                    docstring = raw_doc.split("\n")[0].strip()[:200]
+            break  # Only check the very first statement
+
     # Compute complexity
     complexity = count_branches(node)
 
@@ -229,6 +242,7 @@ def _extract_function(
         body_text=body_text,
         is_exported=not name.startswith("_"),
         parent_class=parent_class,
+        docstring=docstring,
     )
 
 

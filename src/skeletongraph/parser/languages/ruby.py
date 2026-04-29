@@ -32,6 +32,15 @@ def _get_name(node: Node, source_bytes: bytes) -> str:
         return node_text(name_node, source_bytes)
     return ""
 
+def _extract_ruby_doc(node: Node, source_bytes: bytes) -> str:
+    """Extract Ruby # doc comment preceding a method."""
+    prev = node.prev_named_sibling
+    if prev and prev.type == "comment":
+        text = node_text(prev, source_bytes).strip()
+        if text.startswith("#"):
+            return text.lstrip("#").strip()[:200]
+    return ""
+
 def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> Optional[FileExtractionResult]:
     root_node = tree.root_node
     
@@ -118,8 +127,9 @@ def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                     signature=sig_text,
                     kind=NodeKind.METHOD if current_class else NodeKind.FUNCTION,
                     body_text=body_text,
-                    is_exported=True, # public by default in Ruby
-                    parent_class=current_class.name if current_class else None
+                    is_exported=True,
+                    parent_class=current_class.name if current_class else None,
+                    docstring=_extract_ruby_doc(node, source_bytes),
                 )
                 
                 if current_class:

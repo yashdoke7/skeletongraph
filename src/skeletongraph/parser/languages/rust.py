@@ -32,6 +32,15 @@ def _get_name(node: Node, source_bytes: bytes) -> str:
         return node_text(name_node, source_bytes)
     return ""
 
+def _extract_rust_doc(node: Node, source_bytes: bytes) -> str:
+    """Extract Rust /// doc comment preceding a node."""
+    prev = node.prev_named_sibling
+    if prev and prev.type == "line_comment":
+        text = node_text(prev, source_bytes).strip()
+        if text.startswith("///"):
+            return text.lstrip("/").strip()[:200]
+    return ""
+
 def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> Optional[FileExtractionResult]:
     root_node = tree.root_node
     
@@ -128,7 +137,8 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                     kind=kind,
                     body_text=body_text,
                     is_exported=is_exported,
-                    parent_class=current_impl
+                    parent_class=current_impl,
+                    docstring=_extract_rust_doc(node, source_bytes),
                 )
                 
                 if current_impl:

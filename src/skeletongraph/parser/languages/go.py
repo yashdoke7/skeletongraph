@@ -32,6 +32,15 @@ def _get_name(node: Node, source_bytes: bytes) -> str:
         return node_text(name_node, source_bytes)
     return ""
 
+def _extract_go_doc(node: Node, source_bytes: bytes) -> str:
+    """Extract Go doc comment (// lines preceding a declaration)."""
+    prev = node.prev_named_sibling
+    if prev and prev.type == "comment":
+        text = node_text(prev, source_bytes).strip()
+        if text.startswith("//"):
+            return text.lstrip("/").strip()[:200]
+    return ""
+
 def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> Optional[FileExtractionResult]:
     root_node = tree.root_node
     
@@ -109,7 +118,8 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
                     signature=f"func {func_name}{sig}",
                     kind=NodeKind.FUNCTION,
                     body_text=body,
-                    is_exported=is_exported
+                    is_exported=is_exported,
+                    docstring=_extract_go_doc(node, source_bytes),
                 ))
                 
         elif node.type == "method_declaration":
@@ -152,7 +162,8 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
                     kind=NodeKind.METHOD,
                     body_text=body,
                     is_exported=is_exported,
-                    parent_class=parent_class
+                    parent_class=parent_class,
+                    docstring=_extract_go_doc(node, source_bytes),
                 )
                 
                 if parent_class:
