@@ -334,6 +334,110 @@ def index_status_tool(params: dict) -> dict:
 
 
 @tool(
+    name="view_file_range",
+    description="View a specific line range of a file. Returns raw code.",
+    parameters={
+        "file_path": {"type": "string", "description": "Relative path to file"},
+        "start": {"type": "integer", "description": "1-indexed start line"},
+        "end": {"type": "integer", "description": "1-indexed end line (inclusive)"},
+    },
+)
+def view_file_range_tool(params: dict) -> dict:
+    root = _get_root()
+    path = params["file_path"]
+    start = max(1, int(params.get("start", 1)))
+    end = max(start, int(params.get("end", start + 100)))
+
+    full_path = root / path
+    if not full_path.exists():
+        return {"error": f"File not found: {path}"}
+
+    try:
+        lines = full_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        content = "\n".join(lines[start - 1 : end])
+        return {"file": path, "range": f"{start}-{end}", "content": content}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool(
+    name="view_file_outline",
+    description="Get structural overview of a file (imports, classes, constants).",
+    parameters={
+        "file_path": {"type": "string", "description": "Relative path to file"},
+    },
+)
+def view_file_outline_tool(params: dict) -> dict:
+    store = _get_store()
+    path = params["file_path"]
+
+    fsk = store.file_skeletons.get(path)
+    if not fsk:
+        return {"error": f"File not indexed: {path}"}
+
+    return {
+        "file": path,
+        "lines": fsk.total_lines,
+        "imports": fsk.imports,
+        "exports": fsk.exports,
+        "classes": [{"name": c.fqn.split("::")[-1], "methods": len(c.methods)} for c in fsk.classes],
+        "functions": [f.fqn.split("::")[-1] for f in fsk.functions],
+        "constants": getattr(fsk, "constants", []),
+    }
+
+
+@tool(
+    name="grep_codebase",
+    description="Search codebase text. Returns matching files and lines.",
+    parameters={
+        "pattern": {"type": "string", "description": "Regex pattern"},
+        "glob": {"type": "string", "description": "Glob filter (e.g. '*.py')"},
+    },
+)
+def grep_codebase_tool(params: dict) -> dict:
+    root = _get_root()
+    pattern = params["pattern"]
+    glob_pattern = params.get("glob", "*")
+    
+    import re
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        return {"error": f"Invalid regex: {e}"}
+
+    results = []
+    
+    # We only grep files that are known to the index (avoids node_modules etc.)
+    store = _get_store()
+    from fnmatch import fnmatch
+    
+    for path in store.file_skeletons.keys():
+        if not fnmatch(path, glob_pattern) and not fnmatch(Path(path).name, glob_pattern):
+            continue
+            
+        full_path = root / path
+        if not full_path.exists():
+            continue
+            
+        try:
+            lines = full_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            matches = []
+            for i, line in enumerate(lines):
+                if regex.search(line):
+                    matches.append({"line": i + 1, "content": line.strip()})
+                    if len(matches) > 20: # Cap per file
+                        break
+            if matches:
+                results.append({"file": path, "matches": matches})
+                if len(results) >= 10: # Cap total files
+                    break
+        except Exception:
+            continue
+            
+    return {"pattern": pattern, "results": results}
+
+
+@tool(
     name="review_delta",
     description=(
         "Diff-aware context assembly for code review. Parses git diff, "
