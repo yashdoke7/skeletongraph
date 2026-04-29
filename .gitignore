@@ -45,5 +45,6 @@ docs/plan.md
 docs/*.local.md
 EVALUATION_WORKFLOW.md
 evaluation_dataset.md
+SWE_BENCH_WORKFLOW.md
 
 eval_logs/
