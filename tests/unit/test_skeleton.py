@@ -168,8 +168,12 @@ class TestFileSkeleton:
         )
 
         all_sk = fs.all_skeletons
-        assert len(all_sk) == 2
-        assert set(fs.all_fqns) == {"test.py::helper", "test.py::MyClass.do_thing"}
+        assert len(all_sk) == 3
+        assert set(fs.all_fqns) == {
+            "test.py::helper",
+            "test.py::MyClass",
+            "test.py::MyClass.do_thing",
+        }
 
     def test_serialization(self):
         fs = FileSkeleton(

@@ -107,6 +107,35 @@ class TestIncrementalUpdate:
         store2 = update_index(tmp_path)
         assert store2.meta.total_functions > count1
 
+    def test_modified_file_replaces_file_level_edges(self, tmp_path):
+        """Updating imports should not leave stale file pseudo-node edges."""
+        import shutil
+        if FIXTURES_DIR.exists():
+            shutil.copytree(FIXTURES_DIR, tmp_path, dirs_exist_ok=True)
+
+        consumer = tmp_path / "consumer.py"
+        consumer.write_text(
+            "from auth.middleware import validate_token\n\n"
+            "def use_token(token, secret):\n"
+            "    return validate_token(token, secret)\n",
+            encoding="utf-8",
+        )
+
+        build_index(tmp_path)
+
+        consumer.write_text(
+            "from auth.middleware import decode_jwt\n\n"
+            "def use_token(token, secret):\n"
+            "    return decode_jwt(token, secret)\n",
+            encoding="utf-8",
+        )
+
+        store = update_index(tmp_path)
+        edges = store.graph.forward.get("consumer.py::__file__", [])
+
+        assert len(edges) == 1
+        assert edges[0].target_fqn == "auth.middleware::decode_jwt"
+
 
 class TestIntentAnalysis:
     def test_debug_intent(self):

@@ -711,7 +711,7 @@ def pack_context(prompt: str, path: str):
     console.print("[dim]Paste this into ChatGPT/Claude for a token-minimal, high-precision session.[/dim]")
 
 
-@app.command(name="eval")
+@app.command(name="eval-golden")
 @click.option("--path", "-p", default=".", help="Project root directory")
 def run_eval(path: str):
     """Run the golden dataset evaluation."""
@@ -893,18 +893,20 @@ def eval_parse(agent: str, file_path: str, mode: str, path: str, project: str, p
     """Parse an agent's exported chat into a standardized trace JSON."""
     project_root = Path(path).resolve()
 
-    # Auto-discover if no file provided
+    # SG mode parses the shared SG session format, either from an archived file
+    # or from the current project session.
+    if mode == "skeletongraph":
+        try:
+            session_path = Path(file_path) if file_path else None
+            trace = _parse_sg_session(agent, project_root, project, session_path=session_path)
+            _save_and_display_trace(trace, project_root)
+            return
+        except FileNotFoundError as e:
+            console.print(f"[red]No SG session found: {e}[/red]")
+            return
+
+    # Auto-discover if no native export was provided.
     if not file_path:
-        if mode == "skeletongraph":
-            # SG mode: parse from current.json
-            try:
-                from ..eval.parsers.antigravity import parse_antigravity_sg_session
-                trace = parse_antigravity_sg_session(project_root, project)
-                _save_and_display_trace(trace, project_root)
-                return
-            except FileNotFoundError as e:
-                console.print(f"[red]No SG session found: {e}[/red]")
-                return
 
         discovered = _discover_agent_file(agent)
         if discovered:
@@ -946,8 +948,7 @@ def eval_compare(path: str, sg_file: str, native_file: str, output: str):
         if not sg_path.exists():
             # Try parsing from current.json
             try:
-                from ..eval.parsers.antigravity import parse_antigravity_sg_session
-                sg_trace = parse_antigravity_sg_session(project_root)
+                sg_trace = _parse_sg_session("antigravity", project_root, "")
                 sg_path.parent.mkdir(parents=True, exist_ok=True)
                 sg_path.write_text(sg_trace.to_json(), encoding="utf-8")
             except FileNotFoundError:
@@ -1167,7 +1168,6 @@ def eval_full(agent: str, native_file: str, path: str, project: str):
     eval_dir = project_root / ".skeletongraph" / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    from ..eval.parsers.antigravity import parse_antigravity_sg_session
     from ..eval.comparison import compare_traces
     from ..eval.report import generate_report, save_report
     from ..eval.token_counter import measure_codebase_tokens
@@ -1180,7 +1180,7 @@ def eval_full(agent: str, native_file: str, path: str, project: str):
     # Step 2: Parse SG session
     console.print("[bold]Step 2:[/bold] Parsing SkeletonGraph session...")
     try:
-        sg_trace = parse_antigravity_sg_session(project_root, project)
+        sg_trace = _parse_sg_session(agent, project_root, project)
         console.print(f"  [green][OK][/green] SG trace: {sg_trace.total_tool_output_tokens:,} tokens across {sg_trace.tool_call_count} calls")
     except FileNotFoundError as e:
         console.print(f"  [red][X] No SG session found: {e}[/red]")
@@ -1231,6 +1231,13 @@ def eval_full(agent: str, native_file: str, path: str, project: str):
     )
     console.print(panel)
     console.print(f"\n[dim]Full report: {eval_dir / 'report.md'}[/dim]")
+
+
+def _parse_sg_session(agent: str, project_root: Path, project: str, session_path: Path | None = None):
+    """Parse the common SkeletonGraph session and attribute it to the active agent."""
+    from ..eval.parsers.antigravity import parse_antigravity_sg_session
+
+    return parse_antigravity_sg_session(project_root, project, agent=agent, session_path=session_path)
 
 
 def _discover_agent_file(agent: str):
@@ -1416,17 +1423,21 @@ def _sg_rules_block() -> str:
     return """
 ## SkeletonGraph Context Assembly
 
-This project restricts native searching tools. You MUST use SkeletonGraph's MCP tools for ALL codebase discovery.
+Use SkeletonGraph as the first-pass context router. It is designed to reduce token-heavy codebase discovery, not to replace the IDE agent's native tools when they are genuinely needed.
 
-### CRITICAL RULES:
-1. **DO NOT USE** `grep_search` or manual `view_file` commands unless explicitly ordered.
-2. **TOOL DISCOVERY**: Depending on your IDE, the tools may be automatically prefixed. Look for tools containing `query_context`, `search_index`, or `expand_function` in your available tool list (e.g., `mcp_skeletongraph_flask_query_context` or `query_context`).
-3. **USE the `query_context` tool** as your VERY FIRST action to get an optimized structural map.
-4. **USE the `search_index` tool** instead of grep if you need to find where a variable, constant, or function is used.
-5. **USE the `expand_function` tool** if you need to read the full body of a function you found in the graph. Do NOT read the entire file just for one function.
-6. **RESPECT** the constraints listed in Zone 1 of any context response.
+### SG-first retrieval ladder:
+1. Start with `query_context` for an optimized structural map.
+2. Use `search_index` when the entry point, symbol, or file is unclear.
+3. Use `view_file_outline`, `show_graph`, `get_dependencies`, or `get_blast_radius` to move from file-level context to relationships.
+4. Use `expand_function` when skeleton context is not enough and you need a full body.
+5. Use `view_file_range` for a bounded raw snippet.
+6. Use `grep_codebase` or native IDE search/read tools only as fallback.
 
-If you violate Rule 1, you will damage the evaluation telemetry. ONLY use the SkeletonGraph MCP tools provided.
+### Fallback contract:
+- Native tools are allowed when SG confidence is LOW, the file/language is not indexed, generated files are involved, a path is missing, or the agent needs to verify a small bounded range before editing.
+- Prefer bounded native reads/searches over opening whole files.
+- Preserve evaluation telemetry by exporting the native/SG session traces after each run.
+- Respect the constraints listed in Zone 1 of every context response.
 """.strip()
 
 
@@ -1439,16 +1450,16 @@ def _claude_template() -> str:
 
 def _cursor_template() -> str:
     return f"""
-# REPOSITORY PROTOCOL: SkeletonGraph (MANDATORY)
+# REPOSITORY PROTOCOL: SkeletonGraph-First
 
-This repository is optimized for AI agents using the SkeletonGraph MCP server. To prevent token overflow and ensure structural integrity, you MUST follow these protocols:
+This repository is optimized for AI agents using the SkeletonGraph MCP server. Use SG before broad native searching, then fall back deliberately when SG context is insufficient.
 
-1. **INITIALIZATION**: Your very first action MUST be `skeletongraph:query_context`.
-2. **SEARCH RESTRICTION**: Native `grep_search` and `file_search` are deprecated in this environment. Use `skeletongraph:search_index` for discovery.
-3. **READ RESTRICTION**: Do NOT `view_file` on files larger than 100 lines. Use `skeletongraph:expand_function` to request only the specific logic you need.
-4. **CREDIBILITY**: For every action you take, mention the SkeletonGraph Tier (Zone 2/3) you are using to prove compliance.
+1. **INITIALIZATION**: Start with `skeletongraph:query_context`.
+2. **DISCOVERY**: Use `skeletongraph:search_index` before broad native grep/file search.
+3. **EXPANSION**: Use `skeletongraph:expand_function` or `view_file_range` before opening whole files.
+4. **FALLBACK**: Native tools are acceptable for low-confidence results, unindexed files, generated code, missing paths, or small verification reads.
 
-Failure to use SkeletonGraph tools will result in context truncation.
+Goal: fewer tokens with equal or better patch quality, not artificial restriction of the agent.
 """.strip()
 
 

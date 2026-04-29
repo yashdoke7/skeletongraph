@@ -105,6 +105,8 @@ class DependencyGraph:
 
     def add_edge(self, edge: DependencyEdge) -> None:
         """Add a directed edge. Automatically registers both endpoints as nodes."""
+        if edge in self.forward[edge.source_fqn]:
+            return
         self.forward[edge.source_fqn].append(edge)
         self.reverse[edge.target_fqn].append(edge)
         self._nodes.add(edge.source_fqn)

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from ..datasets.base import EvalTask
 from ..scorer import RetrievalQualityScore
@@ -100,7 +100,7 @@ def match_files(retrieved: List[str], ground_truth: List[str]) -> tuple:
     Returns (matched_retrieved, matched_truth, unmatched_retrieved, unmatched_truth)
     """
     # Build lookup sets
-    truth_basenames = {Path(f).name: f for f in ground_truth}
+    truth_basenames = _unique_basenames(ground_truth)
     truth_paths = set(ground_truth)
     
     matched_r: List[str] = []
@@ -130,8 +130,13 @@ def match_files(retrieved: List[str], ground_truth: List[str]) -> tuple:
                 break
         
         if not found:
-            # Try basename match as last resort
-            if r_basename in truth_basenames and truth_basenames[r_basename] not in matched_t:
+            # Basename-only exports are common, but we only credit them when the
+            # basename uniquely identifies one ground-truth file.
+            if (
+                "/" not in r_norm
+                and r_basename in truth_basenames
+                and truth_basenames[r_basename] not in matched_t
+            ):
                 matched_r.append(r)
                 matched_t.add(truth_basenames[r_basename])
             else:
@@ -140,6 +145,36 @@ def match_files(retrieved: List[str], ground_truth: List[str]) -> tuple:
     unmatched_t = [f for f in ground_truth if f not in matched_t]
     
     return matched_r, list(matched_t), unmatched_r, unmatched_t
+
+
+def _unique_basenames(paths: List[str]) -> Dict[str, str]:
+    counts: Dict[str, int] = {}
+    for path in paths:
+        name = Path(path).name
+        counts[name] = counts.get(name, 0) + 1
+    return {
+        Path(path).name: path
+        for path in paths
+        if counts.get(Path(path).name, 0) == 1
+    }
+
+
+def _map_retrieved_to_truth(path: str, ground_truth: List[str]) -> str:
+    path_norm = normalize_path(path)
+    path_basename = Path(path_norm).name
+    truth_basenames = _unique_basenames(ground_truth)
+
+    for gt in ground_truth:
+        gt_norm = normalize_path(gt)
+        if path_norm == gt or path_norm == gt_norm:
+            return gt
+        if path_norm.endswith(gt_norm) or gt_norm.endswith(path_norm):
+            return gt
+
+    if "/" not in path_norm and path_basename in truth_basenames:
+        return truth_basenames[path_basename]
+
+    return path_norm
 
 
 def run_retrieval_quality(
@@ -158,25 +193,11 @@ def run_retrieval_quality(
     ground_truth = task.ground_truth_files
     retrieved = extract_retrieved_files(trace)
     
-    # Use flexible matching to handle path normalization
-    matched_r, matched_t, _, _ = match_files(retrieved, ground_truth)
-    
     # For the score, we need the retrieved list with paths normalized to match GT
     # So the MRR calculation uses the right ordering
     normalized_retrieved = []
     for r in retrieved:
-        r_basename = Path(r).name
-        r_norm = normalize_path(r)
-        # Map to ground truth path if possible
-        mapped = False
-        for gt in ground_truth:
-            gt_norm = normalize_path(gt)
-            if r_norm.endswith(gt_norm) or gt_norm.endswith(r_norm) or Path(gt).name == r_basename:
-                normalized_retrieved.append(gt)
-                mapped = True
-                break
-        if not mapped:
-            normalized_retrieved.append(r_norm)
+        normalized_retrieved.append(_map_retrieved_to_truth(r, ground_truth))
     
     return RetrievalQualityScore(
         task_id=task.task_id,

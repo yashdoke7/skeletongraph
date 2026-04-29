@@ -51,6 +51,7 @@ class BenchmarkRunner:
         self.sg_traces: Dict[str, AgentTrace] = {}
         self.native_traces: Dict[str, AgentTrace] = {}
         self._load_traces()
+        self.validation_warnings: List[str] = self._build_validation_warnings()
         
         # Results
         self.token_scores: List[TokenEfficiencyScore] = []
@@ -112,6 +113,30 @@ class BenchmarkRunner:
             len(self.native_traces),
             len(self.tasks),
         )
+
+    def _build_validation_warnings(self) -> List[str]:
+        """Flag evidence-quality issues without blocking exploratory runs."""
+        warnings: List[str] = []
+        paired_ids = set(self.sg_traces) & set(self.native_traces)
+
+        if len(self.tasks) < 10:
+            warnings.append(
+                f"Only {len(self.tasks)} task(s) loaded. Treat aggregates as smoke-test results."
+            )
+        if len(paired_ids) < len(self.tasks):
+            warnings.append(
+                f"{len(self.tasks) - len(paired_ids)} task(s) are missing a paired SG/native trace."
+            )
+
+        for label, traces in (("SG", self.sg_traces), ("native", self.native_traces)):
+            for task_id, trace in traces.items():
+                prompt = trace.task_prompt.strip().lower()
+                if not prompt or prompt in {"dummy", "unknown"}:
+                    warnings.append(f"{label} trace for {task_id} has a placeholder prompt.")
+                if not trace.tool_calls:
+                    warnings.append(f"{label} trace for {task_id} has no tool calls.")
+
+        return warnings
     
     def run_token_efficiency(self) -> List[TokenEfficiencyScore]:
         """Run token efficiency benchmark across all tasks with available traces."""
@@ -161,7 +186,9 @@ class BenchmarkRunner:
                 "task_count": len(self.tasks),
                 "sg_trace_count": len(self.sg_traces),
                 "native_trace_count": len(self.native_traces),
+                "paired_trace_count": len(set(self.sg_traces) & set(self.native_traces)),
                 "dataset_source": self.tasks[0].source if self.tasks else "unknown",
+                "warnings": self.validation_warnings,
             },
             "token_efficiency": aggregate_token_scores(self.token_scores),
             "retrieval_quality": {
@@ -243,6 +270,9 @@ def generate_benchmark_report(summary: dict) -> str:
         if not agg:
             return "N/A"
         return f"{agg.get('mean', 0):.2f} ± {agg.get('std', 0):.2f}"
+
+    def fmt_int(value) -> str:
+        return f"{value:,}" if isinstance(value, (int, float)) else str(value)
     
     report = f"""# SkeletonGraph Benchmark Report
 *Generated: {meta.get('timestamp', 'unknown')}*
@@ -251,10 +281,23 @@ def generate_benchmark_report(summary: dict) -> str:
 - **Tasks Evaluated:** {meta.get('task_count', 0)}
 - **SG Traces Available:** {meta.get('sg_trace_count', 0)}
 - **Native Traces Available:** {meta.get('native_trace_count', 0)}
+- **Paired Traces Evaluated:** {meta.get('paired_trace_count', 0)}
 - **Dataset:** {meta.get('dataset_source', 'unknown')}
 - **Token Counter:** tiktoken cl100k_base (BPE-exact)
 
 ---
+
+## Evidence Quality
+"""
+
+    warnings = meta.get("warnings", [])
+    if warnings:
+        for warning in warnings:
+            report += f"- WARNING: {warning}\n"
+    else:
+        report += "- No validation warnings detected in loaded traces.\n"
+
+    report += f"""
 
 ## Token Efficiency
 
@@ -294,8 +337,8 @@ def generate_benchmark_report(summary: dict) -> str:
             report += (
                 f"| {pt.get('task_id', '?')} "
                 f"| {pt.get('repo', '?')} "
-                f"| {te_data.get('native_retrieval', 'N/A'):,} "
-                f"| {te_data.get('sg_retrieval', 'N/A'):,} "
+                f"| {fmt_int(te_data.get('native_retrieval', 'N/A'))} "
+                f"| {fmt_int(te_data.get('sg_retrieval', 'N/A'))} "
                 f"| {te_data.get('reduction_ratio', 'N/A')}x "
                 f"| {sg_rq_data.get('f1', 'N/A')} "
                 f"| {n_rq_data.get('f1', 'N/A')} |\n"

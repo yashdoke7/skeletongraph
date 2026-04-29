@@ -186,6 +186,8 @@ def parse_antigravity_export(
 def parse_antigravity_sg_session(
     project_root: Path,
     project_name: str = "",
+    agent: str = "antigravity",
+    session_path: Optional[Path] = None,
 ) -> AgentTrace:
     """Parse the SkeletonGraph session data from current.json.
 
@@ -199,7 +201,7 @@ def parse_antigravity_sg_session(
     """
     from ..token_counter import measure_text_tokens, measure_mcp_schema_overhead
 
-    session_path = project_root / ".skeletongraph" / "session" / "current.json"
+    session_path = session_path or project_root / ".skeletongraph" / "session" / "current.json"
     if not session_path.exists():
         raise FileNotFoundError(f"No SG session found at {session_path}")
 
@@ -221,6 +223,22 @@ def parse_antigravity_sg_session(
             output_tokens=turn.get("token_count", 0),
         ))
 
+        # Retrieval-quality scoring needs file paths, not just the prompt.
+        # These zero-token markers represent files surfaced inside the SG context.
+        files_seen = set()
+        for fqn in turn.get("fqns_returned", []):
+            if "::" not in fqn:
+                continue
+            file_path = fqn.split("::", 1)[0]
+            if "." not in Path(file_path).name or file_path in files_seen:
+                continue
+            files_seen.add(file_path)
+            tool_calls.append(ToolCall(
+                tool_type="sg_context_file",
+                target=file_path,
+                output_tokens=0,
+            ))
+
         # L2: The agent's response to this turn (from CHANGE 8 field)
         response_text = turn.get("response_text", "")
         if response_text:
@@ -235,7 +253,7 @@ def parse_antigravity_sg_session(
     schema_overhead = measure_mcp_schema_overhead(num_turns=num_turns)
 
     return AgentTrace(
-        agent="antigravity",
+        agent=agent,
         mode="skeletongraph",
         task_prompt=task_prompt,
         project=project_name,

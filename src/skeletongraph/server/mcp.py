@@ -30,6 +30,7 @@ from ..assembly.zone_assembler import assemble_context
 from ..retrieval.session import Session
 from ..config import SGConfig, load_config
 from ..metrics.metrics_logger import MetricsLogger
+from ..eval.token_counter import measure_text_tokens
 
 
 # ── Tool Registry ──────────────────────────────────────────────────────
@@ -37,16 +38,33 @@ from ..metrics.metrics_logger import MetricsLogger
 _TOOLS: Dict[str, Dict[str, Any]] = {}
 
 
+def _required_parameter_names(parameters: dict) -> List[str]:
+    """Infer required MCP parameters while keeping defaulted fields optional."""
+    required = []
+    for name, schema in parameters.items():
+        if schema.get("required") is False or "default" in schema:
+            continue
+        description = str(schema.get("description", "")).lower()
+        if "optional" in description or "default:" in description:
+            continue
+        required.append(name)
+    return required
+
+
 def tool(name: str, description: str, parameters: dict):
     """Decorator to register an MCP tool."""
     def decorator(func: Callable):
+        properties = {
+            key: {k: v for k, v in schema.items() if k != "required"}
+            for key, schema in parameters.items()
+        }
         _TOOLS[name] = {
             "name": name,
             "description": description,
             "inputSchema": {
                 "type": "object",
-                "properties": parameters,
-                "required": list(parameters.keys()),
+                "properties": properties,
+                "required": _required_parameter_names(parameters),
             },
             "handler": func,
         }
@@ -124,7 +142,7 @@ def query_context_tool(params: dict) -> dict:
     if previous_response and session._turns:
         last_turn = session._turns[-1]
         last_turn.response_text = previous_response
-        last_turn.response_tokens = len(previous_response) // 4
+        last_turn.response_tokens = measure_text_tokens(previous_response)
 
     result = resolve_context(prompt, store, session=session, top_n=top_n)
     assembled = assemble_context(
@@ -339,7 +357,10 @@ def index_status_tool(params: dict) -> dict:
     parameters={
         "file_path": {"type": "string", "description": "Relative path to file"},
         "start": {"type": "integer", "description": "1-indexed start line"},
-        "end": {"type": "integer", "description": "1-indexed end line (inclusive)"},
+        "end": {
+            "type": "integer",
+            "description": "Optional. 1-indexed end line (inclusive)",
+        },
     },
 )
 def view_file_range_tool(params: dict) -> dict:
@@ -391,7 +412,10 @@ def view_file_outline_tool(params: dict) -> dict:
     description="Search codebase text. Returns matching files and lines.",
     parameters={
         "pattern": {"type": "string", "description": "Regex pattern"},
-        "glob": {"type": "string", "description": "Glob filter (e.g. '*.py')"},
+        "glob": {
+            "type": "string",
+            "description": "Glob filter (default: '*')",
+        },
     },
 )
 def grep_codebase_tool(params: dict) -> dict:

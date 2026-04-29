@@ -243,6 +243,11 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
 
     # Load dirty tracker
     dirty_tracker = DirtyTracker.load(sg_dir)
+    for file_path, fs in file_skeletons.items():
+        dirty_tracker.ensure_file_functions(
+            file_path,
+            {sk.fqn for sk in fs.all_skeletons},
+        )
 
     # Load constraints
     constraints = ConstraintStore()

@@ -222,6 +222,8 @@ def build_index(
             else:
                 call_sites = result.call_sites if hasattr(result, 'call_sites') else []
 
+            _fill_missing_callers(call_sites, func_ranges)
+
             # Convert to DependencyEdges
             edges = extract_edges(
                 result, call_sites, all_fqns, short_name_index, import_map,
@@ -282,6 +284,46 @@ def build_index(
     return store
 
 
+def _remove_file_from_store(
+    store: IndexStore,
+    file_path: str,
+    remove_summaries: bool = False,
+) -> Set[str]:
+    """Remove all graph/index state owned by one source file."""
+    removed_fqns: Set[str] = set()
+
+    file_skel = store.file_skeletons.get(file_path)
+    if file_skel:
+        removed_fqns.update(sk.fqn for sk in file_skel.all_skeletons)
+
+    removed_fqns.update(store.dirty_tracker.remove_file(file_path))
+
+    # File-level import edges use this pseudo-node, so it needs cleanup too.
+    store.graph.remove_node(f"{file_path}::__file__")
+
+    for fqn in removed_fqns:
+        store.graph.remove_node(fqn)
+        store.skeleton_table.pop(fqn, None)
+        store.inverted_index.remove(fqn)
+        if remove_summaries:
+            store.summaries.remove(fqn)
+
+    store.file_skeletons.pop(file_path, None)
+    return removed_fqns
+
+
+def _fill_missing_callers(call_sites: list, func_ranges: List[tuple[str, int, int]]) -> None:
+    """Assign caller FQNs for parsers that only attach call line numbers."""
+    ranges = sorted(func_ranges, key=lambda item: item[2] - item[1])
+    for call in call_sites:
+        if getattr(call, "caller_fqn", ""):
+            continue
+        for fqn, start, end in ranges:
+            if start <= call.line <= end:
+                call.caller_fqn = fqn
+                break
+
+
 def update_index(
     project_root: Path,
     on_progress: Optional[Callable[[str, int, int], None]] = None,
@@ -314,13 +356,7 @@ def update_index(
 
     # Remove deleted files
     for file_path in deleted_files:
-        removed_fqns = store.dirty_tracker.remove_file(file_path)
-        for fqn in removed_fqns:
-            store.graph.remove_node(fqn)
-            store.skeleton_table.pop(fqn, None)
-            store.inverted_index.remove(fqn)
-            store.summaries.remove(fqn)
-        store.file_skeletons.pop(file_path, None)
+        _remove_file_from_store(store, file_path, remove_summaries=True)
 
     # Process new and modified files — cache results for edge phase
     cached_results: Dict[str, FileExtractionResult] = {}
@@ -332,12 +368,7 @@ def update_index(
 
         # Remove old data for modified files
         if file_path in modified_files:
-            old_fqns = store.dirty_tracker.remove_file(file_path)
-            for fqn in old_fqns:
-                store.graph.remove_node(fqn)
-                store.skeleton_table.pop(fqn, None)
-                store.inverted_index.remove(fqn)
-            store.file_skeletons.pop(file_path, None)
+            _remove_file_from_store(store, file_path)
 
         # Parse new/modified file
         result = extract_file(file_path, project_root)
@@ -402,6 +433,8 @@ def update_index(
                 )
             else:
                 call_sites = result.call_sites if hasattr(result, 'call_sites') else []
+
+            _fill_missing_callers(call_sites, func_ranges)
 
             edges = extract_edges(
                 result, call_sites, all_fqns, short_name_index, import_map,

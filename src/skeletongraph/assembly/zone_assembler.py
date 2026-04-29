@@ -361,7 +361,7 @@ def _focused_extract(
 
 def _estimate_tokens(text: str) -> int:
     """Precise token estimate using project's tiktoken implementation."""
-    return estimate_tokens(text)
+    return measure_text_tokens(text)
 
 
 def _estimate_raw_reading_tokens(
@@ -384,7 +384,7 @@ def _estimate_raw_reading_tokens(
             if full_path.exists():
                 try:
                     content = full_path.read_text(encoding="utf-8", errors="replace")
-                    total += estimate_tokens(content)
+                    total += measure_text_tokens(content)
                 except Exception:
                     pass
     # Conservative multiplier: agents don't always read entire files

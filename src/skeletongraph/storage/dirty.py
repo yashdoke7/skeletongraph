@@ -53,6 +53,9 @@ class DirtyTracker:
         self._file_hashes: Dict[str, str] = {}
         # fqn → function body hash
         self._function_hashes: Dict[str, str] = {}
+        # file_path → all FQNs extracted from that file. This keeps incremental
+        # cleanup correct for languages whose FQNs are package-based, not path-based.
+        self._file_functions: Dict[str, Set[str]] = {}
 
     def get_changed_files(
         self,
@@ -101,10 +104,7 @@ class DirtyTracker:
         current_fqns = set(current_functions.keys())
 
         # Get all tracked FQNs for this file
-        tracked_fqns = {
-            fqn for fqn in self._function_hashes
-            if fqn.startswith(file_path + "::")
-        }
+        tracked_fqns = self._tracked_fqns_for_file(file_path)
 
         new_fqns = sorted(current_fqns - tracked_fqns)
         deleted_fqns = sorted(tracked_fqns - current_fqns)
@@ -132,15 +132,13 @@ class DirtyTracker:
         self._file_hashes[file_path] = file_hash
 
         # Remove any old function hashes for this file
-        old_fqns = [
-            fqn for fqn in self._function_hashes
-            if fqn.startswith(file_path + "::")
-        ]
+        old_fqns = list(self._tracked_fqns_for_file(file_path))
         for fqn in old_fqns:
-            del self._function_hashes[fqn]
+            self._function_hashes.pop(fqn, None)
 
         # Add new function hashes
         self._function_hashes.update(function_hashes)
+        self._file_functions[file_path] = set(function_hashes)
 
     def remove_file(self, file_path: str) -> Set[str]:
         """Remove all tracking for a deleted file.
@@ -149,12 +147,10 @@ class DirtyTracker:
             Set of FQNs that were removed (for graph cleanup).
         """
         self._file_hashes.pop(file_path, None)
-        removed_fqns = {
-            fqn for fqn in self._function_hashes
-            if fqn.startswith(file_path + "::")
-        }
+        removed_fqns = self._tracked_fqns_for_file(file_path)
         for fqn in removed_fqns:
-            del self._function_hashes[fqn]
+            self._function_hashes.pop(fqn, None)
+        self._file_functions.pop(file_path, None)
         return removed_fqns
 
     def is_file_tracked(self, file_path: str) -> bool:
@@ -165,6 +161,20 @@ class DirtyTracker:
 
     def get_function_hash(self, fqn: str) -> Optional[str]:
         return self._function_hashes.get(fqn)
+
+    def ensure_file_functions(self, file_path: str, fqns: Set[str]) -> None:
+        """Backfill file ownership for indexes created before this map existed."""
+        if file_path not in self._file_functions:
+            self._file_functions[file_path] = set(fqns)
+
+    def _tracked_fqns_for_file(self, file_path: str) -> Set[str]:
+        mapped = self._file_functions.get(file_path)
+        if mapped is not None:
+            return set(mapped)
+        return {
+            fqn for fqn in self._function_hashes
+            if fqn.startswith(file_path + "::")
+        }
 
     @property
     def tracked_file_count(self) -> int:
@@ -181,6 +191,10 @@ class DirtyTracker:
         data = {
             "file_hashes": self._file_hashes,
             "function_hashes": self._function_hashes,
+            "file_functions": {
+                path: sorted(fqns)
+                for path, fqns in self._file_functions.items()
+            },
         }
         path = directory / "hashes.json"
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -194,4 +208,8 @@ class DirtyTracker:
             data = json.loads(path.read_text(encoding="utf-8"))
             tracker._file_hashes = data.get("file_hashes", {})
             tracker._function_hashes = data.get("function_hashes", {})
+            tracker._file_functions = {
+                file_path: set(fqns)
+                for file_path, fqns in data.get("file_functions", {}).items()
+            }
         return tracker
