@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..schema import AgentTrace, ToolCall, AgentResponse
 from ..token_counter import measure_file_tokens, measure_text_tokens
@@ -97,12 +97,12 @@ _META_TOOLS = {
 def _classify_tool(name: str) -> str:
     """Classify a tool call by name. Returns 'retrieval', 'write', 'exec', or 'meta'."""
     name_lower = name.lower()
+    if name in _META_TOOLS or "todo" in name_lower:
+        return "meta"
     if name in _RETRIEVAL_TOOLS or any(kw in name_lower for kw in ("read", "grep", "search", "find", "list")):
         return "retrieval"
     if name in _WRITE_TOOLS or any(kw in name_lower for kw in ("patch", "edit", "write", "create", "insert")):
         return "write"
-    if name in _META_TOOLS or "todo" in name_lower:
-        return "meta"
     if any(kw in name_lower for kw in ("run", "exec", "code", "snippet", "python", "terminal")):
         return "exec"
     return "other"
@@ -117,12 +117,12 @@ def _infer_tool_type(name: str) -> str:
         return "grep_search"
     if any(kw in name_lower for kw in ("patch", "edit", "write", "insert", "create")):
         return "edit_file"
+    if "todo" in name_lower:
+        return "meta"
     if any(kw in name_lower for kw in ("list", "dir")):
         return "list_dir"
     if any(kw in name_lower for kw in ("run", "exec", "code", "snippet", "python", "terminal")):
         return "run_command"
-    if "todo" in name_lower:
-        return "meta"
     return name
 
 
@@ -138,6 +138,8 @@ def discover_copilot_sessions() -> list[Path]:
     for workspace_dir in base.iterdir():
         if not workspace_dir.is_dir():
             continue
+        for f in workspace_dir.glob("GitHub.copilot-chat/debug-logs/*/main.jsonl"):
+            sessions.append(f)
         chat_dir = workspace_dir / "chatSessions"
         if chat_dir.exists():
             for f in chat_dir.glob("*.json"):
@@ -166,14 +168,326 @@ def parse_copilot_json_export(
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
+        if _looks_like_debug_jsonl(content):
+            return _parse_copilot_debug_jsonl(content, project_root, task_prompt, mode, project_name)
         return _parse_copilot_text(export_path, project_root, task_prompt, mode, project_name)
 
     # ── Format A: VS Code 'Export Session' (requests/response) ──────
     if isinstance(data, dict) and "requests" in data:
-        return _parse_vscode_export(data, project_root, task_prompt, mode, project_name)
+        trace = _parse_vscode_export(data, project_root, task_prompt, mode, project_name)
+        debug_trace = _try_parse_matching_debug_log(data, export_path, project_root, task_prompt, mode, project_name)
+        if debug_trace is not None:
+            return _merge_export_with_debug_trace(trace, debug_trace)
+        return trace
+
+    # ── Format B: VS Code Copilot "Agent Debug Log" OTEL export ─────
+    if isinstance(data, dict) and "resourceSpans" in data:
+        return _parse_copilot_otel_export(data, project_root, task_prompt, mode, project_name)
 
     # ── Format B: Flat Messages (APIs / Other tools) ───────────────
     return _parse_flat_messages(data, project_root, task_prompt, mode, project_name)
+
+
+def _try_parse_matching_debug_log(
+    data: dict,
+    export_path: Path,
+    project_root: Path,
+    task_prompt: str,
+    mode: str,
+    project_name: str,
+) -> AgentTrace | None:
+    session_ids = _session_ids_from_export(data)
+    candidates: list[Path] = []
+
+    for session_id in session_ids:
+        candidates.extend([
+            project_root / ".skeletongraph" / "eval" / f"agent-debug-log-{session_id}.json",
+            export_path.parent / f"agent-debug-log-{session_id}.json",
+            export_path.parent.parent / f"agent-debug-log-{session_id}.json",
+        ])
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            debug_data = json.loads(candidate.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(debug_data, dict) and "resourceSpans" in debug_data:
+            return _parse_copilot_otel_export(debug_data, project_root, task_prompt, mode, project_name)
+    return None
+
+
+def _session_ids_from_export(data: dict) -> list[str]:
+    ids: list[str] = []
+    for req in data.get("requests", []):
+        if not isinstance(req, dict):
+            continue
+        metadata = req.get("result", {}).get("metadata", {}) if isinstance(req.get("result"), dict) else {}
+        session_id = metadata.get("sessionId") if isinstance(metadata, dict) else None
+        if isinstance(session_id, str) and session_id not in ids:
+            ids.append(session_id)
+    return ids
+
+
+def _merge_export_with_debug_trace(export_trace: AgentTrace, debug_trace: AgentTrace) -> AgentTrace:
+    """Prefer debug-log event/API accounting, keep export response text."""
+    if export_trace.agent_responses:
+        debug_trace.agent_responses = export_trace.agent_responses
+    if export_trace.task_prompt and export_trace.task_prompt != "Unknown":
+        debug_trace.task_prompt = export_trace.task_prompt
+    if export_trace.files_modified:
+        debug_trace.files_modified = sorted(set(debug_trace.files_modified + export_trace.files_modified))
+    return debug_trace
+
+
+def _looks_like_debug_jsonl(content: str) -> bool:
+    first = next((line for line in content.splitlines() if line.strip()), "")
+    return '"type"' in first and (
+        '"llm_request"' in content or '"tool_call"' in content or '"session_start"' in content
+    )
+
+
+def _parse_copilot_debug_jsonl(
+    content: str,
+    project_root: Path,
+    task_prompt: str,
+    mode: str,
+    project_name: str,
+) -> AgentTrace:
+    """Parse Copilot's VS Code debug log format.
+
+    This is the only local Copilot source I found that exposes exact
+    per-request inputTokens/outputTokens, matching the VS Code developer view.
+    """
+    tool_calls: list[ToolCall] = []
+    agent_responses: list[AgentResponse] = []
+    files_modified: list[str] = []
+    api_input_tokens = 0
+    api_output_tokens = 0
+    model_turns = 0
+    turn_id = 0
+
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        attrs = event.get("attrs", {}) if isinstance(event.get("attrs"), dict) else {}
+        event_type = event.get("type", "")
+
+        if event_type == "user_message" and not task_prompt:
+            msg = attrs.get("content", "")
+            if isinstance(msg, str) and msg.strip():
+                task_prompt = msg.strip()[:200]
+
+        elif event_type == "llm_request":
+            api_input_tokens += _as_int(attrs.get("inputTokens"))
+            api_output_tokens += _as_int(attrs.get("outputTokens"))
+            model_turns += 1
+
+        elif event_type == "tool_call":
+            call = _tool_call_from_debug_event(event, attrs, project_root)
+            if call is not None:
+                tool_calls.append(call)
+                if call.tool_type == "edit_file" and call.target:
+                    files_modified.append(Path(call.target).name)
+
+        elif event_type == "agent_response":
+            text = _extract_debug_response_text(attrs.get("response", ""))
+            if text:
+                turn_id += 1
+                agent_responses.append(AgentResponse(turn_id, text, measure_text_tokens(text)))
+
+    return AgentTrace(
+        agent="copilot",
+        mode=mode,
+        task_prompt=task_prompt or "Unknown",
+        project=project_name,
+        tool_calls=tool_calls,
+        agent_responses=agent_responses,
+        task_completed=True,
+        reasoning_tokens=api_output_tokens if api_output_tokens > 0 else None,
+        api_input_tokens=api_input_tokens if api_input_tokens > 0 else None,
+        model_turns=model_turns if model_turns > 0 else None,
+        files_modified=sorted(set(files_modified)),
+    )
+
+
+def _parse_copilot_otel_export(
+    data: dict,
+    project_root: Path,
+    task_prompt: str,
+    mode: str,
+    project_name: str,
+) -> AgentTrace:
+    """Parse VS Code's exported Copilot Agent Debug Log JSON.
+
+    The file is an OpenTelemetry export with resourceSpans/scopeSpans/spans.
+    It exposes gen_ai.usage.input_tokens/output_tokens, which are the fields
+    shown in VS Code's developer trace summary.
+    """
+    tool_calls: list[ToolCall] = []
+    api_input_tokens = 0
+    api_output_tokens = 0
+    model_turns = 0
+    files_modified: list[str] = []
+
+    for span in _iter_otel_spans(data):
+        attrs = _otel_attrs(span)
+        name = str(span.get("name", ""))
+        operation = str(attrs.get("gen_ai.operation.name", ""))
+
+        if operation == "chat" or name.startswith("chat:"):
+            api_input_tokens += _as_int(attrs.get("gen_ai.usage.input_tokens"))
+            api_output_tokens += _as_int(attrs.get("gen_ai.usage.output_tokens"))
+            model_turns += 1
+
+        elif operation == "execute_tool" or attrs.get("gen_ai.tool.name"):
+            event = {"name": attrs.get("gen_ai.tool.name") or name}
+            debug_attrs = {
+                "args": attrs.get("gen_ai.tool.call.arguments", "{}"),
+                "result": attrs.get("gen_ai.tool.call.result", ""),
+            }
+            call = _tool_call_from_debug_event(event, debug_attrs, project_root)
+            if call is not None:
+                tool_calls.append(call)
+                if call.tool_type == "edit_file" and call.target:
+                    files_modified.append(Path(call.target).name)
+
+    return AgentTrace(
+        agent="copilot",
+        mode=mode,
+        task_prompt=task_prompt or "Unknown",
+        project=project_name,
+        tool_calls=tool_calls,
+        agent_responses=[],
+        task_completed=True,
+        reasoning_tokens=api_output_tokens if api_output_tokens > 0 else None,
+        api_input_tokens=api_input_tokens if api_input_tokens > 0 else None,
+        model_turns=model_turns if model_turns > 0 else None,
+        files_modified=sorted(set(files_modified)),
+    )
+
+
+def _iter_otel_spans(data: dict):
+    for resource_span in data.get("resourceSpans", []):
+        for scope_span in resource_span.get("scopeSpans", []):
+            for span in scope_span.get("spans", []):
+                if isinstance(span, dict):
+                    yield span
+
+
+def _otel_attrs(span: dict[str, Any]) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    for attr in span.get("attributes", []):
+        if not isinstance(attr, dict):
+            continue
+        key = attr.get("key")
+        if isinstance(key, str):
+            attrs[key] = _otel_value(attr.get("value", {}))
+    return attrs
+
+
+def _otel_value(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    for key in ("stringValue", "intValue", "doubleValue", "boolValue"):
+        if key in value:
+            return value[key]
+    if "arrayValue" in value:
+        return value["arrayValue"]
+    if "kvlistValue" in value:
+        return value["kvlistValue"]
+    return None
+
+
+def _tool_call_from_debug_event(event: dict[str, Any], attrs: dict[str, Any], project_root: Path) -> ToolCall | None:
+    name = str(event.get("name") or attrs.get("name") or "unknown")
+    args = _json_loads_maybe(attrs.get("args")) or {}
+    raw_result = attrs.get("result", "")
+    result = _json_loads_maybe(raw_result)
+    result_text = _debug_tool_result_text(result, raw_result)
+
+    category = _classify_tool(name)
+    tool_type = _infer_tool_type(name)
+    target = _extract_target(name, args, project_root)
+
+    if category in ("write", "meta"):
+        output_tokens = 0
+    elif result_text:
+        output_tokens = measure_text_tokens(result_text)
+    elif category == "retrieval":
+        output_tokens = 50
+    else:
+        output_tokens = 0
+
+    if category == "write":
+        target = _extract_write_target(args, result_text) or target
+
+    return ToolCall(tool_type=tool_type, target=target, output_tokens=output_tokens)
+
+
+def _debug_tool_result_text(result: Any, raw_result: Any) -> str:
+    if isinstance(result, dict):
+        if isinstance(result.get("node"), (dict, list)):
+            return _extract_text_from_nodes(result["node"])
+        for key in ("contents", "output", "text", "value", "result"):
+            val = result.get(key)
+            if isinstance(val, str):
+                return val
+            if isinstance(val, (dict, list)):
+                return _extract_text_from_nodes(val)
+        return json.dumps(result, ensure_ascii=False)
+    if isinstance(result, list):
+        return _extract_text_from_nodes(result)
+    if isinstance(raw_result, str):
+        return raw_result
+    return ""
+
+
+def _extract_debug_response_text(response: Any) -> str:
+    data = _json_loads_maybe(response)
+    if not isinstance(data, list):
+        return ""
+    parts: list[str] = []
+    for msg in data:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for part in msg.get("parts", []):
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text") or part.get("content")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+    return "\n".join(parts)
+
+
+def _extract_write_target(args: dict[str, Any], result_text: str) -> str:
+    for key in ("filePath", "file", "path", "targetFile"):
+        val = args.get(key)
+        if isinstance(val, str) and val:
+            return Path(val).name
+    match = re.search(r"(?:Update|Add) File:\s*([^\n\r]+)", result_text)
+    return Path(match.group(1).strip()).name if match else ""
+
+
+def _json_loads_maybe(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_vscode_export(

@@ -40,6 +40,9 @@ class TurnRecord:
     # Agent response captured via previous_response parameter (L2 data)
     response_text: str = ""
     response_tokens: int = 0
+    # Hashes of content sent for deduplication
+    zone2_hashes: Dict[str, str] = field(default_factory=dict)
+    zone3_hashes: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,6 +88,9 @@ class Session:
         self._turns: List[TurnRecord] = []
         self._stats = SessionStats()
         self._created_at = time.time()
+        self._body_hashes: Dict[str, str] = {}
+        self._struct_hashes: Dict[str, str] = {}
+        self._max_cache_entries = max(200, max_turns * 4)
 
     @property
     def is_expired(self) -> bool:
@@ -120,6 +126,8 @@ class Session:
         token_count: int,
         estimated_native_tokens: int,
         confidence: str = "",
+        zone2_hashes: Optional[Dict[str, str]] = None,
+        zone3_hashes: Optional[Dict[str, str]] = None,
     ) -> TurnRecord:
         """Record a completed query turn."""
         turn = TurnRecord(
@@ -131,8 +139,22 @@ class Session:
             token_count=token_count,
             estimated_native_tokens=estimated_native_tokens,
             confidence=confidence,
+            zone2_hashes=zone2_hashes or {},
+            zone3_hashes=zone3_hashes or {},
         )
         self._turns.append(turn)
+
+        # Update hash caches for deduplication
+        if zone2_hashes:
+            for fqn, digest in zone2_hashes.items():
+                if digest:
+                    self._body_hashes[fqn] = digest
+        if zone3_hashes:
+            for fqn, digest in zone3_hashes.items():
+                if digest:
+                    self._struct_hashes[fqn] = digest
+        self._trim_cache(self._body_hashes)
+        self._trim_cache(self._struct_hashes)
 
         # Update stats
         self._stats.total_turns += 1
@@ -157,6 +179,18 @@ class Session:
         """
         return fqn in self.get_zone2_fqns()
 
+    def should_skip_body_hash(self, fqn: str, body_hash: str) -> bool:
+        """Check if the agent already has this exact body version."""
+        if not body_hash:
+            return fqn in self.get_zone2_fqns()
+        return self._body_hashes.get(fqn) == body_hash
+
+    def should_skip_struct_hash(self, fqn: str, struct_hash: str) -> bool:
+        """Check if the agent already has this exact structural entry."""
+        if not struct_hash:
+            return False
+        return self._struct_hashes.get(fqn) == struct_hash
+
     def get_last_prompt(self) -> Optional[str]:
         """Get the most recent prompt (for anaphora resolution)."""
         if self._turns:
@@ -174,6 +208,16 @@ class Session:
         self._turns.clear()
         self._stats = SessionStats()
         self._created_at = time.time()
+        self._body_hashes.clear()
+        self._struct_hashes.clear()
+
+    def _trim_cache(self, cache: Dict[str, str]) -> None:
+        """Trim hash cache to a bounded size."""
+        if len(cache) <= self._max_cache_entries:
+            return
+        # Dicts preserve insertion order; drop oldest entries
+        while len(cache) > self._max_cache_entries:
+            cache.pop(next(iter(cache)), None)
 
     # ── Persistence ────────────────────────────────────────────────────
 
@@ -185,6 +229,8 @@ class Session:
         data = {
             "created_at": self._created_at,
             "stats": self._stats.to_dict(),
+            "body_hashes": self._body_hashes,
+            "struct_hashes": self._struct_hashes,
             "turns": [
                 {
                     "turn_id": t.turn_id,
@@ -197,6 +243,8 @@ class Session:
                     "confidence": t.confidence,
                     "response_text": t.response_text,
                     "response_tokens": t.response_tokens,
+                    "zone2_hashes": t.zone2_hashes,
+                    "zone3_hashes": t.zone3_hashes,
                 }
                 for t in self._turns[-10:]  # Only persist last 10 turns
             ],
@@ -231,6 +279,12 @@ class Session:
                 total_saved_tokens=stats.get("total_saved_tokens", 0),
             )
 
+            # Restore hash caches
+            session._body_hashes = data.get("body_hashes", {})
+            session._struct_hashes = data.get("struct_hashes", {})
+            session._trim_cache(session._body_hashes)
+            session._trim_cache(session._struct_hashes)
+
             # Restore turns
             for t in data.get("turns", []):
                 session._turns.append(TurnRecord(
@@ -244,6 +298,8 @@ class Session:
                     confidence=t.get("confidence", ""),
                     response_text=t.get("response_text", ""),
                     response_tokens=t.get("response_tokens", 0),
+                    zone2_hashes=t.get("zone2_hashes", {}),
+                    zone3_hashes=t.get("zone3_hashes", {}),
                 ))
 
         except (json.JSONDecodeError, KeyError, OSError):

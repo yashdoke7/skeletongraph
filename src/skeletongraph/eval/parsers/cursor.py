@@ -13,7 +13,8 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Any
+from urllib.parse import unquote
 
 from ..schema import AgentTrace, ToolCall, AgentResponse
 from ..token_counter import (
@@ -78,6 +79,7 @@ def _parse_sqlite(
     """
     tool_calls: list[ToolCall] = []
     agent_responses: list[AgentResponse] = []
+    selected_composer_ids: list[str] = []
 
     try:
         conn = sqlite3.connect(str(db_path))
@@ -97,6 +99,12 @@ def _parse_sqlite(
                 data = json.loads(value)
             except (json.JSONDecodeError, TypeError):
                 continue
+
+            if isinstance(data, dict):
+                selected_composer_ids.extend(
+                    cid for cid in data.get("selectedComposerIds", [])
+                    if isinstance(cid, str)
+                )
 
             messages = _extract_messages(data)
             for msg in messages:
@@ -185,11 +193,305 @@ def _parse_sqlite(
     except (sqlite3.Error, OSError):
         pass
 
+    if not tool_calls and not agent_responses:
+        richer_trace = _parse_current_cursor_global_storage(
+            db_path, project_root, task_prompt, mode, project_name, selected_composer_ids
+        )
+        if richer_trace is not None:
+            return richer_trace
+
     return AgentTrace(
         agent="cursor", mode=mode, task_prompt=task_prompt or "Unknown",
         project=project_name, tool_calls=tool_calls,
         agent_responses=agent_responses, task_completed=True,
     )
+
+
+def _parse_current_cursor_global_storage(
+    db_path: Path,
+    project_root: Path,
+    task_prompt: str,
+    mode: str,
+    project_name: str,
+    composer_ids: list[str],
+) -> AgentTrace | None:
+    """Parse Cursor's current composer storage schema.
+
+    Recent Cursor builds keep only composer IDs in workspaceStorage and put
+    the actual bubbles/tool outputs in User/globalStorage/state.vscdb.
+    """
+    candidate_dbs: list[Path] = []
+    if "globalStorage" in db_path.parts:
+        candidate_dbs.append(db_path)
+    if "workspaceStorage" in db_path.parts:
+        try:
+            user_dir = db_path.parents[2]
+            candidate_dbs.append(user_dir / "globalStorage" / "state.vscdb")
+        except IndexError:
+            pass
+
+    for global_db in candidate_dbs:
+        if not global_db.exists():
+            continue
+        trace = _parse_global_composers(
+            global_db, project_root, task_prompt, mode, project_name, composer_ids
+        )
+        if trace is not None and (trace.tool_calls or trace.agent_responses):
+            return trace
+    return None
+
+
+def _parse_global_composers(
+    global_db: Path,
+    project_root: Path,
+    task_prompt: str,
+    mode: str,
+    project_name: str,
+    composer_ids: list[str],
+) -> AgentTrace | None:
+    try:
+        conn = sqlite3.connect(str(global_db))
+        cursor_db = conn.cursor()
+        if not composer_ids:
+            rows = cursor_db.execute(
+                "SELECT key FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
+            ).fetchall()
+            composer_ids = [row[0].split(":", 1)[1] for row in rows if ":" in row[0]]
+
+        best_trace: AgentTrace | None = None
+        for composer_id in composer_ids:
+            trace = _parse_one_composer(cursor_db, composer_id, project_root, task_prompt, mode, project_name)
+            if trace is None:
+                continue
+            if best_trace is None or trace.tool_call_count + len(trace.agent_responses) > (
+                best_trace.tool_call_count + len(best_trace.agent_responses)
+            ):
+                best_trace = trace
+        conn.close()
+        return best_trace
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def _parse_one_composer(
+    cursor_db: sqlite3.Cursor,
+    composer_id: str,
+    project_root: Path,
+    task_prompt: str,
+    mode: str,
+    project_name: str,
+) -> AgentTrace | None:
+    row = cursor_db.execute(
+        "SELECT value FROM cursorDiskKV WHERE key = ?",
+        (f"composerData:{composer_id}",),
+    ).fetchone()
+    if not row:
+        return None
+
+    composer = _json_loads_maybe(row[0])
+    if not isinstance(composer, dict):
+        return None
+
+    headers = composer.get("fullConversationHeadersOnly", [])
+    if not isinstance(headers, list):
+        return None
+
+    tool_calls: list[ToolCall] = []
+    agent_responses: list[AgentResponse] = []
+    files_modified: list[str] = []
+    turn_id = 0
+
+    for header in headers:
+        if not isinstance(header, dict):
+            continue
+        bubble_id = header.get("bubbleId")
+        if not isinstance(bubble_id, str):
+            continue
+
+        bubble_row = cursor_db.execute(
+            "SELECT value FROM cursorDiskKV WHERE key = ?",
+            (f"bubbleId:{composer_id}:{bubble_id}",),
+        ).fetchone()
+        if not bubble_row:
+            continue
+
+        bubble = _json_loads_maybe(bubble_row[0])
+        if not isinstance(bubble, dict):
+            continue
+
+        text = bubble.get("text", "")
+        if isinstance(text, str) and text.strip() and bubble.get("type") == 2:
+            turn_id += 1
+            agent_responses.append(AgentResponse(turn_id, text, measure_text_tokens(text)))
+
+        if bubble.get("type") == 1 and not task_prompt:
+            user_text = _extract_rich_text(bubble.get("richText", ""))
+            if user_text:
+                task_prompt = user_text.strip()[:200]
+
+        tool_data = bubble.get("toolFormerData")
+        if isinstance(tool_data, dict):
+            call = _tool_call_from_cursor_tool(tool_data, project_root)
+            if call is not None:
+                tool_calls.append(call)
+                if call.tool_type == "edit_file" and call.target:
+                    files_modified.append(Path(call.target).name)
+
+    return AgentTrace(
+        agent="cursor",
+        mode=mode,
+        task_prompt=task_prompt or "Unknown",
+        project=project_name,
+        tool_calls=tool_calls,
+        agent_responses=agent_responses,
+        task_completed=True,
+        files_modified=sorted(set(files_modified)),
+    )
+
+
+def _tool_call_from_cursor_tool(tool_data: dict[str, Any], project_root: Path) -> ToolCall | None:
+    name = str(tool_data.get("name", "unknown"))
+    name_lower = name.lower()
+    args = _json_loads_maybe(tool_data.get("params")) or _json_loads_maybe(tool_data.get("rawArgs")) or {}
+    result = _json_loads_maybe(tool_data.get("result"))
+
+    target = _cursor_tool_target(name, args)
+    result_text = _cursor_result_text(result, tool_data.get("result", ""))
+
+    if any(kw in name_lower for kw in ("read_file", "open_file", "view_file")):
+        tokens = measure_text_tokens(result_text) if result_text else _measure_target_file(target, project_root)
+        return ToolCall("view_file", _display_target(target), tokens)
+
+    if any(kw in name_lower for kw in ("grep", "search", "glob")):
+        tokens = measure_text_tokens(result_text) if result_text else measure_grep_output_tokens()
+        return ToolCall("grep_search", target, tokens)
+
+    if any(kw in name_lower for kw in ("edit", "apply", "patch", "write")):
+        return ToolCall("edit_file", _display_target(target), 0)
+
+    if any(kw in name_lower for kw in ("terminal", "command", "run")):
+        tokens = measure_text_tokens(result_text) if result_text else 50
+        return ToolCall("run_command", target or name, tokens)
+
+    if "lint" in name_lower:
+        tokens = measure_text_tokens(result_text) if result_text else 0
+        return ToolCall("read_lints", target, tokens)
+
+    if name:
+        tokens = measure_text_tokens(result_text) if result_text else 50
+        return ToolCall(name, target, tokens)
+    return None
+
+
+def _cursor_tool_target(name: str, args: Any) -> str:
+    if not isinstance(args, dict):
+        return ""
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in ("grep", "search", "glob")):
+        for key in ("pattern", "globPattern", "query"):
+            val = args.get(key)
+            if isinstance(val, str) and val:
+                return val
+    if any(kw in name_lower for kw in ("edit", "apply", "patch", "write")):
+        for key in ("relativeWorkspacePath", "targetFile", "path", "filePath", "effectiveUri"):
+            val = args.get(key)
+            if isinstance(val, str) and val:
+                return val
+    for key in ("targetFile", "path", "filePath", "effectiveUri", "targetDirectory", "cwd"):
+        val = args.get(key)
+        if isinstance(val, str) and val:
+            return val
+    if isinstance(args.get("paths"), list) and args["paths"]:
+        return str(args["paths"][0])
+    for key in ("pattern", "globPattern", "query", "command"):
+        val = args.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return name
+
+
+def _cursor_result_text(result: Any, raw_result: Any) -> str:
+    if isinstance(result, dict):
+        for key in ("contents", "output", "text", "result"):
+            val = result.get(key)
+            if isinstance(val, str):
+                return val
+        return json.dumps(result, ensure_ascii=False)
+    if isinstance(result, list):
+        return json.dumps(result, ensure_ascii=False)
+    if isinstance(raw_result, str):
+        return raw_result
+    return ""
+
+
+def _measure_target_file(target: str, project_root: Path) -> int:
+    if not target:
+        return 0
+    local = _resolve_cursor_path(target, project_root)
+    return measure_file_tokens(local, cap_lines=800)
+
+
+def _display_target(target: str) -> str:
+    if not target:
+        return ""
+    return Path(_clean_cursor_path(target)).name or target[:80]
+
+
+def _resolve_cursor_path(target: str, project_root: Path) -> Path:
+    cleaned = _clean_cursor_path(target)
+    direct = Path(cleaned)
+    if direct.exists():
+        return direct
+    candidate = project_root / cleaned
+    if candidate.exists():
+        return candidate
+    return project_root / Path(cleaned).name
+
+
+def _clean_cursor_path(target: str) -> str:
+    cleaned = target.replace("file:///", "")
+    cleaned = unquote(cleaned).replace("\\", "/")
+    if re.match(r"^[a-zA-Z]:/", cleaned):
+        return cleaned
+    if re.match(r"^/[a-zA-Z]:/", cleaned):
+        return cleaned[1:]
+    return cleaned
+
+
+def _json_loads_maybe(value: Any) -> Any:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value
+
+
+def _extract_rich_text(rich_text: str) -> str:
+    parsed = _json_loads_maybe(rich_text)
+    if not isinstance(parsed, dict):
+        return ""
+
+    texts: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            val = node.get("text")
+            if isinstance(val, str):
+                texts.append(val)
+            for child in node.get("children", []):
+                walk(child)
+            for key, child in node.items():
+                if key not in ("text", "children"):
+                    walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(parsed)
+    return "\n".join(t for t in texts if t.strip())
 
 
 def _parse_text(
@@ -204,6 +506,14 @@ def _parse_text(
     tool_calls: list[ToolCall] = []
     agent_responses: list[AgentResponse] = []
 
+    for i, block in enumerate(re.split(r"\n---\n", content), start=1):
+        if block.lstrip().startswith("**Cursor**"):
+            text = re.sub(r"^\s*\*\*Cursor\*\*\s*", "", block, count=1).strip()
+            if text:
+                agent_responses.append(AgentResponse(i, text, measure_text_tokens(text)))
+        elif block.lstrip().startswith("**User**") and not task_prompt:
+            task_prompt = re.sub(r"^\s*\*\*User\*\*\s*", "", block, count=1).strip()[:200]
+
     # Look for file references
     for match in re.finditer(r'(?:Read|Viewing|Opened?)\s+([^\s\n]+\.(?:py|ts|js))', content):
         local = project_root / match.group(1)
@@ -211,6 +521,11 @@ def _parse_text(
             "view_file", match.group(1),
             measure_file_tokens(local, cap_lines=800)
         ))
+
+    for match in re.finditer(r"```(?:[^\n:]+:)?(?:[^\n:]+:)?([^\n`]+\.(?:py|ts|js|tsx|jsx))", content):
+        target = match.group(1).strip()
+        local = _resolve_cursor_path(target, project_root)
+        tool_calls.append(ToolCall("view_file", _display_target(target), measure_file_tokens(local, cap_lines=800)))
 
     # Look for search actions
     for match in re.finditer(r'(?:Search|Grep|Find)(?:ed|ing)?\s', content):

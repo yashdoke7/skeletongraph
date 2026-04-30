@@ -47,4 +47,11 @@ EVALUATION_WORKFLOW.md
 evaluation_dataset.md
 SWE_BENCH_WORKFLOW.md
 
+test_mcp_tools.py
+
 eval_logs/
+
+docs/evaluation_publication/
+
+benchmark_traces/
+benchmark_results/

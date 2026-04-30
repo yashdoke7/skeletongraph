@@ -137,7 +137,7 @@ def resolve_context(
     for fqn in target_fqns:
         sk = store.skeleton_table.get(fqn)
         if sk:
-            is_cached = session.should_skip_body(fqn) if session else False
+            is_cached = session.should_skip_body_hash(fqn, sk.sha256) if session else False
             if is_cached:
                 session_dedup_count += 1
             candidates[fqn] = RankedCandidate(

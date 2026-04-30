@@ -71,6 +71,10 @@ class AgentTrace:
     # Layer 3: Reasoning Tokens (if available from API)
     reasoning_tokens: Optional[int] = None
 
+    # Exact API accounting, when an agent debug log exposes it.
+    api_input_tokens: Optional[int] = None
+    model_turns: Optional[int] = None
+
     # Layer 5: MCP schema overhead (only non-zero for SG mode)
     # This is the token cost of loading SG tool schemas every turn.
     # For native runs this is 0. For SG runs we calculate it from
@@ -195,9 +199,15 @@ class AgentTrace:
                 "layer2_response_tokens": self.total_response_tokens,
                 "layer3_history_tokens": self.estimated_history_tokens,
                 "layer4_reasoning_tokens": self.reasoning_tokens,
+                "api_input_tokens": self.api_input_tokens,
+                "api_total_tokens": (
+                    self.api_input_tokens + (self.reasoning_tokens or 0)
+                    if self.api_input_tokens is not None else None
+                ),
                 "layer5_mcp_schema_overhead": self.mcp_schema_overhead_tokens,
                 "total_conversation_tokens": self.total_conversation_tokens,
                 "total_turns": self.total_turns,
+                "model_turns": self.model_turns,
                 "total_tool_calls": self.tool_call_count,
                 "view_file_count": self.view_file_count,
                 "grep_count": self.grep_count,
@@ -235,6 +245,8 @@ class AgentTrace:
         trace.test_passed = data.get("quality", {}).get("test_passed")
         trace.wall_clock_seconds = data.get("metrics", {}).get("wall_clock_seconds")
         trace.reasoning_tokens = data.get("metrics", {}).get("layer4_reasoning_tokens")
+        trace.api_input_tokens = data.get("metrics", {}).get("api_input_tokens")
+        trace.model_turns = data.get("metrics", {}).get("model_turns")
         trace.mcp_schema_overhead_tokens = data.get("metrics", {}).get("layer5_mcp_schema_overhead", 0)
 
         for tc_data in data.get("tool_calls", []):
@@ -250,4 +262,3 @@ class AgentTrace:
     def from_json(cls, json_str: str) -> AgentTrace:
         """Deserialize from JSON string."""
         return cls.from_dict(json.loads(json_str))
-

@@ -1300,8 +1300,18 @@ def _save_and_display_trace(trace, project_root):
     table.add_row("Tool Output Tokens (L1)", f"{trace.total_tool_output_tokens:,}")
     table.add_row("Response Tokens (L2)", f"{trace.total_response_tokens:,}")
     table.add_row("History Tokens (L3)", f"{trace.estimated_history_tokens:,}")
+    if getattr(trace, "api_input_tokens", None) is not None:
+        table.add_row("API Input Tokens", f"{trace.api_input_tokens:,}")
+    if trace.reasoning_tokens is not None:
+        table.add_row("Reasoning/API Output (L4)", f"{trace.reasoning_tokens:,}")
     table.add_row("MCP Schema Overhead (L5)", f"{trace.mcp_schema_overhead_tokens:,}")
-    table.add_row("Total Conversation", f"{trace.total_conversation_tokens:,}")
+    table.add_row("Measured Conversation", f"{trace.total_conversation_tokens:,}")
+    if trace.reasoning_tokens is not None:
+        table.add_row("Measured + L4", f"{trace.total_conversation_tokens + trace.reasoning_tokens:,}")
+    if getattr(trace, "api_input_tokens", None) is not None:
+        table.add_row("Exact API Total", f"{trace.api_input_tokens + (trace.reasoning_tokens or 0):,}")
+    if getattr(trace, "model_turns", None) is not None:
+        table.add_row("Model Turns", str(trace.model_turns))
     table.add_row("Tool Calls", str(trace.tool_call_count))
     table.add_row("File Views", str(trace.view_file_count))
     table.add_row("Grep Searches", str(trace.grep_count))
