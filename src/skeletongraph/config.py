@@ -47,6 +47,7 @@ class SGConfig:
 
     # ── MCP Server ─────────────────────────────────────────────────────
     server_port: int = 3500
+    mcp_tool_profile: str = "full"     # full | compact | minimal
 
     # ── Display ────────────────────────────────────────────────────────
     show_attention_map: bool = True        # Include attention heatmap in output
@@ -83,6 +84,7 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
         "SG_SESSION_TTL": ("session_ttl_minutes", int),
         "SG_SERVER_PORT": ("server_port", int),
         "SG_BATCH_SIZE": ("summary_batch_size", int),
+        "SG_MCP_PROFILE": ("mcp_tool_profile", str),
     }
 
     for env_key, (attr, type_fn) in _env_overrides.items():
@@ -112,6 +114,7 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "compact_body_line_limit": config.compact_body_line_limit,
         "session_ttl_minutes": config.session_ttl_minutes,
         "show_attention_map": config.show_attention_map,
+        "mcp_tool_profile": config.mcp_tool_profile,
     }
     config_file = sg_dir / "config.json"
     config_file.write_text(

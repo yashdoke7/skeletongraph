@@ -37,6 +37,12 @@ from ..eval.token_counter import measure_text_tokens
 
 _TOOLS: Dict[str, Dict[str, Any]] = {}
 
+_TOOL_PROFILES: Dict[str, Optional[set]] = {
+    "full": None,
+    "compact": {"query_context", "expand_context"},
+    "minimal": {"query_context"},
+}
+
 
 def _required_parameter_names(parameters: dict) -> List[str]:
     """Infer required MCP parameters while keeping defaulted fields optional."""
@@ -80,6 +86,7 @@ _server_state: Dict[str, Any] = {
     "session": None,
     "config": None,
     "metrics": None,
+    "tool_profile": None,
 }
 
 
@@ -93,6 +100,19 @@ def _get_root() -> Path:
 
 def _get_session() -> Session:
     return _server_state["session"]
+
+
+def _get_tool_profile() -> str:
+    profile = _server_state.get("tool_profile")
+    if not profile:
+        config: SGConfig = _server_state.get("config")
+        profile = config.mcp_tool_profile if config else "full"
+    return str(profile).lower()
+
+
+def _get_allowed_tools() -> Optional[set]:
+    profile = _get_tool_profile()
+    return _TOOL_PROFILES.get(profile, None)
 
 
 def _resolve_skeleton(store: IndexStore, fqn: str) -> tuple[Optional[Any], str, List[str]]:
@@ -163,8 +183,19 @@ def query_context_tool(params: dict) -> dict:
 
     prompt = params["prompt"]
     budget = int(params.get("budget", 128_000))
-    top_n = int(params.get("top_n", 50))
-    detail_level = params.get("detail_level") or (config.default_detail_level if config else "compact")
+    profile = _get_tool_profile()
+    if "top_n" in params:
+        top_n = int(params.get("top_n", 50))
+    else:
+        top_n = 20 if profile in ("compact", "minimal") else 50
+    detail_level = params.get("detail_level")
+    if not detail_level:
+        if profile == "minimal":
+            detail_level = "minimal"
+        elif profile == "compact":
+            detail_level = "compact"
+        else:
+            detail_level = config.default_detail_level if config else "compact"
     previous_response = params.get("previous_response", "")
 
     t0 = time.perf_counter()
@@ -773,6 +804,7 @@ def _handle_request(request: dict) -> dict:
         })
 
     elif method == "tools/list":
+        allowed = _get_allowed_tools()
         tools_list = [
             {
                 "name": t["name"],
@@ -780,12 +812,17 @@ def _handle_request(request: dict) -> dict:
                 "inputSchema": t["inputSchema"],
             }
             for t in _TOOLS.values()
+            if allowed is None or t["name"] in allowed
         ]
         return _json_rpc_response(req_id, {"tools": tools_list})
 
     elif method == "tools/call":
         tool_name = params.get("name", "")
         tool_args = params.get("arguments", {})
+
+        allowed = _get_allowed_tools()
+        if allowed is not None and tool_name not in allowed:
+            return _json_rpc_error(req_id, -32601, f"Tool disabled by profile: {tool_name}")
 
         if tool_name not in _TOOLS:
             return _json_rpc_error(req_id, -32601, f"Tool not found: {tool_name}")
@@ -832,6 +869,7 @@ def start_server(
     _server_state["session"] = Session.load(project_root)
     _server_state["config"] = load_config(project_root)
     _server_state["metrics"] = MetricsLogger(project_root)
+    _server_state["tool_profile"] = _server_state["config"].mcp_tool_profile if _server_state["config"] else "full"
 
     # Stdio mode: read line-delimited JSON-RPC
     for line in sys.stdin:

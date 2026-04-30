@@ -88,7 +88,8 @@ def assemble_context(
     candidates = resolver_result.candidates
     intent = resolver_result.intent
     detail_level = (detail_level or cfg.default_detail_level or "full").lower()
-    compact_mode = detail_level == "compact"
+    compact_mode = detail_level in ("compact", "minimal")
+    minimal_mode = detail_level == "minimal"
 
     # ── Build Zone 1: Constraints ──────────────────────────────────────
     zone1_parts = []
@@ -169,7 +170,7 @@ def assemble_context(
     zone2_text = "\n\n".join(zone2_parts) if zone2_parts else ""
 
     # ── Budget allocation ──────────────────────────────────────────────
-    budget = TokenBudget(model_context_limit)
+    budget = TokenBudget(model_context_limit, soft_target_ratio=cfg.soft_target_ratio)
     tier2_and_3 = [c for c in candidates if c.tier in (Tier.TIER2, Tier.TIER3)]
     allocation = budget.allocate(
         zone1_tokens=zone1_tokens,
@@ -198,7 +199,9 @@ def assemble_context(
         zone3_hashes[key] = digest
 
     zone3_mode = allocation.zone3_mode
-    if compact_mode and zone3_mode != Zone3Mode.NONE:
+    if minimal_mode:
+        zone3_mode = Zone3Mode.NONE
+    elif compact_mode and zone3_mode != Zone3Mode.NONE:
         zone3_mode = Zone3Mode.COMPACT
 
     if zone3_mode != Zone3Mode.NONE:

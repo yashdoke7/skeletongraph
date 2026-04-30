@@ -48,9 +48,11 @@ class TokenBudget:
       4. Over 90% hard → Zone 3 is dropped, warning emitted
     """
 
-    def __init__(self, model_context_limit: int = 128_000) -> None:
+    def __init__(self, model_context_limit: int = 128_000, soft_target_ratio: float = 0.25) -> None:
         self.hard_limit = model_context_limit
-        self.soft_target = int(model_context_limit * 0.25)  # Aim for 25% usage
+        ratio = soft_target_ratio if soft_target_ratio > 0 else 0.25
+        ratio = max(0.05, min(0.9, ratio))
+        self.soft_target = int(model_context_limit * ratio)
 
     def allocate(
         self,
