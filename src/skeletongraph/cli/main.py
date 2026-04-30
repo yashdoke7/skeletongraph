@@ -1347,6 +1347,10 @@ def _detect_platforms(project_root: Path) -> list:
     if (project_root / ".cursorrules").exists() or (home / ".cursor").exists():
         detected.append("cursor")
 
+    # Copilot (VS Code)
+    if (project_root / ".vscode").exists() or (project_root / ".github" / "copilot-instructions.md").exists():
+        detected.append("copilot")
+
     # Antigravity
     if (project_root / ".antigravity.md").exists() or (home / ".gemini").exists():
         detected.append("antigravity")
@@ -1359,9 +1363,9 @@ def _detect_platforms(project_root: Path) -> list:
     if (project_root / ".windsurfrules").exists():
         detected.append("windsurf")
 
-    # If nothing detected, default to claude + cursor + antigravity
+    # If nothing detected, default to claude + cursor + copilot + antigravity
     if not detected:
-        detected = ["claude", "cursor", "antigravity"]
+        detected = ["claude", "cursor", "copilot", "antigravity"]
 
     return detected
 
@@ -1371,6 +1375,7 @@ def _install_platform(platform: str, project_root: Path):
     templates = {
         "claude": ("CLAUDE.md", _claude_template()),
         "cursor": (".cursorrules", _cursor_template()),
+        "copilot": (".github/copilot-instructions.md", _copilot_template()),
         "antigravity": (".antigravity.md", _antigravity_template()),
         "codex": ("AGENTS.md", _codex_template()),
         "windsurf": (".windsurfrules", _windsurf_template()),
@@ -1401,7 +1406,7 @@ def _install_platform(platform: str, project_root: Path):
 
 def _write_mcp_config(project_root: Path):
     """Write MCP server configuration to local and global (Antigravity) configs."""
-    python_exe = "C:\\Users\\ASUS\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
+    python_exe = sys.executable  # Portable: use the Python that's running SG
     
     server_config = {
         "command": python_exe,
@@ -1429,25 +1434,27 @@ def _write_mcp_config(project_root: Path):
 
 
 def _sg_rules_block() -> str:
-    """Common SkeletonGraph rules injected into all IDE configs."""
+    """Common SkeletonGraph rules injected into all IDE configs.
+    
+    IMPORTANT: This only references query_context + expand_context.
+    All other SG tools run in the backend — the agent never sees them.
+    This eliminates the 'LLM-as-graph-traversal-engine' anti-pattern.
+    """
     return """
 ## SkeletonGraph Context Assembly
 
-Use SkeletonGraph as the first-pass context router. It is designed to reduce token-heavy codebase discovery, not to replace the IDE agent's native tools when they are genuinely needed.
+This project uses SkeletonGraph for graph-powered, token-minimal context assembly.
 
-### SG-first retrieval ladder:
-1. Start with `query_context` for an optimized structural map.
-2. Use `search_index` when the entry point, symbol, or file is unclear.
-3. Use `view_file_outline`, `show_graph`, `get_dependencies`, or `get_blast_radius` to move from file-level context to relationships.
-4. Use `expand_function` when skeleton context is not enough and you need a full body.
-5. Use `view_file_range` for a bounded raw snippet.
-6. Use `grep_codebase` or native IDE search/read tools only as fallback.
-
-### Fallback contract:
-- Native tools are allowed when SG confidence is LOW, the file/language is not indexed, generated files are involved, a path is missing, or the agent needs to verify a small bounded range before editing.
-- Prefer bounded native reads/searches over opening whole files.
-- Preserve evaluation telemetry by exporting the native/SG session traces after each run.
-- Respect the constraints listed in Zone 1 of every context response.
+### Rules:
+1. **Before searching or reading files** for a code task, call the `query_context` MCP tool with the user's prompt. It returns pre-assembled context with:
+   - Exact function bodies you need to edit (Zone 2 — target code)
+   - Structural context: neighbors, callers, dependencies (Zone 3)
+   - Project constraints (Zone 1)
+   - Related test files and file structure
+2. **RESPECT** the constraints in Zone 1 of every context response — read them first.
+3. Use `expand_context` only if you need full bodies of specific functions that were returned as skeletons.
+4. Use your normal native tools (grep, read_file, etc.) for any additional detail.
+5. If `query_context` confidence is LOW, fall back to your native search tools.
 """.strip()
 
 
@@ -1459,18 +1466,17 @@ def _claude_template() -> str:
 
 
 def _cursor_template() -> str:
-    return f"""
-# REPOSITORY PROTOCOL: SkeletonGraph-First
+    return f"""# .cursorrules - SkeletonGraph-Enhanced
 
-This repository is optimized for AI agents using the SkeletonGraph MCP server. Use SG before broad native searching, then fall back deliberately when SG context is insufficient.
+{_sg_rules_block()}
+"""
 
-1. **INITIALIZATION**: Start with `skeletongraph:query_context`.
-2. **DISCOVERY**: Use `skeletongraph:search_index` before broad native grep/file search.
-3. **EXPANSION**: Use `skeletongraph:expand_function` or `view_file_range` before opening whole files.
-4. **FALLBACK**: Native tools are acceptable for low-confidence results, unindexed files, generated code, missing paths, or small verification reads.
 
-Goal: fewer tokens with equal or better patch quality, not artificial restriction of the agent.
-""".strip()
+def _copilot_template() -> str:
+    return f"""# Copilot Instructions - SkeletonGraph-Enhanced
+
+{_sg_rules_block()}
+"""
 
 
 def _antigravity_template() -> str:

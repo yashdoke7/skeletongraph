@@ -4,34 +4,24 @@ CLAUDE_MD_TEMPLATE = """# CLAUDE.md — SkeletonGraph-Enhanced Rules
 
 ## SkeletonGraph Context Assembly
 
-This project uses SkeletonGraph for intelligent, token-minimal context assembly. Use it as the first-pass context router, then fall back to native tools only when the SG result is low-confidence, unindexed, or too narrow for safe editing.
+This project uses SkeletonGraph for intelligent, graph-powered context assembly.
+It builds a structural map of the codebase (call graphs, dependencies, blast radius)
+and returns precisely the code you need — no blind grep through every file.
 
 ### Rules:
-1. Start with the `query_context` MCP tool before broad native search or large file reads.
-   It returns attention-optimized context with constraints, target code, and structure.
-2. Prefer SG expansion tools over full-file reads.
-3. **RESPECT** the constraints in Zone 1 of every context response.
-4. If context confidence is LOW, use `search_index` first, then bounded native search/read if needed.
-5. Use `expand_function` or `view_file_range` for page-fault expansion when you need exact code.
-6. Use `review_delta` when reviewing code changes - it computes blast radius automatically.
+1. **Before searching or reading files** for a code task, call the `query_context` MCP tool with the user's prompt. It returns a pre-assembled context with:
+   - Exact function bodies you need to edit (Zone 2 — target code)
+   - Structural context: neighbors, callers, dependencies (Zone 3)
+   - Project constraints (Zone 1)
+   - Related test files and file structure
+2. **RESPECT** the constraints in Zone 1 of every context response — read them first.
+3. Use `expand_context` only if you need full bodies of specific functions that were returned as skeletons.
+4. Use your normal Glob/Grep/Read tools for any additional detail — do NOT call other SG tools.
+5. If `query_context` confidence is LOW, fall back to your native search tools.
 
-### What SkeletonGraph provides:
-- Zone 1: Project constraints (primacy position — always read these first)
+### What the context gives you:
+- Zone 1: Project constraints (primacy position — always read first)
 - Zone 2: Target code bodies (near prompt — strongest attention)
 - Zone 3: Structural context (compressed neighbors and dependencies)
 - Zone 4: Your current task (recency position)
-
-### Available MCP Tools:
-- `query_context` — Main entry: prompt → assembled context
-- `expand_function` — Get full body of a specific function
-- `view_file_range` — Get a bounded raw file slice
-- `grep_codebase` — Scoped indexed grep fallback
-- `show_graph` — Dependency visualization
-- `search_index` — Keyword search across index
-- `index_status` — Health check
-- `review_delta` — Diff-aware blast radius analysis
-- `get_blast_radius` — Impact analysis for a function
-- `get_dependencies` — Dependency chain
-- `detect_changes` — Risk-scored change analysis
-- `get_stats` — Token savings dashboard
 """.strip()

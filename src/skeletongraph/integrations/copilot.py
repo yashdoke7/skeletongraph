@@ -1,8 +1,6 @@
-"""
-Windsurf Integration — SkeletonGraph-Enhanced .windsurfrules Template.
-"""
+"""GitHub Copilot Integration — SkeletonGraph-Enhanced Instructions Template."""
 
-WINDSURF_RULES_TEMPLATE = """# Windsurf Rules — SkeletonGraph-Enhanced
+COPILOT_INSTRUCTIONS_TEMPLATE = """# Copilot Instructions — SkeletonGraph-Enhanced
 
 ## SkeletonGraph Context Assembly
 
@@ -16,6 +14,6 @@ This project uses SkeletonGraph for intelligent, graph-powered context assembly.
    - Related test files and file structure
 2. **RESPECT** the constraints in Zone 1 of every context response — read them first.
 3. Use `expand_context` only if you need full bodies of specific functions that were returned as skeletons.
-4. Use your normal tools for any additional detail — do NOT call other SG tools.
+4. Use your normal grep_search/read_file tools for any additional detail — do NOT call other SG tools.
 5. If `query_context` confidence is LOW, fall back to your native search tools.
 """.strip()

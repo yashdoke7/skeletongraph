@@ -38,9 +38,9 @@ from ..eval.token_counter import measure_text_tokens
 _TOOLS: Dict[str, Dict[str, Any]] = {}
 
 _TOOL_PROFILES: Dict[str, Optional[set]] = {
-    "full": None,
-    "compact": {"query_context", "expand_context"},
-    "minimal": {"query_context"},
+    "full": None,  # All tools exposed (legacy, high schema overhead)
+    "compact": {"query_context", "expand_context"},  # Recommended: one-shot + page-fault
+    "minimal": {"query_context"},  # Absolute minimum: one-shot only
 }
 
 

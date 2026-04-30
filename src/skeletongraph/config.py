@@ -47,7 +47,7 @@ class SGConfig:
 
     # ── MCP Server ─────────────────────────────────────────────────────
     server_port: int = 3500
-    mcp_tool_profile: str = "full"     # full | compact | minimal
+    mcp_tool_profile: str = "compact"  # compact | minimal | full
 
     # ── Display ────────────────────────────────────────────────────────
     show_attention_map: bool = True        # Include attention heatmap in output

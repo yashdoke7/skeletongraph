@@ -95,11 +95,11 @@ class Ranker:
         hub = self._hub_scores.get(fqn, 0.0)
         score += hub * self.weights.connectivity
 
-        # Signal 3: Complexity
-        if skeleton.complexity > 5:
-            score += self.weights.complexity  # Complex code needs context
-        elif skeleton.complexity > 10:
-            score += self.weights.complexity * 1.5
+        # Signal 3: Complexity (check higher threshold first)
+        if skeleton.complexity > 10:
+            score += self.weights.complexity * 1.5  # Very complex code
+        elif skeleton.complexity > 5:
+            score += self.weights.complexity  # Moderately complex code
 
         # Signal 4: Test bonus
         if "test" in reason.lower() or "test" in fqn.lower():
