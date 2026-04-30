@@ -32,6 +32,8 @@ class SGConfig:
     max_graph_depth: int = 2               # BFS depth for blast-radius/deps
     max_zone2_body_tokens: int = 5000      # Max tokens for a single function body
     focused_extraction_threshold: int = 200  # Lines before focused extraction kicks in
+    default_detail_level: str = "compact"  # compact | full
+    compact_body_line_limit: int = 60      # Lines to include for compact bodies
 
     # ── Build & Indexing ───────────────────────────────────────────────
     ignore_patterns: List[str] = field(default_factory=list)  # Extra ignore patterns
@@ -106,6 +108,8 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "soft_target_ratio": config.soft_target_ratio,
         "max_graph_depth": config.max_graph_depth,
         "focused_extraction_threshold": config.focused_extraction_threshold,
+        "default_detail_level": config.default_detail_level,
+        "compact_body_line_limit": config.compact_body_line_limit,
         "session_ttl_minutes": config.session_ttl_minutes,
         "show_attention_map": config.show_attention_map,
     }

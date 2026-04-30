@@ -90,7 +90,8 @@ except ImportError:
 #   print(len(enc.encode(schema_json)))
 
 SG_TOOL_SCHEMA_TOKENS: dict[str, int] = {
-    "query_context":    218,
+    "query_context":    230,
+    "expand_context":   210,
     "expand_function":  162,
     "show_graph":       148,
     "search_index":     141,

@@ -20,6 +20,7 @@ Unique features:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -65,6 +66,7 @@ def assemble_context(
     project_root: Path,
     constraints: Optional[str] = None,
     model_context_limit: int = 128_000,
+    detail_level: Optional[str] = None,
     session: Optional[Session] = None,
     config: Optional[SGConfig] = None,
 ) -> AssembledContext:
@@ -85,6 +87,8 @@ def assemble_context(
     cfg = config or load_config(project_root)
     candidates = resolver_result.candidates
     intent = resolver_result.intent
+    detail_level = (detail_level or cfg.default_detail_level or "full").lower()
+    compact_mode = detail_level == "compact"
 
     # ── Build Zone 1: Constraints ──────────────────────────────────────
     zone1_parts = []
@@ -121,14 +125,16 @@ def assemble_context(
     tier1 = [c for c in candidates if c.tier == Tier.TIER1]
     zone2_parts = []
     zone2_tokens = 0
+    zone2_hashes: Dict[str, str] = {}
     session_tokens_saved = 0
     session_dedup_count = 0
 
     for candidate in tier1:
         sk = candidate.skeleton
+        session_cached = candidate.session_cached and detail_level != "full"
 
         # Session-aware deduplication
-        if session and candidate.session_cached:
+        if session and session_cached:
             # Agent already has this body — send skeleton only
             header = f"# {sk.file_display} — {sk.fqn.split('::')[-1]}"
             entry = f"{header}\n{sk.signature}  # [body already provided in previous turn]"
@@ -146,7 +152,11 @@ def assemble_context(
             # Focused extraction for large functions
             body_lines = body.splitlines()
             threshold = cfg.focused_extraction_threshold
-            if len(body_lines) > threshold:
+            if compact_mode and len(body_lines) > cfg.compact_body_line_limit:
+                body = _focused_extract(
+                    body_lines, sk, intent.raw_prompt, cfg.compact_body_line_limit
+                )
+            elif not compact_mode and len(body_lines) > threshold:
                 body = _focused_extract(
                     body_lines, sk, intent.raw_prompt, threshold
                 )
@@ -154,6 +164,7 @@ def assemble_context(
             header = f"# {sk.file_display} — {sk.fqn.split('::')[-1]}"
             zone2_parts.append(f"{header}\n{body}")
             zone2_tokens += _estimate_tokens(body) + 5  # header overhead
+            zone2_hashes[sk.fqn] = sk.sha256
 
     zone2_text = "\n\n".join(zone2_parts) if zone2_parts else ""
 
@@ -170,8 +181,27 @@ def assemble_context(
     # ── Build Zone 3: Structural context ───────────────────────────────
     zone3_parts = []
     zone3_tokens_used = 0
+    zone3_hashes: Dict[str, str] = {}
 
-    if allocation.zone3_mode != Zone3Mode.NONE:
+    def _maybe_add_zone3_entry(key: str, text: str) -> None:
+        nonlocal zone3_tokens_used
+        if not text:
+            return
+        digest = _hash_text(text)
+        if session and session.should_skip_struct_hash(key, digest):
+            return
+        entry_tokens = _estimate_tokens(text)
+        if zone3_tokens_used + entry_tokens > allocation.zone3_budget:
+            return
+        zone3_parts.append(text)
+        zone3_tokens_used += entry_tokens
+        zone3_hashes[key] = digest
+
+    zone3_mode = allocation.zone3_mode
+    if compact_mode and zone3_mode != Zone3Mode.NONE:
+        zone3_mode = Zone3Mode.COMPACT
+
+    if zone3_mode != Zone3Mode.NONE:
         # Get summaries for Tier 2 candidates
         tier2 = [c for c in candidates if c.tier == Tier.TIER2]
         tier3 = [c for c in candidates if c.tier == Tier.TIER3]
@@ -186,52 +216,41 @@ def assemble_context(
             involved_files.add(c.skeleton.file_path)
 
         if involved_files:
-            zone3_parts.append("=== FILE STRUCTURE ===")
+            file_lines = ["=== FILE STRUCTURE ==="]
             for fp in sorted(involved_files):
                 fs = store.file_skeletons.get(fp)
                 if fs:
                     func_count = len(fs.all_skeletons)
-                    zone3_parts.append(f"  {fp} ({func_count} functions)")
+                    file_lines.append(f"  {fp} ({func_count} functions)")
+            _maybe_add_zone3_entry("file_structure", "\n".join(file_lines))
 
         # Add Tier 2 skeletons (signature + summary)
-        if tier2 and allocation.zone3_mode in (Zone3Mode.FULL, Zone3Mode.COMPACT):
-            zone3_parts.append("\n=== CONTEXT (neighbors) ===")
+        if tier2 and zone3_mode in (Zone3Mode.FULL, Zone3Mode.COMPACT):
+            _maybe_add_zone3_entry("tier2_header", "\n=== CONTEXT (neighbors) ===")
             for c in sorted(tier2, key=lambda x: -x.score):
                 sk = c.skeleton
                 summary = summaries.get(sk.fqn, "")
-                if allocation.zone3_mode == Zone3Mode.FULL:
+                if zone3_mode == Zone3Mode.FULL:
                     entry = sk.to_tier2_str(summary)
                 else:
                     entry = sk.to_tier2_str("")  # No summary in compact mode
-
-                entry_tokens = _estimate_tokens(entry)
-                if zone3_tokens_used + entry_tokens > allocation.zone3_budget:
-                    break
-                zone3_parts.append(entry)
-                zone3_tokens_used += entry_tokens
+                _maybe_add_zone3_entry(sk.fqn, entry)
 
         # Add Tier 3 FQNs (minimal)
-        if tier3 and allocation.zone3_mode in (Zone3Mode.FULL, Zone3Mode.COMPACT, Zone3Mode.MINIMAL):
+        if tier3 and zone3_mode in (Zone3Mode.FULL, Zone3Mode.COMPACT, Zone3Mode.MINIMAL):
             remaining = allocation.zone3_budget - zone3_tokens_used
             if remaining > 20:
-                zone3_parts.append("\n=== PERIPHERY ===")
+                _maybe_add_zone3_entry("tier3_header", "\n=== PERIPHERY ===")
                 for c in sorted(tier3, key=lambda x: -x.score):
-                    entry = c.skeleton.to_tier3_str()
-                    entry_tokens = _estimate_tokens(entry)
-                    if zone3_tokens_used + entry_tokens > allocation.zone3_budget:
-                        break
-                    zone3_parts.append(f"  {entry}")
-                    zone3_tokens_used += entry_tokens
+                    entry = f"  {c.skeleton.to_tier3_str()}"
+                    _maybe_add_zone3_entry(c.skeleton.fqn, entry)
 
         # Add edge summary
         if len(candidates) > 1:
             fqn_set = {c.skeleton.fqn for c in candidates}
             edge_summary = store.graph.edge_summary(fqn_set, max_edges=15)
             if edge_summary:
-                edge_tokens = _estimate_tokens(edge_summary)
-                if zone3_tokens_used + edge_tokens <= allocation.zone3_budget:
-                    zone3_parts.append(f"\n=== RELATIONSHIPS ===\n{edge_summary}")
-                    zone3_tokens_used += edge_tokens
+                _maybe_add_zone3_entry("relationships", f"\n=== RELATIONSHIPS ===\n{edge_summary}")
 
     zone3_text = "\n".join(zone3_parts) if zone3_parts else ""
 
@@ -262,11 +281,17 @@ def assemble_context(
     # Record to session
     if session:
         fqns_returned = {c.skeleton.fqn for c in candidates}
-        zone2_fqns = {c.skeleton.fqn for c in tier1 if not c.session_cached}
+        zone2_fqns = {
+            c.skeleton.fqn
+            for c in tier1
+            if detail_level == "full" or not c.session_cached
+        }
         session.record_turn(
             prompt=intent.raw_prompt,
             fqns_returned=fqns_returned,
             zone2_fqns=zone2_fqns,
+            zone2_hashes=zone2_hashes,
+            zone3_hashes=zone3_hashes,
             token_count=total_tokens,
             estimated_native_tokens=raw_tokens,
             confidence=resolver_result.confidence,
@@ -362,6 +387,11 @@ def _focused_extract(
 def _estimate_tokens(text: str) -> int:
     """Precise token estimate using project's tiktoken implementation."""
     return measure_text_tokens(text)
+
+
+def _hash_text(text: str) -> str:
+    """Stable hash for deduplication across turns."""
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _estimate_raw_reading_tokens(

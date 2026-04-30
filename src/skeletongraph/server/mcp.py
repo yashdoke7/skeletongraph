@@ -95,6 +95,32 @@ def _get_session() -> Session:
     return _server_state["session"]
 
 
+def _resolve_skeleton(store: IndexStore, fqn: str) -> tuple[Optional[Any], str, List[str]]:
+    """Resolve a skeleton by FQN with a few fuzzy fallbacks."""
+    matches: List[str] = []
+    sk = store.get_skeleton(fqn)
+    if sk:
+        return sk, sk.fqn, matches
+
+    alt_fqn = f"src/{fqn}" if not fqn.startswith("src/") else fqn.replace("src/", "", 1)
+    sk = store.get_skeleton(alt_fqn)
+    if sk:
+        return sk, sk.fqn, matches
+
+    target_name = fqn.split("::")[-1]
+    candidates = [
+        s for s in store.skeleton_table.values()
+        if s.fqn.endswith(f"::{target_name}") or s.fqn.endswith(f".{target_name}")
+    ]
+    if candidates:
+        candidates = sorted(candidates, key=lambda x: len(x.file_path))
+        matches = [c.fqn for c in candidates]
+        sk = candidates[0]
+        return sk, sk.fqn, matches
+
+    return None, fqn, matches
+
+
 # ── Tool Definitions ───────────────────────────────────────────────────
 
 @tool(
@@ -110,6 +136,10 @@ def _get_session() -> Session:
         "budget": {
             "type": "integer",
             "description": "Model context limit in tokens (default: 128000)",
+        },
+        "detail_level": {
+            "type": "string",
+            "description": "Context detail level: compact | full (default: compact)",
         },
         "top_n": {
             "type": "integer",
@@ -128,11 +158,13 @@ def query_context_tool(params: dict) -> dict:
     store = _get_store()
     root = _get_root()
     session = _get_session()
+    config: SGConfig = _server_state.get("config")
     metrics: MetricsLogger = _server_state["metrics"]
 
     prompt = params["prompt"]
     budget = int(params.get("budget", 128_000))
     top_n = int(params.get("top_n", 50))
+    detail_level = params.get("detail_level") or (config.default_detail_level if config else "compact")
     previous_response = params.get("previous_response", "")
 
     t0 = time.perf_counter()
@@ -148,6 +180,7 @@ def query_context_tool(params: dict) -> dict:
     assembled = assemble_context(
         result, store, root,
         model_context_limit=budget,
+        detail_level=detail_level,
         session=session,
     )
 
@@ -222,28 +255,13 @@ def expand_function_tool(params: dict) -> dict:
     root = _get_root()
 
     fqn = params["fqn"]
-    sk = store.get_skeleton(fqn)
-    
-    # Fuzzy Resolution: If exact FQN fails, try to find the intended function
-    if not sk:
-        # 1. Try stripping leading 'src/' or adding it
-        alt_fqn = f"src/{fqn}" if not fqn.startswith("src/") else fqn.replace("src/", "", 1)
-        sk = store.get_skeleton(alt_fqn)
-        
-        if not sk:
-            # 2. Extract function name and search all files
-            target_name = fqn.split("::")[-1]
-            matches = [
-                s for s in store.skeleton_table.values() 
-                if s.fqn.endswith(f"::{target_name}") or s.fqn.endswith(f".{target_name}")
-            ]
-            if matches:
-                # Pick the closest one (shortest path distance)
-                sk = sorted(matches, key=lambda x: len(x.file_path))[0]
-                fqn = sk.fqn
+    sk, resolved_fqn, matches = _resolve_skeleton(store, fqn)
+    if sk:
+        fqn = resolved_fqn
 
     if not sk:
-        return {"error": f"Function not found: {fqn}. Did you mean one of: {[s.fqn for s in matches[:3]] if 'matches' in locals() else 'None'}"}
+        suggestion = matches[:3] if matches else "None"
+        return {"error": f"Function not found: {fqn}. Did you mean one of: {suggestion}"}
 
     file_path = root / sk.file_path
     if not file_path.exists():
@@ -259,6 +277,138 @@ def expand_function_tool(params: dict) -> dict:
         "signature": sk.signature,
         "body": body,
         "token_estimate": len(body) // 4,
+    }
+
+
+@tool(
+    name="expand_context",
+    description=(
+        "Bundle expansion for multiple functions in a single call. "
+        "Optionally include neighbors, file outlines, and test coverage."
+    ),
+    parameters={
+        "fqns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of fully qualified names to expand",
+        },
+        "include_body": {
+            "type": "boolean",
+            "description": "Include full function bodies (default: true)",
+        },
+        "include_neighbors": {
+            "type": "boolean",
+            "description": "Include 1-hop callers/callees (default: false)",
+        },
+        "include_outline": {
+            "type": "boolean",
+            "description": "Include file-level outline (default: false)",
+        },
+        "include_tests": {
+            "type": "boolean",
+            "description": "Include tests that reference targets (default: false)",
+        },
+        "max_tokens": {
+            "type": "integer",
+            "description": "Max tokens to return (default: 4000)",
+        },
+    },
+)
+def expand_context_tool(params: dict) -> dict:
+    store = _get_store()
+    root = _get_root()
+
+    fqns = params.get("fqns") or []
+    include_body = params.get("include_body", True)
+    include_neighbors = params.get("include_neighbors", False)
+    include_outline = params.get("include_outline", False)
+    include_tests = params.get("include_tests", False)
+    max_tokens = int(params.get("max_tokens", 4000))
+
+    parts: List[str] = []
+    tokens_used = 0
+    resolved: List[str] = []
+    errors: List[str] = []
+
+    def _try_add(text: str) -> bool:
+        nonlocal tokens_used
+        if not text:
+            return False
+        cost = measure_text_tokens(text)
+        if tokens_used + cost > max_tokens:
+            return False
+        parts.append(text)
+        tokens_used += cost
+        return True
+
+    # Bodies
+    if include_body and fqns:
+        _try_add("=== EXPANDED TARGETS ===")
+        for fqn in fqns:
+            sk, resolved_fqn, matches = _resolve_skeleton(store, fqn)
+            if not sk:
+                errors.append(
+                    f"Function not found: {fqn}. Did you mean one of: {matches[:3] if matches else 'None'}"
+                )
+                continue
+            resolved.append(resolved_fqn)
+            file_path = root / sk.file_path
+            if not file_path.exists():
+                errors.append(f"File not found: {sk.file_path}")
+                continue
+            lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+            header = f"# {sk.file_display} - {resolved_fqn.split('::')[-1]}"
+            if not _try_add(f"{header}\n{body}"):
+                break
+
+    # Neighbors
+    if include_neighbors and fqns:
+        _try_add("\n=== NEIGHBORS (1-hop) ===")
+        neighbor_fqns: List[str] = []
+        for fqn in resolved or fqns:
+            deps = store.graph.dependency_chain(fqn, max_depth=1)
+            callers = store.graph.blast_radius(fqn, max_depth=1)
+            neighbor_fqns.extend([k for k in deps.keys() if k != fqn])
+            neighbor_fqns.extend([k for k in callers.keys() if k != fqn])
+        for nfqn in sorted(set(neighbor_fqns)):
+            sk = store.get_skeleton(nfqn)
+            if not sk:
+                continue
+            if not _try_add(sk.signature):
+                break
+
+    # File outlines
+    if include_outline and fqns:
+        _try_add("\n=== FILE OUTLINES ===")
+        files = {store.get_skeleton(f).file_path for f in resolved or fqns if store.get_skeleton(f)}
+        for fp in sorted(files):
+            fs = store.file_skeletons.get(fp)
+            if not fs:
+                continue
+            outline_lines = [f"- {fp}"]
+            if fs.summary:
+                outline_lines.append(f"  # {fs.summary}")
+            for sk in fs.all_skeletons[:50]:
+                outline_lines.append(f"  {sk.signature}")
+            if not _try_add("\n".join(outline_lines)):
+                break
+
+    # Test coverage
+    if include_tests and fqns:
+        _try_add("\n=== TEST COVERAGE ===")
+        for fqn in resolved or fqns:
+            tests = store.graph.test_coverage(fqn)
+            if tests:
+                line = f"- {fqn}: {', '.join(tests[:10])}"
+                if not _try_add(line):
+                    break
+
+    return {
+        "context": "\n\n".join(parts) if parts else "",
+        "token_count": tokens_used,
+        "resolved": resolved,
+        "errors": errors,
     }
 
 
