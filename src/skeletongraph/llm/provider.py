@@ -41,14 +41,23 @@ class LLMConfig:
     api_base: Optional[str] = None
 
     def __post_init__(self):
-        if self.api_key:
-            # Set the appropriate env var based on model prefix
+        # If no explicit api_key, try to pick up from env vars
+        if not self.api_key:
             if self.model.startswith("gemini"):
-                os.environ.setdefault("GEMINI_API_KEY", self.api_key)
+                self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
             elif self.model.startswith("gpt") or self.model.startswith("o"):
-                os.environ.setdefault("OPENAI_API_KEY", self.api_key)
+                self.api_key = os.environ.get("OPENAI_API_KEY")
             elif self.model.startswith("claude"):
-                os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
+                self.api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if self.api_key:
+            # Force-set env var (not setdefault, so it always wins)
+            if self.model.startswith("gemini"):
+                os.environ["GEMINI_API_KEY"] = self.api_key
+                os.environ["GOOGLE_API_KEY"] = self.api_key
+            elif self.model.startswith("gpt") or self.model.startswith("o"):
+                os.environ["OPENAI_API_KEY"] = self.api_key
+            elif self.model.startswith("claude"):
+                os.environ["ANTHROPIC_API_KEY"] = self.api_key
 
 
 def complete(
@@ -82,15 +91,19 @@ def complete(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    response = litellm.completion(
+    kwargs: Dict = dict(
         model=cfg.model,
         messages=messages,
         temperature=cfg.temperature,
         max_tokens=cfg.max_tokens,
         timeout=cfg.timeout,
         num_retries=cfg.max_retries,
-        api_base=cfg.api_base,
     )
+    if cfg.api_key:
+        kwargs["api_key"] = cfg.api_key
+    if cfg.api_base:
+        kwargs["api_base"] = cfg.api_base
+    response = litellm.completion(**kwargs)
 
     text = response.choices[0].message.content or ""
     usage = response.usage

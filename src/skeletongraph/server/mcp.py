@@ -300,6 +300,11 @@ def expand_function_tool(params: dict) -> dict:
 
     lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+    tokens = len(body) // 4
+    
+    metrics: MetricsLogger = _server_state.get("metrics")
+    if metrics:
+        metrics.log_tool_usage("expand_function", tokens, [sk.file_path], 0)
 
     return {
         "fqn": fqn,
@@ -435,6 +440,10 @@ def expand_context_tool(params: dict) -> dict:
                 if not _try_add(line):
                     break
 
+    metrics: MetricsLogger = _server_state.get("metrics")
+    if metrics:
+        metrics.log_tool_usage("expand_context", tokens_used, [str(r).split("::")[0] for r in resolved], 0)
+
     return {
         "context": "\n\n".join(parts) if parts else "",
         "token_count": tokens_used,
@@ -557,6 +566,11 @@ def view_file_range_tool(params: dict) -> dict:
     try:
         lines = full_path.read_text(encoding="utf-8", errors="replace").splitlines()
         content = "\n".join(lines[start - 1 : end])
+        
+        metrics: MetricsLogger = _server_state.get("metrics")
+        if metrics:
+            metrics.log_tool_usage("view_file_range", len(content) // 4, [path], 0)
+            
         return {"file": path, "range": f"{start}-{end}", "content": content}
     except Exception as e:
         return {"error": str(e)}

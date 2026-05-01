@@ -113,6 +113,24 @@ class MetricsLogger:
         )
         self._append(metric)
 
+    def log_tool_usage(
+        self,
+        tool_name: str,
+        sg_tokens: int,
+        files_involved: Optional[List[str]] = None,
+        duration_ms: int = 0,
+    ) -> None:
+        """Log token usage for secondary MCP tools (expand_context, view_file, etc)."""
+        metric = QueryMetric(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            mode="tool_usage",
+            prompt=f"[{tool_name}]",
+            sg_tokens=sg_tokens,
+            files_involved=files_involved or [],
+            duration_ms=duration_ms,
+        )
+        self._append(metric)
+
     def get_comparison_summary(self) -> Dict[str, Any]:
         """Read the log and produce a comparison summary."""
         if not self._log_file.exists():
