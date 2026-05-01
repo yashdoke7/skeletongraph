@@ -225,6 +225,10 @@ class AgentTrace:
                 {"type": tc.tool_type, "target": tc.target, "tokens": tc.output_tokens}
                 for tc in self.tool_calls
             ],
+            "agent_responses": [
+                {"turn_id": r.turn_id, "text": r.text, "token_count": r.token_count}
+                for r in self.agent_responses
+            ],
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -254,6 +258,13 @@ class AgentTrace:
                 tool_type=tc_data["type"],
                 target=tc_data["target"],
                 output_tokens=tc_data["tokens"],
+            ))
+
+        for ar_data in data.get("agent_responses", []):
+            trace.agent_responses.append(AgentResponse(
+                turn_id=ar_data.get("turn_id", 1),
+                text=ar_data.get("text", ""),
+                token_count=ar_data.get("token_count", 0),
             ))
 
         return trace

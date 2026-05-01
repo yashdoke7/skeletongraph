@@ -56,6 +56,51 @@ def tokenize_text(text: str) -> List[str]:
     return [t for t in raw if t and len(t) > 1 and t not in _STOP_WORDS]
 
 
+def extract_body_keywords(body: str) -> List[str]:
+    """Extract high-signal keywords from a function body.
+
+    Captures string literals (like 'Content-Length'), dict key access patterns,
+    and header names — things that are never in the function name or signature
+    but are exactly what users search for.
+
+    Zero LLM cost — pure regex extraction.
+    """
+    keywords: List[str] = []
+
+    # 1. String literals in quotes: 'Content-Length', "Transfer-Encoding"
+    for match in re.finditer(r'["\']([A-Za-z][A-Za-z0-9_-]{2,}(?:[- ][A-Za-z0-9_-]+)*)["\']', body):
+        val = match.group(1)
+        # Skip very common strings and file paths
+        if val.lower() not in _STOP_WORDS and '/' not in val and '\\' not in val:
+            # Tokenize hyphenated strings: 'Content-Length' -> ['content', 'length']
+            parts = re.split(r'[-_ ]', val.lower())
+            keywords.extend(p for p in parts if len(p) > 1 and p not in _STOP_WORDS)
+
+    # 2. Dict/header access: headers['Content-Length'] or self.headers.get('key')
+    for match in re.finditer(r'\[\s*["\']([A-Za-z][A-Za-z0-9_-]+)["\']\s*\]', body):
+        val = match.group(1)
+        parts = re.split(r'[-_ ]', val.lower())
+        keywords.extend(p for p in parts if len(p) > 1 and p not in _STOP_WORDS)
+
+    # 3. Raised exceptions: raise ValueError, raise TypeError
+    for match in re.finditer(r'raise\s+([A-Z][a-zA-Z]+)', body):
+        keywords.extend(tokenize_identifier(match.group(1)))
+
+    # 4. Attribute access: self.headers, self.method, response.status_code
+    for match in re.finditer(r'self\.([a-z_][a-z_0-9]*)', body):
+        attr = match.group(1)
+        if len(attr) > 2 and attr not in _STOP_WORDS:
+            keywords.extend(tokenize_identifier(attr))
+
+    # 5. Method calls on self: self.prepare_body() -> ['prepare', 'body']
+    for match in re.finditer(r'self\.([a-z_][a-z_0-9]*)\s*\(', body):
+        method = match.group(1)
+        if len(method) > 2 and method not in _STOP_WORDS:
+            keywords.extend(tokenize_identifier(method))
+
+    return keywords
+
+
 class InvertedIndex:
     """Maps keywords to sets of FQNs for fast lookup.
 
@@ -68,8 +113,9 @@ class InvertedIndex:
         self._fqn_tokens: Dict[str, Set[str]] = {}  # For removal during updates
 
     def add(self, fqn: str, name: str, signature: str = "",
-            summary: str = "", docstring: str = "") -> None:
-        """Index a function by its name, signature, summary, and docstring.
+            summary: str = "", docstring: str = "",
+            body_keywords: Optional[List[str]] = None) -> None:
+        """Index a function by its name, signature, summary, docstring, and body keywords.
 
         Args:
             fqn: Fully qualified name (the value stored in the index).
@@ -77,6 +123,7 @@ class InvertedIndex:
             signature: Full signature for additional keyword extraction.
             summary: Function summary text.
             docstring: First line of docstring (high-signal, low-noise).
+            body_keywords: Keywords extracted from function body (string literals, etc.).
         """
         tokens: Set[str] = set()
 
@@ -100,6 +147,10 @@ class InvertedIndex:
         # Tokenize docstring (high signal: describes what the function does)
         if docstring:
             tokens.update(tokenize_text(docstring))
+
+        # Body keywords (string literals, dict keys, exceptions from the code)
+        if body_keywords:
+            tokens.update(kw.lower() for kw in body_keywords if len(kw) > 1)
 
         # Also index the full function name as-is (for exact matches)
         full_name = fqn.split("::")[-1] if "::" in fqn else fqn
@@ -125,11 +176,12 @@ class InvertedIndex:
         self,
         query: str,
         top_k: int = 10,
-        min_score: float = 0.1,
+        min_score: float = 0.05,
     ) -> List[Tuple[str, float]]:
-        """Search the index with a free-text query.
+        """Search the index with a free-text query using IDF-weighted scoring.
 
-        Returns FQNs ranked by relevance (number of matching tokens / total query tokens).
+        Rare tokens (like 'content_length') score higher than common tokens
+        (like 'requests') to avoid false positives from high-frequency terms.
 
         Args:
             query: Free text query (user prompt or keywords).
@@ -143,19 +195,40 @@ class InvertedIndex:
         if not query_tokens:
             return []
 
-        # Count how many query tokens each FQN matches
-        fqn_scores: Dict[str, float] = defaultdict(float)
-        for token in query_tokens:
-            for fqn in self._index.get(token, set()):
-                fqn_scores[fqn] += 1.0
+        import math
+        total_docs = max(len(self._fqn_tokens), 1)
 
-        # Normalize by query token count
-        total_query_tokens = len(query_tokens)
-        results = [
-            (fqn, score / total_query_tokens)
-            for fqn, score in fqn_scores.items()
-            if score / total_query_tokens >= min_score
-        ]
+        # Compute IDF weight for each query token:
+        # tokens that appear in fewer documents are more discriminative
+        token_idf: Dict[str, float] = {}
+        for token in query_tokens:
+            doc_freq = len(self._index.get(token, set()))
+            if doc_freq > 0:
+                # Standard IDF: log(N / df) + 1 (smoothed)
+                token_idf[token] = math.log(total_docs / doc_freq) + 1.0
+            # If doc_freq == 0, token doesn't exist in index, skip it
+
+        if not token_idf:
+            return []
+
+        # Score each FQN by sum of IDF weights + breadth bonus
+        fqn_idf_sum: Dict[str, float] = defaultdict(float)
+        fqn_match_count: Dict[str, int] = defaultdict(int)  # distinct tokens matched
+        for token, idf in token_idf.items():
+            for fqn in self._index.get(token, set()):
+                fqn_idf_sum[fqn] += idf
+                fqn_match_count[fqn] += 1
+
+        # Breadth bonus: matching 3 different query tokens is much better than
+        # matching 1 token that happens to have high IDF.
+        # Score = IDF_sum * sqrt(num_distinct_matches)
+        total_idf = sum(token_idf.values())
+        results = []
+        for fqn, idf_sum in fqn_idf_sum.items():
+            breadth = math.sqrt(fqn_match_count[fqn])
+            score = (idf_sum * breadth) / (total_idf * math.sqrt(len(token_idf)))
+            if score >= min_score:
+                results.append((fqn, score))
 
         # Sort by score descending, then alphabetically for stability
         results.sort(key=lambda x: (-x[1], x[0]))

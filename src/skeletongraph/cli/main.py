@@ -240,9 +240,10 @@ def query(prompt: str, path: str, budget: int, out: str | None, verbose: bool):
 
 @app.command()
 @click.option("--path", "-p", default=".", help="Project root directory")
-@click.option("--model", "-m", default="gemini/gemini-2.0-flash", help="LLM model")
+@click.option("--model", "-m", default="gemini/gemini-2.5-flash", help="LLM model")
 @click.option("--force", is_flag=True, help="Re-summarize all functions")
-def summarize(path: str, model: str, force: bool):
+@click.option("--api-key", envvar=["GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], default=None, help="API key for the LLM provider")
+def summarize(path: str, model: str, force: bool, api_key: str):
     """Generate LLM summaries for indexed functions."""
     project_root = Path(path).resolve()
 
@@ -255,7 +256,7 @@ def summarize(path: str, model: str, force: bool):
         console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
         return
 
-    cfg = LLMConfig(model=model)
+    cfg = LLMConfig(model=model, api_key=api_key or None)
     console.print(f"[bold]> Summarizing with {model}[/bold]")
 
     with Progress(
@@ -336,7 +337,7 @@ def install(platform: str, path: str):
         _install_platform(p, project_root)
 
     # Also write the MCP config
-    _write_mcp_config(project_root)
+    _write_mcp_config(project_root, platforms=platforms)
     console.print(
         f"\n[bold green][OK] Configuration complete.[/bold green] "
         f"Restart your editor to activate SkeletonGraph."
@@ -986,11 +987,19 @@ def eval_compare(path: str, sg_file: str, native_file: str, output: str):
     table.add_column("Native Agent", style="yellow", justify="right")
     table.add_column("Reduction", style="bold magenta", justify="right")
 
-    table.add_row("Retrieval Tokens", f"{ta['sg_tokens']:,}", f"{ta['native_tokens']:,}", f"{ta['reduction_ratio']}x")
-    table.add_row("Conversation Tokens", f"{tb['sg_tokens']:,}", f"{tb['native_tokens']:,}", f"{tb['reduction_ratio']}x")
-    table.add_row("Tool Calls", str(tc['sg_tool_calls']), str(tc['native_tool_calls']), "")
-    table.add_row("Turns", str(tc['sg_turns']), str(tc['native_turns']), "")
-    table.add_row("Repeated Views", "0", str(tc['native_repeated_views']), "")
+    # Safe row helper
+    def add_safe_row(label, sg_key, native_key, data):
+        sg_val = data.get(sg_key, 0)
+        native_val = data.get(native_key, 0)
+        ratio = data.get("reduction_ratio", native_val / sg_val if sg_val > 0 else 1.0)
+        table.add_row(label, f"{sg_val:,}", f"{native_val:,}", f"{ratio:.1f}x")
+
+    add_safe_row("Retrieval Tokens", "sg_tokens", "native_tokens", ta)
+    add_safe_row("Conversation Tokens", "sg_tokens", "native_tokens", tb)
+    
+    table.add_row("Tool Calls", str(tc.get('sg_tool_calls', 0)), str(tc.get('native_tool_calls', 0)), "")
+    table.add_row("Turns", str(tc.get('sg_turns', 0)), str(tc.get('native_turns', 0)), "")
+    table.add_row("Repeated Views", "0", str(tc.get('native_repeated_views', 0)), "")
 
     console.print(table)
 
@@ -1403,58 +1412,77 @@ def _install_platform(platform: str, project_root: Path):
     target.write_text(content, encoding="utf-8")
     console.print(f"  [green][OK][/green] Installed SkeletonGraph rules to {filename}")
 
-
-def _write_mcp_config(project_root: Path):
+def _write_mcp_config(project_root: Path, platforms: list[str] = None):
     """Write MCP server configuration to local and global (Antigravity) configs."""
     python_exe = sys.executable  # Portable: use the Python that's running SG
+    platforms = platforms or []
     
     server_config = {
         "command": python_exe,
         "args": ["-m", "skeletongraph.server.mcp", "--path", str(project_root)],
     }
 
-    # 1. Write local mcp.json (always uses 'skeletongraph' as tool prefix)
+    # 1. Write local mcp.json (generic)
     local_config = {"mcpServers": {"skeletongraph": server_config}}
     (project_root / "mcp.json").write_text(json.dumps(local_config, indent=2), encoding="utf-8")
     console.print(f"  [green][OK][/green] Updated local mcp.json")
 
-    # 2. Write global Antigravity config
-    ag_config_path = Path("C:/Users/ASUS/.gemini/antigravity/mcp_config.json")
-    if ag_config_path.exists():
-        try:
-            ag_data = json.loads(ag_config_path.read_text(encoding="utf-8"))
-            if "mcpServers" not in ag_data:
-                ag_data["mcpServers"] = {}
-            
-            ag_data["mcpServers"]["skeletongraph"] = server_config
-            ag_config_path.write_text(json.dumps(ag_data, indent=2), encoding="utf-8")
-            console.print(f"  [green][OK][/green] Updated global Antigravity MCP config.")
-        except Exception as e:
-            console.print(f"[red]Failed to update Antigravity config: {e}[/red]")
+    # 2. Write .vscode/mcp.json for Copilot (uses "servers" key)
+    if "copilot" in platforms or not platforms:
+        vscode_dir = project_root / ".vscode"
+        vscode_dir.mkdir(parents=True, exist_ok=True)
+        vscode_config = {"servers": {"skeletongraph": server_config}}
+        (vscode_dir / "mcp.json").write_text(json.dumps(vscode_config, indent=2), encoding="utf-8")
+        console.print(f"  [green][OK][/green] Updated .vscode/mcp.json")
+
+    # 3. Write .cursor/mcp.json for Cursor (uses "mcpServers" key)
+    if "cursor" in platforms or not platforms:
+        cursor_dir = project_root / ".cursor"
+        cursor_dir.mkdir(parents=True, exist_ok=True)
+        cursor_config = {"mcpServers": {"skeletongraph": server_config}}
+        (cursor_dir / "mcp.json").write_text(json.dumps(cursor_config, indent=2), encoding="utf-8")
+        console.print(f"  [green][OK][/green] Updated .cursor/mcp.json")
+
+    # 4. Write global Antigravity config
+    if "antigravity" in platforms or not platforms:
+        ag_config_path = Path("C:/Users/ASUS/.gemini/antigravity/mcp_config.json")
+        if ag_config_path.exists():
+            try:
+                ag_data = json.loads(ag_config_path.read_text(encoding="utf-8"))
+                if "mcpServers" not in ag_data:
+                    ag_data["mcpServers"] = {}
+                
+                ag_data["mcpServers"]["skeletongraph"] = server_config
+                ag_config_path.write_text(json.dumps(ag_data, indent=2), encoding="utf-8")
+                console.print(f"  [green][OK][/green] Updated global Antigravity MCP config.")
+            except Exception as e:
+                console.print(f"[red]Failed to update Antigravity config: {e}[/red]")
 
 
 def _sg_rules_block() -> str:
-    """Common SkeletonGraph rules injected into all IDE configs.
-    
-    IMPORTANT: This only references query_context + expand_context.
-    All other SG tools run in the backend — the agent never sees them.
-    This eliminates the 'LLM-as-graph-traversal-engine' anti-pattern.
-    """
+    """Common SkeletonGraph rules injected into all IDE configs."""
     return """
-## SkeletonGraph Context Assembly
+## ⚡️ SkeletonGraph: MANDATORY WORKFLOW
 
-This project uses SkeletonGraph for graph-powered, token-minimal context assembly.
+This project uses SkeletonGraph for high-precision, low-token context assembly. To ensure accuracy and minimize costs, you **MUST** follow this workflow:
 
-### Rules:
-1. **Before searching or reading files** for a code task, call the `query_context` MCP tool with the user's prompt. It returns pre-assembled context with:
-   - Exact function bodies you need to edit (Zone 2 — target code)
-   - Structural context: neighbors, callers, dependencies (Zone 3)
-   - Project constraints (Zone 1)
-   - Related test files and file structure
-2. **RESPECT** the constraints in Zone 1 of every context response — read them first.
-3. Use `expand_context` only if you need full bodies of specific functions that were returned as skeletons.
-4. Use your normal native tools (grep, read_file, etc.) for any additional detail.
-5. If `query_context` confidence is LOW, fall back to your native search tools.
+### 1. THE MANDATORY FIRST MOVE
+**DO NOT use grep, ls, or find as your first action.** 
+Your very first tool call for ANY code task or question **MUST** be `query_context`. 
+
+- **Why?** SkeletonGraph already indexed the entire graph. `query_context` will give you the exact files, function bodies, and dependencies in one shot, saving 90% of exploration tokens.
+- **How?** Pass the user's entire prompt (or a concise technical summary) to `query_context`.
+
+### 2. ZONE-BASED NAVIGATION
+Every `query_context` response is organized into 4 Zones:
+- **Zone 1 (Constraints):** READ THESE FIRST. They contain mandatory project rules.
+- **Zone 2 (Target Code):** The exact functions you likely need to edit.
+- **Zone 3 (Structural Context):** Callers, callees, and neighbors. Use this to understand the "why".
+- **Zone 4 (Task):** A distilled summary of your mission.
+
+### 3. REFINEMENT
+- Only use `expand_context` if you need the full body of a function that was returned as a skeleton.
+- Only use native tools (`grep`, `read_file`) **AFTER** you have the SkeletonGraph context and need tiny surgical details.
 """.strip()
 
 

@@ -23,7 +23,7 @@ from .parser.import_resolver import ImportResolver
 from .parser.skeleton import FileSkeleton
 from .graph.bloom import BloomFilter
 from .graph.dependency import DependencyGraph
-from .graph.inverted_index import InvertedIndex
+from .graph.inverted_index import InvertedIndex, extract_body_keywords
 from .storage.dirty import DirtyTracker, hash_file
 from .storage.local import (
     BuildMeta,
@@ -243,11 +243,21 @@ def build_index(
             if "." in short:
                 store.bloom.add(short.split(".")[-1])
 
-    # Inverted index
+    # Inverted index — now with body keyword extraction for zero-cost semantic search
     store.inverted_index = InvertedIndex()
     for fqn, sk in store.skeleton_table.items():
         name = fqn.split("::")[-1] if "::" in fqn else fqn
-        store.inverted_index.add(fqn, name, sk.signature, docstring=sk.docstring)
+        # Extract keywords from the function body (string literals, dict keys, exceptions)
+        body_kw = []
+        file_path = project_root / sk.file_path
+        if file_path.exists():
+            try:
+                lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+                body_kw = extract_body_keywords(body)
+            except Exception:
+                pass
+        store.inverted_index.add(fqn, name, sk.signature, docstring=sk.docstring, body_keywords=body_kw)
 
     # Navigational indexing: Include constants and class attributes as beacons
     for file_path, file_sk in store.file_skeletons.items():

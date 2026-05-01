@@ -237,4 +237,15 @@ _COMMON_WORDS = frozenset({
     "does", "did", "done", "been", "being",
     "but", "and", "for", "are", "isn", "don",
     "about", "after", "before", "between", "during",
+    # Short verbs that collide with common function names
+    "get", "set", "add", "run", "put", "pop", "send",
+    "read", "post", "head", "delete", "patch",
+    # Common nouns that produce false entity matches
+    "added", "content", "length", "header", "headers",
+    "request", "response", "type", "value", "data",
+    "name", "path", "body", "url", "item", "items",
+    "list", "dict", "string", "number", "result",
+    "error", "status", "check", "test", "fix",
+    "disabled", "enabled", "automatically", "especially",
+    "skipped", "missing", "found", "working",
 })
