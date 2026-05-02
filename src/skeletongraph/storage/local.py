@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 
 from ..graph.bloom import BloomFilter
 from ..graph.dependency import DependencyGraph
+from ..graph.embeddings import EmbeddingStore
 from ..graph.inverted_index import InvertedIndex
 from ..parser.skeleton import FileSkeleton, SkeletonCore
 from ..storage.dirty import DirtyTracker
@@ -87,6 +88,7 @@ class IndexStore:
     inverted_index: InvertedIndex
     bloom: BloomFilter
     dirty_tracker: DirtyTracker
+    embeddings: EmbeddingStore = field(default_factory=EmbeddingStore)
     constraints: Optional[ConstraintStore] = None  # Loaded at build time
 
     @property
@@ -185,6 +187,10 @@ def save_index(store: IndexStore, project_root: Path) -> None:
     # hashes.json
     store.dirty_tracker.save(sg_dir)
 
+    # embeddings.npz (optional — only if embeddings were built)
+    if store.embeddings and not store.embeddings.is_empty:
+        store.embeddings.save(sg_dir)
+
 
 def load_index(project_root: Path) -> Optional[IndexStore]:
     """Load the full index from .skeletongraph/ directory.
@@ -253,6 +259,9 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
     constraints = ConstraintStore()
     constraints.load(project_root)
 
+    # Load embeddings (optional)
+    embeddings = EmbeddingStore.load(sg_dir)
+
     return IndexStore(
         meta=meta,
         file_skeletons=file_skeletons,
@@ -262,6 +271,7 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
         inverted_index=inverted_index,
         bloom=bloom,
         dirty_tracker=dirty_tracker,
+        embeddings=embeddings,
         constraints=constraints,
     )
 
@@ -277,4 +287,5 @@ def create_empty_index() -> IndexStore:
         inverted_index=InvertedIndex(),
         bloom=BloomFilter(),
         dirty_tracker=DirtyTracker(),
+        embeddings=EmbeddingStore(),
     )
