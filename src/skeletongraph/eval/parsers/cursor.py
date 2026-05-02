@@ -506,30 +506,54 @@ def _parse_text(
     tool_calls: list[ToolCall] = []
     agent_responses: list[AgentResponse] = []
 
-    for i, block in enumerate(re.split(r"\n---\n", content), start=1):
-        if block.lstrip().startswith("**Cursor**"):
-            text = re.sub(r"^\s*\*\*Cursor\*\*\s*", "", block, count=1).strip()
+    # Split by any horizontal rule variant
+    blocks = re.split(r"\n(?:---|\*\*\*|___)\n", content)
+    
+    turn_id = 0
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+            
+        if block.startswith("**Cursor**") or block.startswith("**Assistant**"):
+            text = re.sub(r"^\*\*(?:Cursor|Assistant)\*\*\s*", "", block).strip()
             if text:
-                agent_responses.append(AgentResponse(i, text, measure_text_tokens(text)))
-        elif block.lstrip().startswith("**User**") and not task_prompt:
-            task_prompt = re.sub(r"^\s*\*\*User\*\*\s*", "", block, count=1).strip()[:200]
+                turn_id += 1
+                agent_responses.append(AgentResponse(turn_id, text, measure_text_tokens(text)))
+        elif (block.startswith("**User**") or block.startswith("**Human**")) and not task_prompt:
+            task_prompt = re.sub(r"^\*\*(?:User|Human)\*\*\s*", "", block).strip()[:200]
 
-    # Look for file references
-    for match in re.finditer(r'(?:Read|Viewing|Opened?)\s+([^\s\n]+\.(?:py|ts|js))', content):
-        local = project_root / match.group(1)
-        tool_calls.append(ToolCall(
-            "view_file", match.group(1),
-            measure_file_tokens(local, cap_lines=800)
-        ))
+    # --- Fuzzy Tool Call Extraction ---
+    # 1. Look for explicit mentions of files being "read", "found", or "checked"
+    file_patterns = [
+        r'(?:Read|Viewing|Opened?|Found|Check(?:ed|ing)|In)\s+(?:the\s+)?([^\s\n]+\.(?:py|ts|js|tsx|jsx|json|md))',
+        r'`([^\s\n]+\.(?:py|ts|js|tsx|jsx|json|md))`',
+        r'([^\s\n]+\.(?:py|ts|js|tsx|jsx|json|md))'
+    ]
+    
+    seen_files = set()
+    for pattern in file_patterns:
+        for match in re.finditer(pattern, content, re.IGNORECASE):
+            target = match.group(1).strip().strip('`').strip('*')
+            if target in seen_files or not ('.' in target):
+                continue
+                
+            # Filter out obvious false positives
+            if target.lower() in ("requirements.txt", "readme.md", "pyproject.toml"):
+                continue
 
-    for match in re.finditer(r"```(?:[^\n:]+:)?(?:[^\n:]+:)?([^\n`]+\.(?:py|ts|js|tsx|jsx))", content):
-        target = match.group(1).strip()
-        local = _resolve_cursor_path(target, project_root)
-        tool_calls.append(ToolCall("view_file", _display_target(target), measure_file_tokens(local, cap_lines=800)))
+            local = _resolve_cursor_path(target, project_root)
+            if local.exists():
+                seen_files.add(target)
+                tool_calls.append(ToolCall(
+                    "view_file", target,
+                    measure_file_tokens(local, cap_lines=800)
+                ))
 
-    # Look for search actions
-    for match in re.finditer(r'(?:Search|Grep|Find)(?:ed|ing)?\s', content):
-        tool_calls.append(ToolCall("grep_search", "", measure_grep_output_tokens()))
+    # 2. Infer searches if the agent says "searching" or "looking for"
+    if re.search(r'(?:Searching|Looking for|Grep|Find)\s', content, re.IGNORECASE):
+        # Add an inferred search call
+        tool_calls.append(ToolCall("grep_search", "inferred", measure_grep_output_tokens()))
 
     return AgentTrace(
         agent="cursor", mode=mode, task_prompt=task_prompt or "Unknown",
