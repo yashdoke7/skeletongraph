@@ -21,6 +21,7 @@ from ..graph.inverted_index import InvertedIndex
 from ..parser.skeleton import SkeletonCore
 from ..storage.local import IndexStore
 from ..summary.summary_store import SummaryStore
+from .confidence import ConfidenceScore, compute_confidence
 from .intent import Intent, TaskType, analyze_intent
 from .ranker import Ranker, RankWeights
 from .session import Session
@@ -49,8 +50,9 @@ class ResolverResult:
     """Output of the resolver: ranked candidates ready for zone assembly."""
     candidates: List[RankedCandidate]
     intent: Intent
-    confidence: str = "HIGH"     # HIGH, MEDIUM, LOW
+    confidence: str = "HIGH"     # HIGH, MEDIUM, LOW, MISS
     confidence_reason: str = ""
+    confidence_score: Optional[ConfidenceScore] = None  # 5-factor score
     entities_matched: List[str] = field(default_factory=list)
     session_dedup_count: int = 0  # How many Zone 2 bodies were skipped
 
@@ -89,10 +91,14 @@ def resolve_context(
     # Step 2: Resolve entities to FQNs
     target_fqns = _resolve_entities(intent, store)
 
+    # Track how targets were found (for confidence scoring)
+    match_source = "none"
+
     # Step 3: Determine confidence
     if target_fqns:
         confidence = "HIGH"
         confidence_reason = f"Exact entity match: {', '.join(list(target_fqns)[:3])}"
+        match_source = "entity"
     else:
         # Fallback 1: Semantic BM25 search over LLM Summaries (if any exist)
         if len(store.summaries._store) > 0:
@@ -104,6 +110,7 @@ def resolve_context(
                 target_fqns = {fqn for fqn, _ in bm25_results}
                 confidence = "MEDIUM"
                 confidence_reason = "Matched via semantic BM25 summary search"
+                match_source = "bm25"
 
         # Fallback 2: Keyword search on Inverted Index (if BM25 fails or no summaries)
         if not target_fqns:
@@ -114,6 +121,7 @@ def resolve_context(
                 target_fqns = {fqn for fqn, _ in search_results}
                 confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
                 confidence_reason = f"Matched {len(search_results)} entities via discovery keyword search"
+                match_source = "keyword"
             else:
                 confidence = "LOW"
                 confidence_reason = "No entity, semantic, or keyword matches found"
@@ -271,11 +279,27 @@ def resolve_context(
     # Step 7: Rank and sort using the ranker
     ranked = ranker.rank_candidates(candidates, top_n=top_n)
 
+    # Step 8: Compute 5-factor confidence score
+    conf_score = compute_confidence(
+        query=prompt,
+        target_fqns=target_fqns,
+        store=store,
+        embeddings=store.embeddings if hasattr(store, 'embeddings') else None,
+        match_source=match_source,
+    )
+    # Override string confidence with the computed level
+    confidence = conf_score.level()
+    confidence_reason = (
+        f"{conf_score.level()} (composite={conf_score.composite():.2f}) "
+        f"| {confidence_reason}"
+    )
+
     return ResolverResult(
         candidates=ranked,
         intent=intent,
         confidence=confidence,
         confidence_reason=confidence_reason,
+        confidence_score=conf_score,
         entities_matched=[e.value for e in intent.entities],
         session_dedup_count=session_dedup_count,
     )

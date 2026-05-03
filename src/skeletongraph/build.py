@@ -23,6 +23,7 @@ from .parser.import_resolver import ImportResolver
 from .parser.skeleton import FileSkeleton
 from .graph.bloom import BloomFilter
 from .graph.dependency import DependencyGraph
+from .graph.embeddings import EmbeddingStore, is_available as embeddings_available
 from .graph.inverted_index import InvertedIndex, extract_body_keywords
 from .storage.dirty import DirtyTracker, hash_file
 from .storage.local import (
@@ -272,6 +273,28 @@ def build_index(
             for attr_name in cls_sk.instance_attrs:
                 # Often contains state names that agents search for
                 store.inverted_index.add(cls_sk.fqn, attr_name, f"attribute {attr_name}")
+
+    # Embeddings (optional — requires sentence-transformers)
+    if embeddings_available():
+        emb_entries = []
+        for fqn, sk in store.skeleton_table.items():
+            body_kw = []
+            fp = project_root / sk.file_path
+            if fp.exists():
+                try:
+                    lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+                    body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+                    body_kw = extract_body_keywords(body)
+                except Exception:
+                    pass
+            emb_entries.append((fqn, sk.signature, sk.docstring or "", body_kw))
+
+        store.embeddings = EmbeddingStore()
+        if on_progress:
+            on_progress(f"Embedding {len(emb_entries)} functions...")
+        store.embeddings.build(emb_entries)
+    else:
+        store.embeddings = EmbeddingStore()
 
     # Load constraints
     store.constraints = ConstraintStore()
