@@ -1,6 +1,10 @@
 """Cursor Integration — SkeletonGraph-Enhanced .cursorrules Template."""
 
-CURSOR_RULES_TEMPLATE = """# Cursor Rules — SkeletonGraph-Enhanced
+CURSOR_RULES_TEMPLATE = """---
+description: Always use SkeletonGraph Context Assembly before searching or reading files for code tasks.
+globs: *
+---
+# Cursor Rules — SkeletonGraph-Enhanced
 
 ## SkeletonGraph Context Assembly
 
@@ -17,3 +21,4 @@ This project uses SkeletonGraph for intelligent, graph-powered context assembly.
 4. Use your normal grep/read_file tools for any additional detail — do NOT call other SG tools.
 5. If `query_context` confidence is LOW, fall back to your native search tools.
 """.strip()
+

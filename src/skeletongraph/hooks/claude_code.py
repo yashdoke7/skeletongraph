@@ -1,0 +1,207 @@
+"""
+Claude Code hook integrations.
+
+Claude Code allows configuring custom scripts for events like session start,
+before prompt submission, and after tool use. These functions implement
+the SkeletonGraph v3 pipeline for those hooks.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+from ..storage.local import load_index
+from ..retrieval.resolver import resolve_context
+from ..retrieval.classifier import classify_query, ContextMode
+from ..assembly.prompt_builder import assemble
+from ..session.memory import SessionMemory
+
+logger = logging.getLogger(__name__)
+
+
+def hook_session_start(project_root: Path) -> str:
+    """Run at session start.
+    
+    1. Triggers an sg build (which handles init if needed).
+    2. Returns the L0 project.md constraints to inject into the system prompt.
+    """
+    sg_dir = project_root / ".skeletongraph"
+    project_md = sg_dir / "project.md"
+    
+    # Run build if index doesn't exist
+    if not sg_dir.exists() or not (sg_dir / "index.json").exists():
+        from ..build import build_index
+        try:
+            build_index(project_root)
+        except Exception as e:
+            logger.error(f"Failed to build index on session start: {e}")
+            return "SkeletonGraph: Failed to build index."
+            
+    if project_md.exists():
+        content = project_md.read_text(encoding="utf-8", errors="replace")
+        return f"=== Project Constraints (SkeletonGraph L0) ===\n{content}"
+        
+    return "SkeletonGraph: Project initialized."
+
+
+def hook_pre_prompt(project_root: Path, prompt: str) -> str:
+    """Run before user prompt is submitted to Claude.
+    
+    Runs the full v3 pipeline (classify → resolve → assemble) and
+    writes context.md + shadows. Returns a status string to inject into context.
+    """
+    sg_dir = project_root / ".skeletongraph"
+    
+    if not sg_dir.exists():
+        return "SkeletonGraph: Index not found. Run `sg build`."
+        
+    try:
+        t0 = time.perf_counter()
+        
+        # 1. Load Index
+        store = load_index(project_root)
+        if not store:
+            return "SkeletonGraph: Failed to load index."
+            
+        # 2. Resolve Targets
+        result = resolve_context(prompt, store)
+        
+        # 3. Classify Query
+        n_files = len({c.skeleton.file_path for c in result.candidates})
+        target_fqns = {c.skeleton.fqn for c in result.candidates}
+        classification = classify_query(
+            intent=result.intent,
+            confidence=result.confidence_score,
+            target_fqns=target_fqns,
+            n_files_involved=n_files,
+        )
+        
+        # 4. Assemble
+        # Note: We don't use turn-level Session deduplication here because 
+        # Claude Code hook invocations are stateless from our perspective.
+        assembled = assemble(
+            classification=classification,
+            resolver_result=result,
+            store=store,
+            project_root=project_root,
+        )
+        
+        # 5. Write Context
+        context_path = sg_dir / "context.md"
+        context_path.write_text(assembled.text, encoding="utf-8")
+        
+        # 6. Write Shadows (if applicable)
+        if assembled.mode not in (ContextMode.PLANNING, ContextMode.REVIEW, ContextMode.PASS_THROUGH):
+            shadow_dir = sg_dir / "shadows"
+            shadow_dir.mkdir(parents=True, exist_ok=True)
+            _write_shadow_files(assembled, store, project_root, shadow_dir)
+            
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        
+        # Provide instruction on where to find the context
+        return (
+            f"SkeletonGraph prepared context ({assembled.mode.value} mode, "
+            f"{assembled.token_count} tokens) in {duration_ms}ms.\n"
+            f"Please read `.skeletongraph/context.md` for target code and constraints "
+            f"before taking further action."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in pre-prompt hook: {e}")
+        return f"SkeletonGraph error: {e}"
+
+
+def hook_post_tool_use(project_root: Path, tool_name: str, tool_args: str, tool_output: str) -> str:
+    """Run after Claude uses a tool (e.g., file modification).
+    
+    1. Extracts modified files and deletes their stale shadow files.
+    2. Runs session post-processing to extract decisions.
+    """
+    sg_dir = project_root / ".skeletongraph"
+    shadow_dir = sg_dir / "shadows"
+    
+    modified_files = []
+    
+    # Basic heuristic to detect modified files from tool args/output
+    # This would need to be customized based on exact Claude Code tool schemas
+    if "write" in tool_name.lower() or "edit" in tool_name.lower() or "replace" in tool_name.lower():
+        import re
+        # Try to find file paths in arguments
+        paths = re.findall(r'[\w./\\-]+\.(?:py|js|ts|tsx|jsx|java|go|rs|cpp|cs|rb|php)', tool_args)
+        modified_files.extend(paths)
+        
+    if not modified_files:
+        return ""
+        
+    # Delete stale shadows
+    deleted_shadows = []
+    if shadow_dir.exists():
+        for file_path in modified_files:
+            shadow_path = shadow_dir / file_path
+            if shadow_path.exists():
+                try:
+                    shadow_path.unlink()
+                    deleted_shadows.append(file_path)
+                except Exception:
+                    pass
+                    
+    # Update session memory
+    try:
+        mem = SessionMemory.load(sg_dir)
+        # We use a placeholder prompt here since we only have the tool context
+        mem.post_process(
+            prompt="[Tool Use Turn]", 
+            agent_response=tool_output,
+            files_modified=modified_files
+        )
+    except Exception as e:
+        logger.error(f"Failed to update session memory in post-tool hook: {e}")
+        
+    if deleted_shadows:
+        return f"SkeletonGraph: Deleted stale shadow files for {len(deleted_shadows)} modified files."
+    return ""
+
+
+def hook_session_end(project_root: Path) -> str:
+    """Run at session end.
+    
+    Compresses session memory (current → recent → project_log).
+    """
+    sg_dir = project_root / ".skeletongraph"
+    try:
+        mem = SessionMemory.load(sg_dir)
+        mem.compress()
+        return "SkeletonGraph: Session memory compressed."
+    except Exception as e:
+        return f"SkeletonGraph error compressing session: {e}"
+
+
+def _write_shadow_files(assembled, store, project_root: Path, shadow_dir: Path):
+    """Write pre-assembled file views as shadow files."""
+    files_seen = set()
+    for fqn in assembled.targets:
+        sk = store.skeleton_table.get(fqn)
+        if not sk:
+            continue
+        fp = sk.file_path
+        if fp in files_seen:
+            continue
+        files_seen.add(fp)
+
+        source = project_root / fp
+        if not source.exists():
+            continue
+
+        shadow_path = shadow_dir / fp
+        shadow_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            content = source.read_text(encoding="utf-8", errors="replace")
+            shadow_path.write_text(content, encoding="utf-8")
+        except Exception:
+            pass

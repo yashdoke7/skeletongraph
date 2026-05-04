@@ -147,7 +147,7 @@ def _resolve_skeleton(store: IndexStore, fqn: str) -> tuple[Optional[Any], str, 
     name="query_context",
     description=(
         "Main entry point. Takes a natural language prompt and returns "
-        "attention-optimized, 4-zone context with constraints, target code, "
+        "attention-optimized, layered context with constraints, target code, "
         "structural context, and the task. Uses session memory to avoid "
         "re-sending code the agent already has."
     ),
@@ -208,6 +208,78 @@ def query_context_tool(params: dict) -> dict:
         last_turn.response_tokens = measure_text_tokens(previous_response)
 
     result = resolve_context(prompt, store, session=session, top_n=top_n)
+
+    # ── v3 pipeline: classifier → prompt_builder ─────────────────────
+    try:
+        from ..retrieval.classifier import classify_query
+        from ..assembly.prompt_builder import assemble as v3_assemble
+
+        n_files = len({c.skeleton.file_path for c in result.candidates})
+        target_fqns = {c.skeleton.fqn for c in result.candidates}
+        classification = classify_query(
+            intent=result.intent,
+            confidence=result.confidence_score,
+            target_fqns=target_fqns,
+            n_files_involved=n_files,
+        )
+
+        v3_result = v3_assemble(
+            classification=classification,
+            resolver_result=result,
+            store=store,
+            project_root=root,
+            session=session,
+        )
+
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        session.save(root)
+
+        # Log metrics
+        if metrics:
+            files_involved = list({c.skeleton.file_path for c in result.candidates})
+            metrics.log_skeleton_query(
+                prompt=prompt,
+                sg_tokens=v3_result.token_count,
+                native_tokens_estimated=int(v3_result.reduction_ratio * v3_result.token_count) if v3_result.reduction_ratio > 0 else 0,
+                reduction_ratio=v3_result.reduction_ratio,
+                confidence=v3_result.confidence_level,
+                entities_matched=result.entities_matched,
+                zone_breakdown=v3_result.layer_breakdown,
+                session_dedup_count=v3_result.session_dedup_count,
+                session_tokens_saved=0,
+                files_involved=files_involved,
+                duration_ms=duration_ms,
+            )
+
+        response = {
+            "context": v3_result.text,
+            "token_count": v3_result.token_count,
+            "confidence": v3_result.confidence_level,
+            "mode": v3_result.mode.value,
+            "query_type": v3_result.query_type.value,
+            "modifiers": v3_result.modifiers,
+            "extended_thinking": v3_result.extended_thinking,
+            "layers_loaded": v3_result.layers_loaded,
+            "layer_breakdown": v3_result.layer_breakdown,
+            "reduction_ratio": v3_result.reduction_ratio,
+        }
+
+        if v3_result.session_dedup_count > 0:
+            response["session_dedup"] = {
+                "bodies_skipped": v3_result.session_dedup_count,
+            }
+
+        if v3_result.warning:
+            response["warning"] = v3_result.warning
+
+        return response
+
+    except Exception as e:
+        # Fallback to v2 zone_assembler if v3 fails
+        import logging
+        logging.getLogger(__name__).warning(f"v3 pipeline failed, falling back to zone_assembler: {e}")
+
+    # ── v2 fallback path ─────────────────────────────────────────────
     assembled = assemble_context(
         result, store, root,
         model_context_limit=budget,
