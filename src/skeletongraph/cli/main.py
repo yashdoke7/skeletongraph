@@ -50,6 +50,15 @@ def build(path: str):
 
     console.print(f"[bold]> Building index for[/bold] {project_root.name}")
 
+    # Auto-trigger sg init on first build if project.md doesn't exist
+    sg_dir = project_root / ".skeletongraph"
+    project_md = sg_dir / "project.md"
+    if not project_md.exists():
+        console.print("[cyan]First build detected — running sg init...[/cyan]")
+        from .init import run_init
+        run_init(project_root)
+        console.print()
+
     from ..build import build_index, discover_files
 
     files = discover_files(project_root)
@@ -92,6 +101,15 @@ def build(path: str):
 
     table.add_row("Index location", str(project_root / ".skeletongraph"))
     console.print(table)
+
+    # Post-build: update architecture.md with store data
+    sg_dir = project_root / ".skeletongraph"
+    if sg_dir.exists():
+        from .init import _generate_architecture
+        arch_path = sg_dir / "architecture.md"
+        arch_md = _generate_architecture(project_root, store)
+        arch_path.write_text(arch_md, encoding="utf-8")
+        console.print(f"  [dim]Updated {arch_path.relative_to(project_root)}[/dim]")
 
 
 @app.command()
@@ -1383,7 +1401,7 @@ def _install_platform(platform: str, project_root: Path):
     """Write IDE-specific rules for a platform."""
     templates = {
         "claude": ("CLAUDE.md", _claude_template()),
-        "cursor": (".cursorrules", _cursor_template()),
+        "cursor": (".cursor/rules/skeletongraph.mdc", _cursor_template()),
         "copilot": (".github/copilot-instructions.md", _copilot_template()),
         "antigravity": (".antigravity.md", _antigravity_template()),
         "codex": ("AGENTS.md", _codex_template()),
@@ -1544,3 +1562,37 @@ def _opencode_template() -> str:
 
 if __name__ == "__main__":
     app()
+
+
+# ── Register v3 subcommands ────────────────────────────────────────────
+from .prepare import prepare as prepare_cmd
+from .init import init_command as init_cmd
+
+@app.command("hook")
+@click.argument("event_name")
+@click.option("--prompt", "-p", default="", help="Prompt text for pre-prompt event")
+@click.option("--tool-name", default="", help="Tool name for post-tool event")
+@click.option("--tool-args", default="", help="Tool arguments for post-tool event")
+@click.option("--tool-output", default="", help="Tool output for post-tool event")
+@click.option("--path", default=".", help="Project root directory")
+def hook_cmd(event_name: str, prompt: str, tool_name: str, tool_args: str, tool_output: str, path: str):
+    """Internal hook execution for Claude Code."""
+    project_root = Path(path).resolve()
+    from ..hooks.claude_code import hook_session_start, hook_pre_prompt, hook_post_tool_use, hook_session_end
+    
+    result = ""
+    if event_name == "session_start":
+        result = hook_session_start(project_root)
+    elif event_name == "pre_prompt":
+        result = hook_pre_prompt(project_root, prompt)
+    elif event_name == "post_tool":
+        result = hook_post_tool_use(project_root, tool_name, tool_args, tool_output)
+    elif event_name == "session_end":
+        result = hook_session_end(project_root)
+        
+    if result:
+        click.echo(result)
+
+app.add_command(prepare_cmd)
+app.add_command(init_cmd)
+app.add_command(hook_cmd)
