@@ -50,10 +50,46 @@ def tokenize_identifier(name: str) -> List[str]:
 
 
 def tokenize_text(text: str) -> List[str]:
-    """Tokenize free text (summaries, prompts) into searchable terms."""
+    """Tokenize free text (summaries, prompts) into searchable terms.
+    
+    Uses BUILD-TIME stop words (aggressive filtering) — suitable for
+    indexing summaries and docstrings where we want clean tokens.
+    """
     # Split on non-alphanumeric characters AND underscores for consistency
     raw = re.split(r"[^a-zA-Z0-9]+", text.lower().replace("_", " "))
     return [t for t in raw if t and len(t) > 1 and t not in _STOP_WORDS]
+
+
+# ── Query-Time Stop Words (lighter) ─────────────────────────────────────
+# Only removes true noise: articles, pronouns, PL keywords.
+# KEEPS domain terms like "content", "length", "header", "session" that
+# match indexed function data. This fixes the v3 MISS on NLP prompts.
+
+_QUERY_STOP_WORDS = frozenset({
+    "self", "cls", "args", "kwargs", "none", "true", "false",
+    "return", "def", "class", "import", "from", "if", "else",
+    "for", "while", "try", "except", "with", "as", "in", "is",
+    "not", "and", "or", "the", "a", "an", "to", "of", "it",
+    "this", "that", "void", "null", "undefined",
+    "var", "let", "const", "function", "async", "await", "new",
+    # Keep intentionally: str, int, float, bool, list, dict, set, tuple,
+    #   type, any, optional, get, set — these can match function names
+})
+
+
+def tokenize_query(query: str) -> List[str]:
+    """Tokenize a user query with LIGHTER stop-word filtering.
+    
+    Unlike tokenize_text() which is for build-time indexing (aggressive filtering),
+    this keeps domain terms that could match indexed functions.
+    
+    Example:
+        "Content-Length is always being sent on GET requests"
+        tokenize_text → []  (v3: all words filtered!)
+        tokenize_query → ['content', 'length', 'always', 'being', 'sent', 'get', 'requests']
+    """
+    raw = re.split(r"[^a-zA-Z0-9]+", query.lower().replace("_", " "))
+    return [t for t in raw if t and len(t) > 1 and t not in _QUERY_STOP_WORDS]
 
 
 def extract_body_keywords(body: str) -> List[str]:
