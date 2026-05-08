@@ -31,6 +31,8 @@ from ..retrieval.session import Session
 from ..config import SGConfig, load_config
 from ..metrics.metrics_logger import MetricsLogger
 from ..eval.token_counter import measure_text_tokens
+from ..engine import SGEngine, PipelineResult
+from ..session.memory import SessionMemory
 
 
 # ── Tool Registry ──────────────────────────────────────────────────────
@@ -39,7 +41,7 @@ _TOOLS: Dict[str, Dict[str, Any]] = {}
 
 _TOOL_PROFILES: Dict[str, Optional[set]] = {
     "full": None,  # All tools exposed (legacy, high schema overhead)
-    "compact": {"query_context", "expand_context"},  # Recommended: one-shot + page-fault
+    "compact": {"query_context", "get_retrieval_context", "expand_context", "report_completion"},  # Recommended
     "minimal": {"query_context"},  # Absolute minimum: one-shot only
 }
 
@@ -87,6 +89,8 @@ _server_state: Dict[str, Any] = {
     "config": None,
     "metrics": None,
     "tool_profile": None,
+    "engine": None,  # v4 SGEngine instance
+    "session_memory": None,  # Hierarchical session memory
 }
 
 
@@ -146,13 +150,26 @@ def _resolve_skeleton(store: IndexStore, fqn: str) -> tuple[Optional[Any], str, 
 @tool(
     name="query_context",
     description=(
-        "Main entry point. Takes a natural language prompt and returns "
-        "attention-optimized, layered context with constraints, target code, "
+        "Main entry point. Pass the user's prompt OR pre-extracted entities. "
+        "Returns attention-optimized, layered context with constraints, target code, "
         "structural context, and the task. Uses session memory to avoid "
-        "re-sending code the agent already has."
+        "re-sending code the agent already has.\n\n"
+        "PREFERRED WORKFLOW: First call get_retrieval_context to see the function index, "
+        "then call query_context with the entities you identified."
     ),
     parameters={
         "prompt": {"type": "string", "description": "The user's task or question"},
+        "entities": {
+            "type": "array",
+            "description": (
+                "Optional but PREFERRED. Pre-extracted entity FQNs from the function index. "
+                "Format: ['file.py::ClassName.method_name', ...]. "
+                "When provided, skips internal regex matching and uses these directly "
+                "for graph traversal — much more accurate than keyword matching."
+            ),
+            "items": {"type": "string"},
+            "required": False,
+        },
         "budget": {
             "type": "integer",
             "description": "Model context limit in tokens (default: 128000)",
@@ -182,6 +199,7 @@ def query_context_tool(params: dict) -> dict:
     metrics: MetricsLogger = _server_state["metrics"]
 
     prompt = params["prompt"]
+    entities = params.get("entities") or []
     budget = int(params.get("budget", 128_000))
     profile = _get_tool_profile()
     if "top_n" in params:
@@ -207,9 +225,62 @@ def query_context_tool(params: dict) -> dict:
         last_turn.response_text = previous_response
         last_turn.response_tokens = measure_text_tokens(previous_response)
 
+    # ── v4 pipeline: SGEngine ────────────────────────────────────────
+    engine: SGEngine = _server_state.get("engine")
+    if engine:
+        try:
+            result = engine.query(prompt, entities=set(entities))
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            session.save(root)
+
+            # Log metrics
+            if metrics:
+                files_involved = list({c.skeleton.file_path for c in result.candidates})
+                metrics.log_skeleton_query(
+                    prompt=prompt,
+                    sg_tokens=result.context_tokens,
+                    native_tokens_estimated=result.saved_vs_raw_tokens,
+                    reduction_ratio=result.saved_vs_raw_tokens / max(result.context_tokens, 1),
+                    confidence=result.confidence,
+                    entities_matched=[],
+                    zone_breakdown={},
+                    session_dedup_count=0,
+                    session_tokens_saved=0,
+                    files_involved=files_involved,
+                    duration_ms=duration_ms,
+                )
+
+            response = {
+                "context": result.context_text,
+                "token_count": result.context_tokens,
+                "confidence": result.confidence,
+                "mode": result.query_mode.value,
+                "recommended_model": result.recommended_model,
+                "model_tier": result.model_tier.value,
+                "pipeline_path": result.pipeline_path,
+                "cost": result.cost_summary(),
+            }
+
+            if result.slm_used:
+                response["slm"] = {
+                    "reasoning": result.slm_reasoning,
+                    "entities_found": result.slm_entities_found,
+                    "cost_usd": round(result.slm_cost_usd, 6),
+                    "latency_ms": round(result.phase1_ms, 1),
+                }
+
+            return response
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"v4 engine failed, falling back to v3: {e}")
+
+    # Update session memory after query (track prompt for session files)
+    _update_session_memory(prompt)
+
+    # ── v3 pipeline fallback ─────────────────────────────────────────
     result = resolve_context(prompt, store, session=session, top_n=top_n)
 
-    # ── v3 pipeline: classifier → prompt_builder ─────────────────────
     try:
         from ..retrieval.classifier import classify_query
         from ..assembly.prompt_builder import assemble as v3_assemble
@@ -339,8 +410,172 @@ def query_context_tool(params: dict) -> dict:
     if assembled.warning:
         response["warning"] = assembled.warning
 
+    # Update session memory with this query
+    _update_session_memory(prompt)
+
     return response
 
+
+# ── SLM-as-IDE: Retrieval Context Tool ─────────────────────────────────
+
+@tool(
+    name="get_retrieval_context",
+    description=(
+        "Returns the project's function index, file map, and session context. "
+        "Use this to understand the codebase structure before calling query_context. "
+        "Read the function index, identify which FQNs are relevant to the user's task, "
+        "then call query_context with those entities for precise graph traversal.\\n\\n"
+        "This replaces the need for grep/find/ls as your first exploration step."
+    ),
+    parameters={
+        "prompt": {
+            "type": "string",
+            "description": "The user's task (used to pre-filter function index for large projects)",
+        },
+        "max_entries": {
+            "type": "integer",
+            "description": "Max function index entries to return (default: 300). Reduce for faster response.",
+            "required": False,
+        },
+    },
+)
+def get_retrieval_context_tool(params: dict) -> dict:
+    """Give the IDE agent the raw materials to do SLM-quality entity extraction."""
+    store = _get_store()
+    root = _get_root()
+    config: SGConfig = _server_state.get("config")
+
+    prompt = params.get("prompt", "")
+    max_entries = int(params.get("max_entries", 300))
+
+    from ..retrieval.slm_extractor import (
+        build_project_summary, build_file_map, build_function_index,
+        build_session_context, prefilter_for_slm,
+    )
+
+    sg_dir = root / ".skeletongraph"
+
+    # Pre-filter for large projects
+    n_functions = len(store.skeleton_table)
+    prefilter = None
+    if n_functions > 500 and prompt:
+        prefilter = prefilter_for_slm(prompt, store, max_candidates=max_entries)
+
+    # Access summaries
+    summaries_dict = {}
+    if hasattr(store, "summaries"):
+        summaries_dict = store.summaries._store if hasattr(store.summaries, "_store") else {}
+
+    function_index = build_function_index(
+        store.skeleton_table,
+        summaries_dict,
+        pagerank_scores=getattr(store, "pagerank_scores", None),
+        max_entries=max_entries,
+        prefilter_fqns=prefilter,
+    )
+
+    return {
+        "project_summary": build_project_summary(sg_dir),
+        "file_map": build_file_map(
+            store.file_skeletons,
+            file_summaries=getattr(store, "file_summaries", None),
+        ),
+        "function_index": function_index,
+        "session_context": build_session_context(sg_dir),
+        "total_functions": n_functions,
+        "index_entries_shown": min(n_functions, max_entries),
+        "instructions": (
+            "Read the function index above. Identify which FQNs are relevant to the user's task. "
+            "Then call query_context with entities=['file.py::Class.method', ...] for those FQNs. "
+            "This gives you precise, graph-expanded context instead of keyword-matching."
+        ),
+    }
+
+
+# ── Session Memory Helpers ─────────────────────────────────────────────
+
+def _update_session_memory(prompt: str, agent_response: str = "",
+                           files_modified: list = None) -> None:
+    """Update hierarchical session memory after a query or completion.
+
+    Called automatically after each query_context call (with prompt only)
+    and by report_completion (with agent_response and files_modified).
+    This ensures .skeletongraph/session/current.md is kept up to date
+    for ALL MCP-based agents (Cursor, Copilot, Codex, Antigravity).
+    """
+    mem: SessionMemory = _server_state.get("session_memory")
+    if mem is None:
+        return
+
+    try:
+        mem.post_process(
+            prompt=prompt,
+            agent_response=agent_response or f"[Query processed: {prompt[:80]}]",
+            files_modified=files_modified,
+        )
+    except Exception:
+        pass  # Session memory is best-effort, never block the pipeline
+
+
+@tool(
+    name="report_completion",
+    description=(
+        "Report what the agent did after completing a task. Updates session "
+        "memory with files modified, decisions made, and test results. "
+        "Call this after finishing a coding task to keep project history."
+    ),
+    parameters={
+        "summary": {
+            "type": "string",
+            "description": "Brief summary of what was done (1-2 sentences)",
+        },
+        "files_modified": {
+            "type": "array",
+            "description": "List of file paths that were modified",
+            "items": {"type": "string"},
+            "required": False,
+        },
+        "agent_response": {
+            "type": "string",
+            "description": "Optional. The agent's full response text for decision extraction.",
+            "required": False,
+        },
+        "session_end": {
+            "type": "boolean",
+            "description": "Optional. Set to true to compress session (current→recent→project_log).",
+            "required": False,
+        },
+    },
+)
+def report_completion_tool(params: dict) -> dict:
+    """Let the IDE agent report what it did, updating session memory."""
+    mem: SessionMemory = _server_state.get("session_memory")
+    if mem is None:
+        return {"status": "skipped", "reason": "session memory not loaded"}
+
+    summary = params.get("summary", "")
+    files_modified = params.get("files_modified", [])
+    agent_response = params.get("agent_response", summary)
+    session_end = params.get("session_end", False)
+
+    try:
+        mem.post_process(
+            prompt=f"[Completion] {summary}",
+            agent_response=agent_response,
+            files_modified=files_modified,
+        )
+
+        if session_end:
+            mem.compress()
+
+        return {
+            "status": "updated",
+            "session_turn": mem._turn_count,
+            "files_tracked": len(mem._files_this_session),
+            "compressed": session_end,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 @tool(
     name="expand_function",
@@ -956,6 +1191,21 @@ def start_server(
     _server_state["config"] = load_config(project_root)
     _server_state["metrics"] = MetricsLogger(project_root)
     _server_state["tool_profile"] = _server_state["config"].mcp_tool_profile if _server_state["config"] else "full"
+
+    # Load hierarchical session memory for post-chat updates
+    sg_dir = project_root / ".skeletongraph"
+    sg_dir.mkdir(parents=True, exist_ok=True)
+    _server_state["session_memory"] = SessionMemory.load(sg_dir)
+
+    # v4: Initialize SGEngine
+    try:
+        engine = SGEngine(
+            project_root=project_root,
+            config=_server_state["config"],
+        )
+        _server_state["engine"] = engine
+    except Exception:
+        _server_state["engine"] = None  # Fall back to v3 pipeline
 
     # Stdio mode: read line-delimited JSON-RPC
     for line in sys.stdin:
