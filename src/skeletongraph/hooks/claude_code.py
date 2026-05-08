@@ -3,7 +3,7 @@ Claude Code hook integrations.
 
 Claude Code allows configuring custom scripts for events like session start,
 before prompt submission, and after tool use. These functions implement
-the SkeletonGraph v3 pipeline for those hooks.
+the SkeletonGraph v4 pipeline for those hooks.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from ..retrieval.resolver import resolve_context
 from ..retrieval.classifier import classify_query, ContextMode
 from ..assembly.prompt_builder import assemble
 from ..session.memory import SessionMemory
+from ..engine import SGEngine
+from ..config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +54,8 @@ def hook_session_start(project_root: Path) -> str:
 def hook_pre_prompt(project_root: Path, prompt: str) -> str:
     """Run before user prompt is submitted to Claude.
     
-    Runs the full v3 pipeline (classify → resolve → assemble) and
-    writes context.md + shadows. Returns a status string to inject into context.
+    v4: Uses SGEngine for unified pipeline (classify → resolve → assemble).
+    Writes context.md + shadows. Returns status string with model routing.
     """
     sg_dir = project_root / ".skeletongraph"
     
@@ -63,52 +65,37 @@ def hook_pre_prompt(project_root: Path, prompt: str) -> str:
     try:
         t0 = time.perf_counter()
         
-        # 1. Load Index
-        store = load_index(project_root)
-        if not store:
-            return "SkeletonGraph: Failed to load index."
-            
-        # 2. Resolve Targets
-        result = resolve_context(prompt, store)
+        # v4: Use SGEngine
+        engine = SGEngine(project_root=project_root)
+        result = engine.query(prompt)
         
-        # 3. Classify Query
-        n_files = len({c.skeleton.file_path for c in result.candidates})
-        target_fqns = {c.skeleton.fqn for c in result.candidates}
-        classification = classify_query(
-            intent=result.intent,
-            confidence=result.confidence_score,
-            target_fqns=target_fqns,
-            n_files_involved=n_files,
-        )
+        if not result.success:
+            return f"SkeletonGraph error: {result.error}"
         
-        # 4. Assemble
-        # Note: We don't use turn-level Session deduplication here because 
-        # Claude Code hook invocations are stateless from our perspective.
-        assembled = assemble(
-            classification=classification,
-            resolver_result=result,
-            store=store,
-            project_root=project_root,
-        )
-        
-        # 5. Write Context
+        # Write context.md
         context_path = sg_dir / "context.md"
-        context_path.write_text(assembled.text, encoding="utf-8")
+        context_path.write_text(result.context_text, encoding="utf-8")
         
-        # 6. Write Shadows (if applicable)
-        if assembled.mode not in (ContextMode.PLANNING, ContextMode.REVIEW, ContextMode.PASS_THROUGH):
-            shadow_dir = sg_dir / "shadows"
-            shadow_dir.mkdir(parents=True, exist_ok=True)
-            _write_shadow_files(assembled, store, project_root, shadow_dir)
-            
         duration_ms = int((time.perf_counter() - t0) * 1000)
         
-        # Provide instruction on where to find the context
+        # Model routing recommendation
+        routing_hint = ""
+        if result.model_tier.value == "llm":
+            routing_hint = f"\nRecommended: /model {result.recommended_model} (complex task)"
+        elif result.model_tier.value == "slm":
+            routing_hint = "\nThis is a simple lookup — current model is sufficient."
+        
+        cost_info = ""
+        if result.slm_used:
+            cost_info = f" SLM: ${result.slm_cost_usd:.4f}"
+        
         return (
-            f"SkeletonGraph prepared context ({assembled.mode.value} mode, "
-            f"{assembled.token_count} tokens) in {duration_ms}ms.\n"
+            f"SkeletonGraph prepared context ({result.query_mode.value} mode, "
+            f"{result.context_tokens} tokens, {result.confidence}) in {duration_ms}ms."
+            f"{cost_info}\n"
             f"Please read `.skeletongraph/context.md` for target code and constraints "
             f"before taking further action."
+            f"{routing_hint}"
         )
         
     except Exception as e:
