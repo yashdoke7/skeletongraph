@@ -23,12 +23,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from ..retrieval.classifier import ClassificationResult, ContextMode, QueryType
+from ..retrieval.classifier import ClassificationResult, ContextMode, QueryType, QueryMode, MODE_SPECS
 from ..retrieval.resolver import RankedCandidate, ResolverResult, Tier
 from ..retrieval.session import Session
 from ..assembly.modifier import render_modifiers, estimate_modifier_tokens
 from ..storage.local import IndexStore
 from ..parser.skeleton import SkeletonCore
+from ..config import SGConfig
 
 logger = logging.getLogger(__name__)
 
@@ -70,15 +71,20 @@ class AssembledPrompt:
 
 
 def assemble(
-    classification: ClassificationResult,
-    resolver_result: ResolverResult,
-    store: IndexStore,
-    project_root: Path,
+    classification: ClassificationResult = None,
+    resolver_result: ResolverResult = None,
+    store: IndexStore = None,
+    project_root: Path = None,
     session: Optional[Session] = None,
+    # v4 additional params (optional, used by SGEngine)
+    prompt: str = "",
+    sg_dir: Optional[Path] = None,
+    config: Optional[SGConfig] = None,
 ) -> AssembledPrompt:
     """Assemble attention-optimal context from classification + resolver results.
 
-    This is the main entry point replacing zone_assembler.assemble_context().
+    This is the main entry point. Accepts both v3 and v4 call signatures.
+    v4 params (prompt, sg_dir, config) are optional and enhance layer loading.
     """
     mode = classification.mode
     prompt = resolver_result.intent.raw_prompt

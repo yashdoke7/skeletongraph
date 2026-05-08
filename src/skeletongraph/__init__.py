@@ -2,16 +2,15 @@
 SkeletonGraph — Token-minimal, constraint-preserving context assembly for AI coding agents.
 
 Quick start:
-    from skeletongraph import build_index, resolve_context, assemble_context
+    from skeletongraph import SGEngine
     from pathlib import Path
 
-    store = build_index(Path("."))
-    result = resolve_context("fix validate_token", store)
-    context = assemble_context(result, store, Path("."))
-    print(context.text)
+    engine = SGEngine(Path("."))
+    result = engine.query("fix validate_token")
+    print(result.context_text)
 
 Features:
-    - 4-zone attention-aware assembly (constraints, target, structure, prompt)
+    - 5-layer attention-aware SLM-orchestrated context assembly
     - Elastic token budget with progressive compression
     - Session memory for cross-turn context deduplication
     - Per-directory constraint scoping
@@ -23,15 +22,13 @@ Features:
 __version__ = "0.1.0"
 
 from .build import build_index, update_index
-from .retrieval.resolver import resolve_context
-from .assembly.zone_assembler import assemble_context
+from .engine import SGEngine
 from .config import SGConfig, load_config
 
 __all__ = [
     "build_index",
     "update_index",
-    "resolve_context",
-    "assemble_context",
+    "SGEngine",
     "SGConfig",
     "load_config",
     "__version__",

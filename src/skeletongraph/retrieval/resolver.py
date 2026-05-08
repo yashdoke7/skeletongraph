@@ -8,6 +8,11 @@ The core retrieval algorithm:
   4. Rank candidates using multi-signal ranker
   5. Assign tiers (Tier 1: full body, Tier 2: skeleton + summary, Tier 3: FQN only)
   6. Session-aware deduplication (skip bodies agent already has)
+
+v4 additions:
+  - resolve_with_mode_spec(): mode-driven expansion (reads depth/direction from ModeSpec)
+  - SLM entity resolution: resolves SLM-extracted FQNs via fuzzy matching
+  - Uses tokenize_query() instead of tokenize_text() for query-time matching
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from ..graph.dependency import DependencyGraph, EdgeType
-from ..graph.inverted_index import InvertedIndex
+from ..graph.inverted_index import InvertedIndex, tokenize_query
 from ..parser.skeleton import SkeletonCore
 from ..storage.local import IndexStore
 from ..summary.summary_store import SummaryStore

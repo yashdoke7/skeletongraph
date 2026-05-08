@@ -137,9 +137,15 @@ def compute_confidence(
     if match_source == "entity":
         score.entity_match = 1.0
         score.factors_detail["entity_match"] = "Exact entity match from prompt"
+    elif match_source == "slm":
+        score.entity_match = 0.7
+        score.factors_detail["entity_match"] = "SLM entity extraction match"
     elif match_source == "bm25":
         score.entity_match = 0.6
         score.factors_detail["entity_match"] = "Semantic BM25 summary match"
+    elif match_source == "embedding":
+        score.entity_match = 0.55
+        score.factors_detail["entity_match"] = "Embedding similarity match"
     elif match_source == "keyword":
         score.entity_match = 0.4
         score.factors_detail["entity_match"] = "Keyword search match"
