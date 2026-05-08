@@ -37,6 +37,7 @@ from .storage.local import (
 from .summary.summary_store import SummaryStore
 from .assembly.constraint_store import ConstraintStore
 from .config import SGConfig, load_config
+from .graph.pagerank import compute_pagerank, get_hub_functions
 
 
 # Default ignore patterns (always excluded)
@@ -273,6 +274,56 @@ def build_index(
             for attr_name in cls_sk.instance_attrs:
                 # Often contains state names that agents search for
                 store.inverted_index.add(cls_sk.fqn, attr_name, f"attribute {attr_name}")
+
+    # ── Phase 3b: PageRank computation (v4) ──────────────────────────
+    edges_list = []
+    for src, edge_list in store.graph.forward.items():
+        for edge in edge_list:
+            edges_list.append((src, edge.target_fqn))
+    
+    if edges_list:
+        store.pagerank_scores = compute_pagerank(edges_list, nodes=all_fqns)
+        if on_progress:
+            top5 = sorted(store.pagerank_scores, key=store.pagerank_scores.get, reverse=True)[:5]
+            on_progress(f"PageRank: top hubs = {', '.join(fqn.split('::')[-1] for fqn in top5)}", 0, 0)
+    else:
+        store.pagerank_scores = {}
+
+    # ── Phase 3c: Auto-summarize top 20% hub functions (v4) ──────────
+    if cfg.auto_summarize_on_build and store.pagerank_scores:
+        hub_fqns = get_hub_functions(store.pagerank_scores, top_percent=0.20)
+        # Filter out already-summarized ones
+        unsummarized = [f for f in hub_fqns if not store.summaries.get(f)]
+        
+        if unsummarized:
+            if on_progress:
+                on_progress(f"Auto-summarizing {len(unsummarized)} hub functions...", 0, 0)
+            try:
+                from .retrieval.slm_extractor import batch_summarize_functions
+                bodies = []
+                fqns_to_summarize = []
+                for fqn in unsummarized:
+                    sk = store.skeleton_table.get(fqn)
+                    if sk:
+                        fp = project_root / sk.file_path
+                        if fp.exists():
+                            try:
+                                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+                                body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+                                bodies.append(body)
+                                fqns_to_summarize.append(fqn)
+                            except Exception:
+                                pass
+                
+                if bodies:
+                    summaries = batch_summarize_functions(bodies, fqns_to_summarize, cfg)
+                    for fqn, summary in summaries.items():
+                        store.summaries.set(fqn, summary)
+                    if on_progress:
+                        on_progress(f"Summarized {len(summaries)}/{len(unsummarized)} hub functions", 0, 0)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Auto-summarize failed: {e}")
 
     # Embeddings (optional — requires sentence-transformers)
     if embeddings_available():

@@ -90,6 +90,7 @@ class IndexStore:
     dirty_tracker: DirtyTracker
     embeddings: EmbeddingStore = field(default_factory=EmbeddingStore)
     constraints: Optional[ConstraintStore] = None  # Loaded at build time
+    pagerank_scores: Dict[str, float] = field(default_factory=dict)  # v4: FQN → PageRank
 
     @property
     def function_count(self) -> int:
