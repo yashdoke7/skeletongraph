@@ -32,6 +32,7 @@ from .retrieval.classifier import (
     classify_query, ClassificationResult, QueryMode, ModelTier, MODE_SPECS,
 )
 from .retrieval.confidence import compute_confidence
+from .retrieval.model_router import route_model_tier
 from .retrieval.session import Session
 from .retrieval.slm_extractor import (
     slm_extract, SLMResult, prefilter_for_slm,
@@ -54,6 +55,10 @@ class PipelineResult:
     query_mode: QueryMode = QueryMode.BUILD_GUIDED
     model_tier: ModelTier = ModelTier.MLM
     recommended_model: str = ""
+    delivery: str = "ide"
+    base_model_tier: ModelTier = ModelTier.MLM
+    complexity_score: float = 0.0
+    routing_reason: str = ""
 
     # Retrieval details
     candidates: List[RankedCandidate] = field(default_factory=list)
@@ -94,6 +99,10 @@ class PipelineResult:
             "context_tokens": self.context_tokens,
             "recommended_tier": self.model_tier.value,
             "recommended_model": self.recommended_model,
+            "delivery": self.delivery,
+            "base_tier": self.base_model_tier.value,
+            "complexity_score": self.complexity_score,
+            "routing_reason": self.routing_reason,
             "saved_vs_raw_tokens": self.saved_vs_raw_tokens,
             "pipeline_path": self.pipeline_path,
             "latency_ms": round(self.total_ms, 1),
@@ -131,7 +140,12 @@ class SGEngine:
                 raise RuntimeError(
                     "No SkeletonGraph index found. Run `sg build` first."
                 )
-            self._store = load_index(self._sg_dir)
+            store = load_index(self._root)
+            if store is None:
+                raise RuntimeError(
+                    "No SkeletonGraph index metadata found. Run `sg build` first."
+                )
+            self._store = store
         return self._store
 
     def _ensure_session(self) -> Session:
@@ -148,8 +162,10 @@ class SGEngine:
     def query(
         self,
         prompt: str,
+        entities: Optional[Set[str] | List[str]] = None,
         max_retries: int = 2,
         exclude_fqns: Optional[Set[str]] = None,
+        delivery: str = "ide",
     ) -> PipelineResult:
         """Execute the full v4 pipeline: Understand → Retrieve → Assemble.
 
@@ -163,6 +179,7 @@ class SGEngine:
         """
         total_start = time.time()
         result = PipelineResult()
+        result.delivery = delivery
 
         try:
             store = self._ensure_loaded()
@@ -207,7 +224,7 @@ class SGEngine:
             p2_start = time.time()
             resolver_result = self._phase2_retrieve(
                 prompt, intent, slm_result, classification,
-                store, session, exclude_fqns,
+                store, session, exclude_fqns, set(entities or []),
             )
             result.phase2_ms = (time.time() - p2_start) * 1000
 
@@ -242,13 +259,28 @@ class SGEngine:
 
         # Set final metadata
         result.query_mode = classification.query_mode
-        result.model_tier = MODE_SPECS[classification.query_mode].tier
-        result.recommended_model = self._config.get_model_for_mode(
-            classification.query_mode.value
-        )
+        result.base_model_tier = MODE_SPECS[classification.query_mode].tier
 
         # Token counting
         result.context_tokens = len(result.context_text) // 4  # ~4 chars/token
+
+        if self._config.enable_dynamic_model_routing:
+            routing = route_model_tier(
+                mode=classification.query_mode,
+                base_tier=result.base_model_tier,
+                confidence=result.confidence,
+                candidate_count=len(result.candidates),
+                context_tokens=result.context_tokens,
+                slm_used=result.slm_used,
+            )
+            result.model_tier = routing.tier
+            result.complexity_score = routing.complexity_score
+            result.routing_reason = routing.reason
+            result.recommended_model = self._model_for_tier(routing.tier.value, delivery)
+        else:
+            result.model_tier = result.base_model_tier
+            result.recommended_model = self._model_for_tier(result.model_tier.value, delivery)
+            result.routing_reason = "static mode routing"
 
         result.total_ms = (time.time() - total_start) * 1000
         result.success = True
@@ -341,6 +373,7 @@ class SGEngine:
         store: IndexStore,
         session: Optional[Session],
         exclude_fqns: Optional[Set[str]] = None,
+        seed_fqns: Optional[Set[str]] = None,
     ) -> ResolverResult:
         """Phase 2: Graph traversal and candidate ranking.
 
@@ -360,6 +393,7 @@ class SGEngine:
             max_depth=max_depth,
             session=session,
             top_n=50,
+            seed_fqns=seed_fqns,
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -388,7 +422,7 @@ class SGEngine:
         """
         try:
             from .assembly.prompt_builder import assemble
-            context_text = assemble(
+            assembled = assemble(
                 prompt=prompt,
                 resolver_result=resolver_result,
                 classification=classification,
@@ -398,6 +432,7 @@ class SGEngine:
                 session=session,
                 config=self._config,
             )
+            context_text = assembled.text if hasattr(assembled, "text") else str(assembled)
         except Exception as e:
             logger.warning("prompt_builder.assemble failed: %s, using minimal assembly", e)
             context_text = self._minimal_assemble(
@@ -575,3 +610,9 @@ class SGEngine:
     def get_config(self) -> SGConfig:
         """Access the current configuration."""
         return self._config
+
+    def _model_for_tier(self, tier: str, delivery: str) -> str:
+        """Resolve a tier to an IDE label or CLI provider model."""
+        if delivery == "cli":
+            return self._config.get_cli_model_for_tier(tier)
+        return self._config.get_model_for_tier(tier)
