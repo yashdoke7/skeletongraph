@@ -149,6 +149,117 @@ def status(path: str):
 
 
 @app.command()
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--json-output", is_flag=True, help="Print machine-readable JSON")
+def doctor(path: str, json_output: bool):
+    """Check index, routing, provider, and CLI/IDE configuration health."""
+    project_root = Path(path).resolve()
+
+    from ..config import load_config
+    from ..storage.local import load_index
+
+    config = load_config(project_root)
+    store = load_index(project_root)
+    checks = []
+
+    def add(name: str, ok: bool, detail: str):
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    add(
+        "project_root",
+        project_root.is_dir(),
+        str(project_root),
+    )
+    add(
+        "index",
+        store is not None,
+        store.status_summary() if store else "missing; run `sg build`",
+    )
+    add(
+        "mcp_profile",
+        config.mcp_tool_profile in {"compact", "minimal", "full"},
+        config.mcp_tool_profile,
+    )
+    add(
+        "dynamic_routing",
+        bool(config.enable_dynamic_model_routing),
+        "enabled" if config.enable_dynamic_model_routing else "disabled",
+    )
+    add(
+        "cli_provider",
+        bool(config.cli_provider),
+        config.cli_provider,
+    )
+    key_envs = config.get_cli_key_envs()
+    add(
+        "cli_api_key",
+        config.cli_api_key_configured(),
+        (
+            "not required for selected provider"
+            if not key_envs
+            else
+            f"set via {', '.join(key_envs)}"
+            if config.cli_api_key_configured()
+            else f"missing; set one of: {', '.join(key_envs) or 'provider env var'}"
+        ),
+    )
+    add(
+        "cli_api_base",
+        bool(config.get_cli_api_base()) or bool(key_envs),
+        config.get_cli_api_base() or "provider default",
+    )
+
+    payload = {
+        "ok": all(c["ok"] for c in checks if c["name"] != "cli_api_key"),
+        "execution_ready": all(c["ok"] for c in checks),
+        "checks": checks,
+        "ide": {
+            "agent": config.agent,
+            "models": {
+                "slm": config.slm_model,
+                "mlm": config.mlm_model,
+                "llm": config.llm_model,
+            },
+        },
+        "cli": {
+            "provider": config.cli_provider,
+            "models": {
+                "slm": config.cli_slm_model,
+                "mlm": config.cli_mlm_model,
+                "llm": config.cli_llm_model,
+            },
+            "api_key_env": key_envs,
+            "api_base": config.get_cli_api_base(),
+        },
+    }
+
+    if json_output:
+        console.print(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title="SkeletonGraph Doctor")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Detail")
+    for check in checks:
+        table.add_row(
+            check["name"],
+            "OK" if check["ok"] else "WARN",
+            check["detail"],
+        )
+    console.print(table)
+
+    model_table = Table(title="Configured Models")
+    model_table.add_column("Surface", style="cyan")
+    model_table.add_column("SLM")
+    model_table.add_column("MLM")
+    model_table.add_column("LLM")
+    model_table.add_row("IDE", config.slm_model, config.mlm_model, config.llm_model)
+    model_table.add_row("CLI", config.cli_slm_model, config.cli_mlm_model, config.cli_llm_model)
+    console.print(model_table)
+
+
+@app.command()
 @click.argument("prompt")
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--budget", "-b", default=128000, help="Model context limit")
@@ -158,102 +269,292 @@ def query(prompt: str, path: str, budget: int, out: str | None, verbose: bool):
     """Query the index with a natural language prompt."""
     project_root = Path(path).resolve()
 
-    from ..storage.local import load_index
-    from ..retrieval.resolver import resolve_context
-    from ..assembly.zone_assembler import assemble_context
-    from ..retrieval.session import Session
-    from ..metrics.metrics_logger import MetricsLogger
-
-    store = load_index(project_root)
-    if store is None:
-        console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
-        return
-
-    # Load session for cross-turn memory
-    session = Session.load(project_root)
-    metrics = MetricsLogger(project_root)
+    from ..engine import SGEngine
 
     t0 = time.time()
-
-    # Resolve and assemble
-    result = resolve_context(prompt, store, session=session)
-    assembled = assemble_context(
-        result, store, project_root,
-        model_context_limit=budget, session=session,
-    )
-
+    engine = SGEngine(project_root=project_root)
+    result = engine.query(prompt, delivery="cli")
     duration_ms = int((time.time() - t0) * 1000)
 
-    # Save session
-    session.save(project_root)
-
-    # Log metrics
-    files_involved = list({c.skeleton.file_path for c in result.candidates})
-    metrics.log_skeleton_query(
-        prompt=prompt,
-        sg_tokens=assembled.token_count,
-        native_tokens_estimated=int(assembled.reduction_ratio * assembled.token_count) if assembled.reduction_ratio > 0 else 0,
-        reduction_ratio=assembled.reduction_ratio,
-        confidence=assembled.confidence,
-        entities_matched=assembled.entities_matched,
-        zone_breakdown=assembled.zone_breakdown,
-        session_dedup_count=assembled.session_dedup_count,
-        session_tokens_saved=assembled.session_tokens_saved,
-        files_involved=files_involved,
-        duration_ms=duration_ms,
-    )
+    if not result.success:
+        console.print(f"[yellow]{result.error}[/yellow]")
+        return
 
     # Output
     if verbose:
-        console.print(f"\n[bold]Intent:[/bold] {result.intent.task_type.value}")
-        console.print(f"[bold]Confidence:[/bold] {assembled.confidence}")
-        console.print(f"[bold]Reason:[/bold] {assembled.confidence_reason}")
-        console.print(f"[bold]Entities:[/bold] {assembled.entities_matched}")
+        console.print(f"\n[bold]Mode:[/bold] {result.query_mode.value}")
+        console.print(f"[bold]Model tier:[/bold] {result.model_tier.value}")
+        console.print(f"[bold]Base tier:[/bold] {result.base_model_tier.value}")
+        console.print(f"[bold]Recommended model:[/bold] {result.recommended_model or 'default'}")
+        console.print(f"[bold]Delivery:[/bold] {result.delivery}")
+        console.print(f"[bold]Complexity:[/bold] {result.complexity_score:.2f}")
+        console.print(f"[bold]Routing:[/bold] {result.routing_reason or 'static'}")
+        console.print(f"[bold]Confidence:[/bold] {result.confidence}")
+        console.print(f"[bold]Reason:[/bold] {result.confidence_reason}")
         console.print(f"[bold]Candidates:[/bold] {len(result.candidates)}")
+        console.print(f"[bold]Pipeline:[/bold] {result.pipeline_path}")
 
         # Token budget table
         table = Table(title="Token Budget")
-        table.add_column("Zone", style="cyan")
+        table.add_column("Metric", style="cyan")
         table.add_column("Tokens", style="green")
-        for zone, tokens in assembled.zone_breakdown.items():
-            table.add_row(zone, str(tokens))
-        table.add_row("Total", str(assembled.token_count), style="bold")
-        if assembled.reduction_ratio > 0:
-            table.add_row("Reduction", f"{assembled.reduction_ratio}x")
+        table.add_row("Context", str(result.context_tokens))
+        table.add_row("SLM input", str(result.slm_input_tokens))
+        table.add_row("SLM output", str(result.slm_output_tokens))
+        table.add_row("Total", str(result.context_tokens), style="bold")
         console.print(table)
 
-        # Attention heatmap
-        if assembled.attention_map:
-            console.print("\n[bold]Attention Map:[/bold]")
-            for zone in assembled.attention_map:
-                color = {
-                    "peak": "green", "high": "cyan",
-                    "moderate": "yellow", "valley": "red",
-                }.get(zone.attention_level, "white")
-                console.print(
-                    f"  [{color}][ATTENTION: {zone.bar}][/{color}] "
-                    f"{zone.zone_name} ({zone.token_count} tokens)"
-                )
-
-        # Session info
-        if assembled.session_dedup_count > 0:
+        if result.slm_used:
             console.print(
-                f"\n[dim]Session: {assembled.session_dedup_count} bodies skipped "
-                f"(already sent), {assembled.session_tokens_saved} tokens saved[/dim]"
+                f"\n[dim]SLM fallback used: {result.slm_entities_found} entities, "
+                f"${result.slm_cost_usd:.6f}[/dim]"
             )
-
-        if assembled.warning:
-            console.print(f"\n[yellow][WARNING] {assembled.warning}[/yellow]")
 
     if out:
         out_path = Path(out).resolve()
-        out_path.write_text(assembled.text, encoding="utf-8")
+        out_path.write_text(result.context_text, encoding="utf-8")
         console.print(f"\n[green][OK][/green] Saved assembled context to {out_path}")
     else:
-        console.print(f"\n[dim]--- Assembled Context ({assembled.token_count} tokens) ---[/dim]\n")
-        console.print(assembled.text)
+        console.print(f"\n[dim]--- Assembled Context ({result.context_tokens} tokens) ---[/dim]\n")
+        console.print(result.context_text)
 
-    console.print("\n[dim][*] Metrics logged to .skeletongraph/metrics/query_log.jsonl[/dim]")
+    console.print(f"\n[dim][*] Completed in {duration_ms}ms[/dim]")
+
+
+@app.command()
+@click.argument("prompt")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--json-output", is_flag=True, help="Print machine-readable JSON")
+def route(prompt: str, path: str, json_output: bool):
+    """Show SG's deterministic model-routing decision for a task."""
+    project_root = Path(path).resolve()
+
+    from ..engine import SGEngine
+    from ..retrieval.resolver import Tier
+
+    t0 = time.time()
+    engine = SGEngine(project_root=project_root)
+    result = engine.query(prompt, delivery="cli")
+    duration_ms = int((time.time() - t0) * 1000)
+
+    if not result.success:
+        console.print(f"[yellow]{result.error}[/yellow]")
+        return
+
+    targets = [
+        c.skeleton.fqn for c in result.candidates
+        if c.tier == Tier.TIER1
+    ]
+    payload = {
+        "mode": result.query_mode.value,
+        "tier": result.model_tier.value,
+        "base_tier": result.base_model_tier.value,
+        "recommended_model": result.recommended_model,
+        "delivery": result.delivery,
+        "complexity_score": result.complexity_score,
+        "routing_reason": result.routing_reason,
+        "confidence": result.confidence,
+        "context_tokens": result.context_tokens,
+        "candidate_count": len(result.candidates),
+        "targets": targets[:5],
+        "duration_ms": duration_ms,
+    }
+    config = engine.get_config()
+    payload["cli_provider"] = config.cli_provider
+    payload["api_key_env"] = config.get_cli_key_envs()
+    payload["api_key_configured"] = config.cli_api_key_configured()
+    payload["api_base"] = config.get_cli_api_base()
+
+    if json_output:
+        console.print(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title="SG Route")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Mode", payload["mode"])
+    table.add_row("Tier", payload["tier"])
+    table.add_row("Base tier", payload["base_tier"])
+    table.add_row("Recommended model", payload["recommended_model"] or "default")
+    table.add_row("CLI provider", payload["cli_provider"])
+    table.add_row("API key env", ", ".join(payload["api_key_env"]) or "none")
+    table.add_row("API key configured", "yes" if payload["api_key_configured"] else "no")
+    table.add_row("API base", payload["api_base"] or "provider default")
+    table.add_row("Complexity", f"{payload['complexity_score']:.2f}")
+    table.add_row("Reason", payload["routing_reason"])
+    table.add_row("Confidence", payload["confidence"])
+    table.add_row("Packet tokens", str(payload["context_tokens"]))
+    table.add_row("Candidates", str(payload["candidate_count"]))
+    table.add_row("Targets", ", ".join(targets[:3]) or "none")
+    console.print(table)
+
+
+@app.command()
+@click.argument("prompt")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--dry-run", is_flag=True, help="Show execution plan without calling a model")
+@click.option("--execute", is_flag=True, help="Call the configured provider and write model output")
+@click.option("--auto-model", is_flag=True, help="Use SG dynamic routing (default unless --tier is set)")
+@click.option("--tier", type=click.Choice(["slm", "mlm", "llm"]), default=None, help="Override routed tier")
+@click.option("--out", "-o", default=None, help="Write prepared packet to a file")
+@click.option("--response-out", default=None, help="Write provider output to this file")
+@click.option("--max-output-tokens", type=int, default=2000, help="Max provider output tokens")
+@click.option("--temperature", type=float, default=0.1, help="Provider sampling temperature")
+@click.option("--json-output", is_flag=True, help="Print machine-readable JSON")
+def run(
+    prompt: str,
+    path: str,
+    dry_run: bool,
+    execute: bool,
+    auto_model: bool,
+    tier: str | None,
+    out: str | None,
+    response_out: str | None,
+    max_output_tokens: int,
+    temperature: float,
+    json_output: bool,
+):
+    """Plan or execute an SG CLI model-routed task."""
+    if dry_run and execute:
+        console.print("[red]Use either --dry-run or --execute, not both.[/red]")
+        return
+
+    project_root = Path(path).resolve()
+
+    from ..engine import SGEngine
+    from ..llm.provider import LLMConfig, complete
+    from ..retrieval.resolver import Tier
+    from .run_exec import (
+        RUN_SYSTEM_PROMPT,
+        RunPlan,
+        build_execution_prompt,
+        default_run_paths,
+        write_run_log,
+    )
+
+    engine = SGEngine(project_root=project_root)
+    result = engine.query(prompt, delivery="cli")
+    config = engine.get_config()
+
+    if not result.success:
+        console.print(f"[yellow]{result.error}[/yellow]")
+        return
+
+    routing_mode = "manual" if tier else "auto"
+    selected_tier = tier or result.model_tier.value
+    selected_model = config.get_cli_model_for_tier(selected_tier)
+    targets = [
+        c.skeleton.fqn for c in result.candidates
+        if c.tier == Tier.TIER1
+    ]
+
+    if out:
+        out_path = Path(out).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(result.context_text, encoding="utf-8")
+    else:
+        out_path = None
+
+    default_response_path, run_log_path = default_run_paths(project_root)
+    response_path = Path(response_out).resolve() if response_out else default_response_path
+
+    plan = RunPlan(
+        prompt=prompt,
+        mode=result.query_mode.value,
+        routed_tier=result.model_tier.value,
+        selected_tier=selected_tier,
+        selected_model=selected_model,
+        cli_provider=config.cli_provider,
+        api_key_env=config.get_cli_key_envs(),
+        api_key_configured=config.cli_api_key_configured(),
+        api_base=config.get_cli_api_base(),
+        context_tokens=result.context_tokens,
+        confidence=result.confidence,
+        complexity_score=result.complexity_score,
+        routing_reason=result.routing_reason,
+        targets=targets[:5],
+        packet_path=str(out_path) if out_path else None,
+    )
+
+    payload = {
+        "implemented": True,
+        "dry_run": not execute,
+        "execute": execute,
+        "routing_mode": routing_mode,
+        "auto_model": auto_model or tier is None,
+        **plan.to_dict(),
+        "response_path": str(response_path),
+        "run_log_path": str(run_log_path),
+        "next_status": "dry-run only; pass --execute to call the provider",
+    }
+
+    provider_response = None
+    if execute:
+        if not config.cli_api_key_configured():
+            missing = ", ".join(config.get_cli_key_envs()) or "provider API key"
+            console.print(f"[red]Missing CLI provider API key.[/red] Set one of: {missing}")
+            return
+
+        exec_prompt = build_execution_prompt(prompt, result.context_text)
+        started = time.time()
+        resp = complete(
+            exec_prompt,
+            system=RUN_SYSTEM_PROMPT,
+            config=LLMConfig(
+                model=selected_model,
+                temperature=temperature,
+                max_tokens=max_output_tokens,
+                api_base=config.get_cli_api_base(),
+            ),
+        )
+        elapsed_ms = int((time.time() - started) * 1000)
+        response_path.parent.mkdir(parents=True, exist_ok=True)
+        response_path.write_text(resp.text, encoding="utf-8")
+        provider_response = {
+            "model": resp.model,
+            "input_tokens": resp.input_tokens,
+            "output_tokens": resp.output_tokens,
+            "cost": resp.cost,
+            "duration_ms": elapsed_ms,
+            "response_path": str(response_path),
+        }
+        payload["provider_response"] = provider_response
+        payload["next_status"] = "provider output written; inspect/apply patch manually"
+
+    write_run_log(run_log_path, {
+        "timestamp": time.time(),
+        **payload,
+    })
+
+    if json_output:
+        console.print(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title="SG Run" if execute else "SG Run Plan")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Mode", payload["mode"])
+    table.add_row("Routed tier", payload["routed_tier"])
+    table.add_row("Routing mode", payload["routing_mode"])
+    table.add_row("Selected tier", payload["selected_tier"])
+    table.add_row("Selected model", payload["selected_model"])
+    table.add_row("CLI provider", payload["cli_provider"])
+    table.add_row("API key configured", "yes" if payload["api_key_configured"] else "no")
+    table.add_row("API base", config.get_cli_api_base() or "provider default")
+    table.add_row("Packet tokens", str(payload["context_tokens"]))
+    table.add_row("Confidence", payload["confidence"])
+    table.add_row("Complexity", f"{payload['complexity_score']:.2f}")
+    table.add_row("Targets", ", ".join(targets[:3]) or "none")
+    if out_path:
+        table.add_row("Packet path", str(out_path))
+    table.add_row("Response path", str(response_path))
+    table.add_row("Run log", str(run_log_path))
+    if provider_response:
+        table.add_row("Provider input tokens", str(provider_response["input_tokens"]))
+        table.add_row("Provider output tokens", str(provider_response["output_tokens"]))
+        table.add_row("Provider cost", f"${provider_response['cost']:.6f}")
+    table.add_row("Status", payload["next_status"])
+    console.print(table)
 
 
 @app.command()
@@ -561,6 +862,275 @@ def baseline(prompt: str, path: str, verbose: bool):
             console.print(f"  ... and {len(files_read) - 20} more")
 
     console.print("\n[dim][*] Baseline logged to .skeletongraph/metrics/query_log.jsonl[/dim]")
+
+
+@app.command(name="config")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--show", is_flag=True, help="Show current config")
+@click.option("--agent", "-a", type=click.Choice(
+    ["cursor", "copilot", "codex", "claude_code", "antigravity"],
+    case_sensitive=False,
+), default=None, help="Switch to agent preset")
+@click.option("--cli-provider", type=click.Choice(
+    ["anthropic", "openai", "google", "local"],
+    case_sensitive=False,
+), default=None, help="Set CLI execution provider preset")
+@click.option("--slm", default=None, help="Override SLM model")
+@click.option("--mlm", default=None, help="Override MLM model")
+@click.option("--llm", default=None, help="Override LLM model")
+@click.option("--cli-slm", default=None, help="Override CLI SLM provider model")
+@click.option("--cli-mlm", default=None, help="Override CLI MLM provider model")
+@click.option("--cli-llm", default=None, help="Override CLI LLM provider model")
+@click.option("--cli-api-base", default=None, help="Override CLI provider API base URL")
+@click.option("--dynamic-routing/--static-routing", default=None, help="Enable or disable dynamic model routing")
+def config_cmd(
+    path: str,
+    show: bool,
+    agent: str,
+    cli_provider: str,
+    slm: str,
+    mlm: str,
+    llm: str,
+    cli_slm: str,
+    cli_mlm: str,
+    cli_llm: str,
+    cli_api_base: str | None,
+    dynamic_routing: bool | None,
+):
+    """View or update SkeletonGraph model configuration."""
+    from ..config import AGENT_PRESETS, CLI_PROVIDER_PRESETS, load_config, save_config
+
+    project_root = Path(path).resolve()
+    config = load_config(project_root)
+
+    # If no flags, run interactive mode
+    if not any([
+        show, agent, cli_provider, slm, mlm, llm, cli_slm, cli_mlm, cli_llm,
+        cli_api_base, dynamic_routing is not None,
+    ]):
+        console.print("[bold cyan]SkeletonGraph Model Configuration[/bold cyan]\n")
+
+        # Show current
+        console.print(f"  IDE agent: [bold]{config.agent}[/bold]")
+        console.print(f"  IDE SLM/MLM/LLM: {config.slm_model} / {config.mlm_model} / {config.llm_model}")
+        console.print(f"  CLI provider: [bold]{config.cli_provider}[/bold]")
+        console.print(
+            f"  CLI SLM/MLM/LLM: {config.cli_slm_model} / "
+            f"{config.cli_mlm_model} / {config.cli_llm_model}"
+        )
+        key_envs = config.get_cli_key_envs()
+        key_status = (
+            "not required"
+            if not key_envs
+            else "set"
+            if config.cli_api_key_configured()
+            else "missing"
+        )
+        console.print(f"  CLI API key: {key_status} ({', '.join(key_envs) or 'none'})")
+        if config.get_cli_api_base():
+            console.print(f"  CLI API base: {config.get_cli_api_base()}")
+
+        console.print("\n[bold]What would you like to do?[/bold]")
+        console.print("  [cyan]1[/cyan]. Switch IDE agent preset")
+        console.print("  [cyan]2[/cyan]. Override IDE model label")
+        console.print("  [cyan]3[/cyan]. Configure CLI provider preset")
+        console.print("  [cyan]4[/cyan]. Override CLI provider model")
+        console.print("  [cyan]5[/cyan]. Show available models")
+        console.print("  [cyan]6[/cyan]. Exit")
+
+        from rich.prompt import Prompt
+        choice = Prompt.ask("\nSelect", choices=["1", "2", "3", "4", "5", "6"], default="6")
+
+        if choice == "1":
+            agent_names = list(AGENT_PRESETS.keys())
+            console.print()
+            for i, name in enumerate(agent_names, 1):
+                p = AGENT_PRESETS[name]
+                marker = " [green]< current[/green]" if name == config.agent else ""
+                console.print(
+                    f"  [cyan]{i}[/cyan]. {name}{marker}  "
+                    f"[dim](SLM: {p['slm']}, MLM: {p['mlm']}, LLM: {p['llm']})[/dim]"
+                )
+            sel = Prompt.ask("\nSelect agent (number)", default="1")
+            if sel.isdigit() and 1 <= int(sel) <= len(agent_names):
+                agent = agent_names[int(sel) - 1]
+
+        elif choice == "2":
+            preset = AGENT_PRESETS.get(config.agent, {})
+            models = preset.get("models_available", [])
+            if models:
+                console.print("\n[bold]Available models:[/bold]")
+                for i, m in enumerate(models, 1):
+                    console.print(f"  [cyan]{i}[/cyan]. {m}")
+
+                tier = Prompt.ask("\nWhich tier to change?", choices=["slm", "mlm", "llm"])
+                sel = Prompt.ask("Select model (number or name)")
+                if sel.isdigit() and 1 <= int(sel) <= len(models):
+                    model_name = models[int(sel) - 1]
+                else:
+                    model_name = sel
+
+                if tier == "slm":
+                    slm = model_name
+                elif tier == "mlm":
+                    mlm = model_name
+                else:
+                    llm = model_name
+            else:
+                console.print("[yellow]No model list available. Type model name directly.[/yellow]")
+                tier = Prompt.ask("Which tier?", choices=["slm", "mlm", "llm"])
+                model_name = Prompt.ask("Model name")
+                if tier == "slm":
+                    slm = model_name
+                elif tier == "mlm":
+                    mlm = model_name
+                else:
+                    llm = model_name
+
+        elif choice == "3":
+            provider_names = list(CLI_PROVIDER_PRESETS.keys())
+            console.print()
+            for i, name in enumerate(provider_names, 1):
+                p = CLI_PROVIDER_PRESETS[name]
+                marker = " [green]< current[/green]" if name == config.cli_provider else ""
+                console.print(
+                    f"  [cyan]{i}[/cyan]. {name}{marker}  "
+                    f"[dim](SLM: {p['slm']}, MLM: {p['mlm']}, LLM: {p['llm']})[/dim]"
+                )
+            sel = Prompt.ask("\nSelect provider (number)", default="1")
+            if sel.isdigit() and 1 <= int(sel) <= len(provider_names):
+                cli_provider = provider_names[int(sel) - 1]
+
+        elif choice == "4":
+            preset = CLI_PROVIDER_PRESETS.get(config.cli_provider, {})
+            models = preset.get("models_available", [])
+            if models:
+                console.print("\n[bold]Available CLI provider models:[/bold]")
+                for i, m in enumerate(models, 1):
+                    console.print(f"  [cyan]{i}[/cyan]. {m}")
+            tier = Prompt.ask("\nWhich CLI tier to change?", choices=["slm", "mlm", "llm"])
+            sel = Prompt.ask("Select model (number or name)")
+            if sel.isdigit() and models and 1 <= int(sel) <= len(models):
+                model_name = models[int(sel) - 1]
+            else:
+                model_name = sel
+            if tier == "slm":
+                cli_slm = model_name
+            elif tier == "mlm":
+                cli_mlm = model_name
+            else:
+                cli_llm = model_name
+
+        elif choice == "5":
+            preset = AGENT_PRESETS.get(config.agent, {})
+            models = preset.get("models_available", [])
+            if models:
+                console.print(f"\n[bold]Models available in {config.agent}:[/bold]")
+                for m in models:
+                    console.print(f"  - {m}")
+            else:
+                console.print("[yellow]No model list available for this agent.[/yellow]")
+            cli_preset = CLI_PROVIDER_PRESETS.get(config.cli_provider, {})
+            cli_models = cli_preset.get("models_available", [])
+            if cli_models:
+                console.print(f"\n[bold]CLI models for {config.cli_provider}:[/bold]")
+                for m in cli_models:
+                    console.print(f"  - {m}")
+            return
+
+        else:
+            return
+
+    # Show current config
+    if show:
+        table = Table(title="SkeletonGraph Config", show_header=False)
+        table.add_column("Key", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Agent", config.agent)
+        table.add_row("IDE SLM", config.slm_model)
+        table.add_row("IDE MLM", config.mlm_model)
+        table.add_row("IDE LLM", config.llm_model)
+        table.add_row("CLI Provider", config.cli_provider)
+        table.add_row("CLI SLM", config.cli_slm_model)
+        table.add_row("CLI MLM", config.cli_mlm_model)
+        table.add_row("CLI LLM", config.cli_llm_model)
+        key_envs = config.get_cli_key_envs()
+        key_status = (
+            "not required"
+            if not key_envs
+            else "set"
+            if config.cli_api_key_configured()
+            else "missing"
+        )
+        table.add_row("CLI API Key Env", ", ".join(key_envs) or "none")
+        table.add_row("CLI API Key", key_status)
+        table.add_row("CLI API Base", config.get_cli_api_base() or "provider default")
+        table.add_row("Dynamic Routing", "enabled" if config.enable_dynamic_model_routing else "disabled")
+        table.add_row("Context Limit", f"{config.model_context_limit:,} tokens")
+        table.add_row("MCP Profile", config.mcp_tool_profile)
+        table.add_row("Session TTL", f"{config.session_ttl_minutes} min")
+        console.print(table)
+
+        preset = AGENT_PRESETS.get(config.agent, {})
+        hint = preset.get("select_model_hint", "")
+        if hint:
+            console.print(f"\n[dim]Hint: {hint}[/dim]")
+        return
+
+    # Apply agent preset
+    if agent:
+        preset = AGENT_PRESETS.get(agent)
+        if preset:
+            config.agent = agent
+            config.slm_model = preset["slm"]
+            config.mlm_model = preset["mlm"]
+            config.llm_model = preset["llm"]
+            console.print(f"[green][OK][/green] Switched to [bold]{agent}[/bold] preset")
+            hint = preset.get("select_model_hint", "")
+            if hint:
+                console.print(f"  [yellow]NOTE:[/yellow] {hint}")
+
+    if cli_provider:
+        config.apply_cli_provider_preset(cli_provider)
+        envs = ", ".join(config.get_cli_key_envs()) or "provider API key env"
+        console.print(f"[green][OK][/green] CLI provider -> {cli_provider}")
+        if config.get_cli_key_envs():
+            console.print(f"  [yellow]NOTE:[/yellow] Set {envs}; SG does not store API keys.")
+        else:
+            console.print(
+                f"  [yellow]NOTE:[/yellow] No API key required; SG will use "
+                f"{config.get_cli_api_base() or 'the configured local endpoint'}."
+            )
+
+    # Apply individual overrides
+    if slm:
+        config.slm_model = slm
+        console.print(f"[green][OK][/green] IDE SLM -> {slm}")
+    if mlm:
+        config.mlm_model = mlm
+        console.print(f"[green][OK][/green] IDE MLM -> {mlm}")
+    if llm:
+        config.llm_model = llm
+        console.print(f"[green][OK][/green] IDE LLM -> {llm}")
+    if cli_slm:
+        config.cli_slm_model = cli_slm
+        console.print(f"[green][OK][/green] CLI SLM -> {cli_slm}")
+    if cli_mlm:
+        config.cli_mlm_model = cli_mlm
+        console.print(f"[green][OK][/green] CLI MLM -> {cli_mlm}")
+    if cli_llm:
+        config.cli_llm_model = cli_llm
+        console.print(f"[green][OK][/green] CLI LLM -> {cli_llm}")
+    if cli_api_base:
+        config.cli_api_base = cli_api_base
+        console.print(f"[green][OK][/green] CLI API base -> {cli_api_base}")
+    if dynamic_routing is not None:
+        config.enable_dynamic_model_routing = dynamic_routing
+        state = "enabled" if dynamic_routing else "disabled"
+        console.print(f"[green][OK][/green] Dynamic routing {state}")
+
+    save_config(config, project_root)
+    console.print(f"\n[dim]Config saved to .skeletongraph/config.json[/dim]")
 
 
 @app.command()
@@ -1482,25 +2052,63 @@ def _sg_rules_block() -> str:
     return """
 ## ⚡️ SkeletonGraph: MANDATORY WORKFLOW
 
-This project uses SkeletonGraph for high-precision, low-token context assembly. To ensure accuracy and minimize costs, you **MUST** follow this workflow:
+> **CRITICAL DIRECTIVE: Follow these 3 steps for EVERY coding task. Violations waste tokens and reduce accuracy.**
 
-### 1. THE MANDATORY FIRST MOVE
-**DO NOT use grep, ls, or find as your first action.** 
-Your very first tool call for ANY code task or question **MUST** be `query_context`. 
+This project uses SkeletonGraph for high-precision context assembly. The MCP server has indexed the entire codebase into a dependency graph with function signatures, summaries, and structural metadata.
 
-- **Why?** SkeletonGraph already indexed the entire graph. `query_context` will give you the exact files, function bodies, and dependencies in one shot, saving 90% of exploration tokens.
-- **How?** Pass the user's entire prompt (or a concise technical summary) to `query_context`.
+### STEP 1: RETRIEVE THE FUNCTION INDEX (MANDATORY FIRST MOVE)
+**DO NOT use grep, ls, find, or read_file as your first action.**
+Your very first tool call MUST be `get_retrieval_context`:
 
-### 2. ZONE-BASED NAVIGATION
-Every `query_context` response is organized into 4 Zones:
-- **Zone 1 (Constraints):** READ THESE FIRST. They contain mandatory project rules.
-- **Zone 2 (Target Code):** The exact functions you likely need to edit.
-- **Zone 3 (Structural Context):** Callers, callees, and neighbors. Use this to understand the "why".
-- **Zone 4 (Task):** A distilled summary of your mission.
+```
+get_retrieval_context(prompt="<the user's task>")
+```
 
-### 3. REFINEMENT
-- Only use `expand_context` if you need the full body of a function that was returned as a skeleton.
-- Only use native tools (`grep`, `read_file`) **AFTER** you have the SkeletonGraph context and need tiny surgical details.
+This returns:
+- **Project summary** — what this project does
+- **File map** — all source files with descriptions
+- **Function index** — every function with a one-line summary
+- **Session context** — what was done in recent turns
+
+READ the function index carefully. Identify which FQNs (fully qualified names) are relevant to the user's task. Match the user's natural language description to the function SUMMARIES, not just names.
+
+### STEP 2: QUERY WITH EXTRACTED ENTITIES (MANDATORY)
+Call `query_context` with the entities YOU identified:
+
+```
+query_context(
+  prompt="<the user's task>",
+  entities=["file.py::ClassName.method_name", "other_file.py::function_name"]
+)
+```
+
+This triggers graph-based expansion: SkeletonGraph fetches the full bodies of your target functions PLUS their callers, callees, test coverage, and structural neighbors — assembled into an attention-optimized 4-zone prompt.
+
+**DO NOT skip Step 1 and call query_context with prompt only.** Without entities, the server falls back to regex keyword matching which is significantly less accurate.
+
+### STEP 3: REPORT COMPLETION (MANDATORY FINAL MOVE)
+After you finish the coding task, you MUST call `report_completion`:
+
+```
+report_completion(
+  summary="Fixed the authentication bug in login handler",
+  files_modified=["src/auth/handler.py", "tests/test_auth.py"],
+  session_end=false
+)
+```
+
+This updates session memory so future queries know what was changed. **Failure to call report_completion breaks cross-session continuity.**
+
+### ZONE-BASED CONTEXT NAVIGATION
+Every `query_context` response has 4 zones ordered by attention priority:
+- **Zone 1 (Constraints):** READ FIRST. Mandatory project rules and guardrails.
+- **Zone 2 (Target Code):** Full source of the functions you need to modify.
+- **Zone 3 (Structural Context):** Callers, callees, neighbors. The "why" behind the code.
+- **Zone 4 (Task):** Your mission statement at the attention boundary.
+
+### REFINEMENT (ONLY IF NEEDED)
+- Use `expand_context` if a skeleton wasn't enough and you need the full function body.
+- Use native tools (grep, read_file) ONLY after you have the SkeletonGraph context and need surgical details.
 """.strip()
 
 
