@@ -27,36 +27,143 @@ os.environ["GEMINI_API_VERSION"] = "v1beta"
 
 
 # ── Agent presets for first-install defaults ──────────────────────────
-AGENT_PRESETS: Dict[str, Dict[str, str]] = {
-    "claude_code": {
-        "slm": "claude-haiku-4-5",
-        "mlm": "claude-sonnet-4-6",
-        "llm": "claude-opus-4-7",
-        "integration": "hooks+mcp",
-    },
+# Models listed here are the EXACT names from each IDE's model selector.
+# SLM/MLM/LLM tiers are recommendations for which model the user should
+# select in the IDE for different task complexities. SG does NOT call
+# these models directly — the IDE handles all model invocations.
+#
+# Last verified: 2026-05-08
+AGENT_PRESETS: Dict[str, Dict] = {
     "cursor": {
-        "slm": "claude-haiku-4-5",
-        "mlm": "claude-sonnet-4-6",
-        "llm": "claude-opus-4-7",
+        "slm": "GPT-5 Mini",
+        "mlm": "Sonnet 4.6",
+        "llm": "Opus 4.7",
         "integration": "mcp",
+        "select_model_hint": (
+            "In Cursor: Settings > Models > toggle ON the models you want. "
+            "Select Sonnet 4.6 in Composer for standard tasks, Opus 4.7 for complex tasks."
+        ),
+        "models_available": [
+            "Codex 5.3", "Composer 2", "Sonnet 4.6", "GPT 5.5", "Opus 4.7",
+            "GPT-5.4", "Opus 4.6", "Opus 4.5", "GPT 5.2", "Gemini 3.1 Pro",
+            "GPT-5.4 Mini", "GPT 5.4 Nano", "Haiku 4.5", "Codex 5.3 Spark",
+            "Grok 4.3", "Sonnet 4.5", "Codex 5.2", "Codex 5.1 Max", "GPT-5.1",
+            "Gemini 3 Flash", "Codex 5.1 Mini", "Sonnet 4", "GPT-5 Mini",
+            "Gemini 2.5 Flash", "Kimi K2.5",
+        ],
+    },
+    "copilot": {
+        "slm": "GPT-5 mini",
+        "mlm": "GPT-5.2",
+        "llm": "Gemini 3.1 Pro",
+        "integration": "mcp",
+        "select_model_hint": (
+            "In Copilot Chat: click the model dropdown and select GPT-5.2 for standard tasks. "
+            "Use 'Other models' for GPT-5.2 Codex or Gemini 3.1 Pro."
+        ),
+        "models_available": [
+            "Claude Haiku 4.5", "Gemini 2.5 Pro", "Gemini 3 Flash",
+            "Gemini 3.1 Pro", "GPT-4.1", "GPT-4o", "GPT-5 mini",
+            "GPT-5.2", "GPT-5.2 Codex", "GPT-5.4 mini",
+            "Grok Code Fast 1", "Raptor mini",
+        ],
     },
     "codex": {
+        "slm": "GPT-5.4-Mini",
+        "mlm": "GPT-5.5",
+        "llm": "GPT-5.5",
+        "integration": "mcp+agents_md",
+        "select_model_hint": (
+            "In Codex App: click the model dropdown to select GPT-5.5 (default). "
+            "GPT-5.3-Codex is available under 'Other models'."
+        ),
+        "models_available": [
+            "GPT-5.5", "GPT-5.4", "GPT-5.4-Mini",
+            "GPT-5.3-Codex", "GPT-5.2",
+        ],
+    },
+    "claude_code": {
+        "slm": "Haiku 4.5",
+        "mlm": "Sonnet 4.6",
+        "llm": "Opus 4.7",
+        "integration": "hooks+mcp",
+        "select_model_hint": (
+            "Claude Code defaults to Sonnet 4.6. "
+            "Use /model opus-4.7 for architecture tasks, /model haiku-4.5 for quick lookups."
+        ),
+        "models_available": [
+            "Haiku 4.5", "Sonnet 4.6", "Opus 4.7",
+        ],
+    },
+    "antigravity": {
+        "slm": "Gemini 3 Flash",
+        "mlm": "Gemini 3.1 Pro",
+        "llm": "Claude Opus 4.6",
+        "integration": "mcp",
+        "select_model_hint": (
+            "In Antigravity: select Gemini 3.1 Pro for standard tasks, "
+            "Claude Opus 4.6 (Thinking) for complex architecture work."
+        ),
+        "models_available": [
+            "Gemini 3.1 Pro (High)", "Gemini 3.1 Pro (Low)", "Gemini 3 Flash",
+            "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)",
+            "GPT-OSS 120B (Medium)",
+        ],
+    },
+}
+
+# ── CLI provider presets ───────────────────────────────────────────────
+# These are API-facing defaults for future SG CLI execution. API keys are
+# never stored in config; SG only records which environment variable to read.
+CLI_PROVIDER_PRESETS: Dict[str, Dict] = {
+    "anthropic": {
+        "api_key_env": ["ANTHROPIC_API_KEY"],
+        "slm": "claude-haiku-4-5",
+        "mlm": "claude-sonnet-4-6",
+        "llm": "claude-opus-4-7",
+        "models_available": [
+            "claude-haiku-4-5",
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+        ],
+    },
+    "openai": {
+        "api_key_env": ["OPENAI_API_KEY"],
         "slm": "gpt-5.4-mini",
         "mlm": "gpt-5.5",
         "llm": "gpt-5.5",
-        "integration": "mcp+agents_md",
+        "models_available": [
+            "gpt-5.4-mini",
+            "gpt-5.4",
+            "gpt-5.5",
+            "gpt-5.3-codex",
+            "gpt-5.2",
+        ],
     },
-    "copilot": {
-        "slm": "gemini/gemini-3.1-flash-lite",
-        "mlm": "copilot-default",
-        "llm": "copilot-default",
-        "integration": "extension",
+    "google": {
+        "api_key_env": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "slm": "gemini-3-flash",
+        "mlm": "gemini-3.1-pro",
+        "llm": "gemini-3.1-pro",
+        "models_available": [
+            "gemini-3-flash",
+            "gemini-3.1-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+        ],
     },
-    "antigravity": {
-        "slm": "gemini/gemini-3.1-flash-lite",
-        "mlm": "gemini/gemini-2.5-pro",
-        "llm": "claude-opus-4-7",
-        "integration": "mcp",
+    "local": {
+        "api_key_env": [],
+        "api_base": "http://localhost:11434",
+        "slm": "ollama/qwen3-coder:latest",
+        "mlm": "ollama/qwen3-coder:30b",
+        "llm": "ollama/qwen3-coder:30b",
+        "models_available": [
+            "ollama/qwen3-coder:latest",
+            "ollama/qwen3-coder:30b",
+            "ollama/qwen3-coder-next:latest",
+            "ollama/deepseek-coder-v2:latest",
+        ],
     },
 }
 
@@ -82,13 +189,27 @@ class SGConfig:
     """SkeletonGraph runtime configuration."""
 
     # ── Model Tiers (v4) ───────────────────────────────────────────────
-    slm_model: str = "gemini/gemini-3.1-flash-lite"     # Entity extraction, summarization, docs
-    mlm_model: str = "claude-sonnet-4-6"            # Planning, code review, standard tasks
-    llm_model: str = "claude-opus-4-7"              # Architecture, complex debugging
+    # These are the DEFAULT recommended models. They are overridden by
+    # the agent preset selected during `sg init --agent <name>`.
+    # SG does NOT call these models directly — the IDE does.
+    # These names are stored as recommendations in .skeletongraph/config.json.
+    slm_model: str = "GPT-5 Mini"               # Quick lookups, navigation
+    mlm_model: str = "Sonnet 4.6"               # Standard coding, debugging, review
+    llm_model: str = "Opus 4.7"                 # Architecture, complex reasoning
 
-    # ── Legacy LLM (kept for backward compat) ─────────────────────────
-    default_model: str = "gemini/gemini-3.1-flash-lite"
-    summary_model: str = "gemini/gemini-3.1-flash-lite"
+    # ── Active agent ───────────────────────────────────────────────────
+    agent: str = "cursor"                       # Active IDE agent preset name
+
+    # ── CLI provider routing ───────────────────────────────────────────
+    cli_provider: str = "anthropic"
+    cli_slm_model: str = "claude-haiku-4-5"
+    cli_mlm_model: str = "claude-sonnet-4-6"
+    cli_llm_model: str = "claude-opus-4-7"
+    cli_api_base: Optional[str] = None
+
+    # ── Legacy LLM (kept for backward compat with sg summarize) ───────
+    default_model: str = "gemini/gemini-2.5-flash"  # Used by sg summarize only
+    summary_model: str = "gemini/gemini-2.5-flash"  # Used by sg summarize only
     summary_batch_size: int = 2
 
     # ── SLM Fallback ───────────────────────────────────────────────────
@@ -97,6 +218,7 @@ class SGConfig:
     slm_max_fqns_in_prompt: int = 200       # Max FQN names sent to SLM for matching
 
     # ── Tier Routing ───────────────────────────────────────────────────
+    enable_dynamic_model_routing: bool = True  # Adjust tier by complexity/confidence
     tier_routing: Dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_TIER_ROUTING)
     )
@@ -135,12 +257,39 @@ class SGConfig:
     # ── Helpers ─────────────────────────────────────────────────────────
 
     def get_model_for_tier(self, tier: str) -> str:
-        """Get the configured model name for a tier ('slm', 'mlm', 'llm')."""
+        """Get the IDE-facing configured model name for a tier."""
         return {
             "slm": self.slm_model,
             "mlm": self.mlm_model,
             "llm": self.llm_model,
         }.get(tier, self.mlm_model)
+
+    def get_cli_model_for_tier(self, tier: str) -> str:
+        """Get the CLI/provider-facing configured model name for a tier."""
+        return {
+            "slm": self.cli_slm_model,
+            "mlm": self.cli_mlm_model,
+            "llm": self.cli_llm_model,
+        }.get(tier, self.cli_mlm_model)
+
+    def get_cli_key_envs(self) -> List[str]:
+        """Return accepted API-key environment variable names for CLI execution."""
+        preset = CLI_PROVIDER_PRESETS.get(self.cli_provider, {})
+        return list(preset.get("api_key_env", []))
+
+    def cli_api_key_configured(self) -> bool:
+        """Return True if CLI execution has the required credentials."""
+        key_envs = self.get_cli_key_envs()
+        if not key_envs:
+            return True
+        return any(os.environ.get(name) for name in key_envs)
+
+    def get_cli_api_base(self) -> Optional[str]:
+        """Return provider API base for local/OpenAI-compatible execution."""
+        if self.cli_api_base:
+            return self.cli_api_base
+        preset = CLI_PROVIDER_PRESETS.get(self.cli_provider, {})
+        return preset.get("api_base")
 
     def get_tier_for_mode(self, mode: str) -> str:
         """Get the tier assigned to a query mode."""
@@ -160,6 +309,17 @@ class SGConfig:
             mlm_model=preset["mlm"],
             llm_model=preset["llm"],
         )
+
+    def apply_cli_provider_preset(self, provider: str) -> None:
+        """Set CLI provider and default API-facing models."""
+        preset = CLI_PROVIDER_PRESETS.get(provider)
+        if not preset:
+            raise ValueError(f"Unknown CLI provider: {provider}")
+        self.cli_provider = provider
+        self.cli_slm_model = preset["slm"]
+        self.cli_mlm_model = preset["mlm"]
+        self.cli_llm_model = preset["llm"]
+        self.cli_api_base = preset.get("api_base")
 
 
 def load_config(project_root: Optional[Path] = None) -> SGConfig:
@@ -198,6 +358,15 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
         "SG_SLM_MODEL": ("slm_model", str),
         "SG_MLM_MODEL": ("mlm_model", str),
         "SG_LLM_MODEL": ("llm_model", str),
+        "SG_CLI_PROVIDER": ("cli_provider", str),
+        "SG_CLI_SLM_MODEL": ("cli_slm_model", str),
+        "SG_CLI_MLM_MODEL": ("cli_mlm_model", str),
+        "SG_CLI_LLM_MODEL": ("cli_llm_model", str),
+        "SG_CLI_API_BASE": ("cli_api_base", str),
+        "SG_DYNAMIC_ROUTING": (
+            "enable_dynamic_model_routing",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
         "SG_ENABLE_SLM": ("enable_slm_fallback", lambda v: v.lower() in ("1", "true", "yes")),
         "SG_SHOW_COST": ("show_cost_per_query", lambda v: v.lower() in ("1", "true", "yes")),
     }
@@ -210,6 +379,26 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
             except (ValueError, TypeError):
                 pass
 
+    # If the CLI provider is selected via environment, use its default model
+    # trio unless the caller also supplied explicit per-tier CLI model env vars.
+    cli_provider_env = os.environ.get("SG_CLI_PROVIDER")
+    if cli_provider_env in CLI_PROVIDER_PRESETS:
+        explicit_cli_models = {
+            "slm": os.environ.get("SG_CLI_SLM_MODEL"),
+            "mlm": os.environ.get("SG_CLI_MLM_MODEL"),
+            "llm": os.environ.get("SG_CLI_LLM_MODEL"),
+            "api_base": os.environ.get("SG_CLI_API_BASE"),
+        }
+        config.apply_cli_provider_preset(cli_provider_env)
+        if explicit_cli_models["slm"]:
+            config.cli_slm_model = explicit_cli_models["slm"]
+        if explicit_cli_models["mlm"]:
+            config.cli_mlm_model = explicit_cli_models["mlm"]
+        if explicit_cli_models["llm"]:
+            config.cli_llm_model = explicit_cli_models["llm"]
+        if explicit_cli_models["api_base"]:
+            config.cli_api_base = explicit_cli_models["api_base"]
+
     return config
 
 
@@ -219,11 +408,19 @@ def save_config(config: SGConfig, project_root: Path) -> None:
     sg_dir.mkdir(parents=True, exist_ok=True)
 
     data = {
+        # Active agent
+        "agent": config.agent,
         # v4 tiers
         "slm_model": config.slm_model,
         "mlm_model": config.mlm_model,
         "llm_model": config.llm_model,
+        "cli_provider": config.cli_provider,
+        "cli_slm_model": config.cli_slm_model,
+        "cli_mlm_model": config.cli_mlm_model,
+        "cli_llm_model": config.cli_llm_model,
+        "cli_api_base": config.cli_api_base,
         "enable_slm_fallback": config.enable_slm_fallback,
+        "enable_dynamic_model_routing": config.enable_dynamic_model_routing,
         "tier_routing": config.tier_routing,
         # Legacy
         "default_model": config.default_model,
