@@ -1,191 +1,225 @@
 # SkeletonGraph
 
-**Token-minimal, constraint-preserving context assembly for AI coding agents.**
+**Graph-based context assembly and model routing for AI coding workflows.**
 
-SkeletonGraph indexes your codebase into a lightweight skeleton graph — function signatures, dependency edges, and structural metadata — then assembles the minimum context an LLM needs to complete a coding task. No full-file reading, no wasted tokens.
+SkeletonGraph indexes a codebase into function-level structure, dependency
+edges, tests, and project metadata. It then builds compact context packets for
+IDE agents and CLI model runs, so the model starts with the code it most likely
+needs instead of burning turns on broad exploration.
 
-## Key Metrics
+SkeletonGraph has two product surfaces:
 
-| Metric | Value | Method |
-|--------|-------|--------|
-| Avg Token Reduction | **Nx** | tiktoken BPE vs native agent retrieval (SWE-bench Verified) |
-| File Localization F1 | **0.XX** | Against human-authored PR patches |
-| MRR | **0.XX** | First relevant file rank |
-| Session Savings | **40-60%** | Cross-turn deduplication after turn 1 |
-| Resolve Time | **0.8ms** | Graph-based retrieval (zero LLM cost) |
+- **SG IDE**: MCP context server for Cursor, Claude Code, Copilot, Codex,
+  Antigravity, Windsurf, and other agentic IDEs.
+- **SG CLI**: terminal pipeline for route, prepare, dry-run, provider execution,
+  and cost-aware model selection.
 
-> Benchmark numbers pending — run `skeletongraph eval-benchmark` on SWE-bench Verified to generate.
+## Why SkeletonGraph
 
-## How It Works
+Most coding agents spend expensive turns discovering the repo:
 
-```
-Source Files → Tree-sitter AST → Skeleton Table + Dependency Graph
-                                         ↓
-User Prompt → Intent Analysis → Entity Resolution → Graph Expansion
-                                         ↓
-                              Budget Allocation → 4-Zone Assembly → LLM Context
+```text
+search -> read file -> read neighbor -> read tests -> realize the target
 ```
 
-**4-Zone Attention-Aware Assembly:**
-- **Zone 1 (Primacy)**: Scoped instructions & hierarchical constraints (`.cursorrules` aware).
-- **Zone 3 (Structure)**: Skeletons & signatures of periphery dependencies.
-- **Zone 2 (Recency)**: Full source of high-impact target code bodies.
-- **Zone 4 (Prompt)**: User instructions at the boundary of attention.
+SkeletonGraph moves that work into a deterministic graph pipeline:
 
-### Production Features
-- **Cross-Turn Session Memory**: Tracks what the LLM has already "seen". If a function was sent in Turn 1, it is replaced with a 1-line signature in Turn 2, saving 90% of those tokens.
-- **Hierarchical Constraints**: Load global rules from project root and specific rules from nested directories.
-- **Attention Heatmap**: Visual terminal feedback showing how your token budget is allocated across the 4 zones.
-- **PR Blast-Radius**: Analyze `git diff` to identify and include only the functions affected by a logic change.
+```text
+prompt -> classify task -> find target nodes -> expand graph -> assemble packet
+```
 
-## Quick Start
+The goal is not only lower token cost. The useful product outcomes are:
+
+- fewer exploratory file reads
+- faster first useful answer
+- better target/test/blast-radius context
+- transparent routing reasons
+- lower model overkill for routine tasks
+- reusable packets for IDEs, CLIs, and other agents
+
+## Install
 
 ```bash
-# Install & Auto-detect IDEs (Claude Code, Cursor, Windsurf, Copilot, etc)
 pip install skeletongraph
-skeletongraph install
-
-# Index your project
-skeletongraph build
-
-# Query with visual attention heatmap
-skeletongraph query "fix validate_token in middleware.py"
-
-# Track token savings & cost reduction
-skeletongraph stats
-
-# Perform PR/Diff blast-radius review
-git diff | skeletongraph review
 ```
 
-## Evaluation & Benchmarking
-
-SkeletonGraph includes a **research-grade evaluation framework** for comparing AI coding agent performance before and after using the graph. Unlike other tools that use character-based estimates (`len//4`), we use **tiktoken BPE** for exact token counting and validate against **SWE-bench Verified** (the industry gold standard).
-
-### Quick Eval (Per-Project)
-
-Run the same prompt with SG ON and OFF, then compare:
+For provider-backed CLI execution:
 
 ```bash
-# Antigravity
-skeletongraph eval --agent antigravity --native-file ./native_chat.txt --project flask
-
-# Cursor
-skeletongraph eval --agent cursor --native-file ./native_chat.txt --project flask
-
-# Claude Code
-skeletongraph eval --agent claude_code --native-file ./native_export.md --project flask
-
-# Copilot
-skeletongraph eval --agent copilot --native-file ./native_export.json --project flask
-
-# Codex
-skeletongraph eval --agent codex --project flask
+pip install "skeletongraph[llm]"
 ```
 
-### Research Benchmark (SWE-bench Verified)
+## Quick Start: SG IDE
 
-Evaluate against 500 human-validated GitHub issues with automated scoring:
+Use this path when you already work inside Cursor, Claude Code, Copilot, Codex,
+Antigravity, or another MCP-capable coding environment.
 
 ```bash
-# List available repos
-skeletongraph eval-list
-
-# Run benchmark
-skeletongraph eval-benchmark \
-  --dataset swe-bench-verified \
-  --traces-dir ./benchmark_traces \
-  --output ./benchmark_results
+cd your-project
+sg init
+sg build
+sg doctor
 ```
 
-**Metrics produced:**
-- **Token Efficiency**: retrieval reduction ratio, total conversation cost, API savings
-- **Retrieval Quality**: Precision, Recall, F1, MRR, Hit@k (against human PR patches)
-- **Execution Quality**: test pass rate, regression rate (via pytest)
-- **Operational Efficiency**: turns, tool calls, redundant file views
+`sg init` writes the MCP config and the agent instruction file for the selected
+IDE. SG IDE does not require an API key. Your IDE subscription/model still does
+the reasoning and editing; SkeletonGraph supplies the context.
 
-All metrics include mean, std deviation, and 95% confidence intervals.
+Supported IDE setup targets include:
 
-See [EVALUATION_WORKFLOW.md](EVALUATION_WORKFLOW.md) for detailed step-by-step instructions per agent.
-See [evaluation_dataset.md](evaluation_dataset.md) for dataset specifications.
+| IDE | Integration | Model switching |
+| --- | --- | --- |
+| Cursor | MCP + rules | manual in IDE |
+| Claude Code | MCP + `CLAUDE.md` | `/model` command |
+| GitHub Copilot | MCP + instructions | manual in IDE |
+| Codex | MCP + `AGENTS.md` | manual in agent |
+| Antigravity | MCP + rules | manual in IDE |
+| Windsurf | MCP + rules | manual in IDE |
 
-### How We Compare
+## Quick Start: SG CLI
 
-| Aspect | code-review-graph | graphify | **SkeletonGraph** |
-|:---|:---|:---|:---|
-| Token counter | `len(text)//4` (est.) | `len(text)//4` (est.) | **tiktoken BPE (exact)** |
-| Baseline | Static file reads | Raw file dump | **Real agent sessions** |
-| Ground truth | Self-referential graph | None | **SWE-bench human PRs** |
-| Sample size | 13 commits | 1 folder | **30+ verified tasks** |
-| Quality metric | None | None | **P/R/F1/MRR + test pass** |
-| Confidence | None | None | **95% CI with std dev** |
+Use this path when you want a terminal-first context and model-routing pipeline.
+
+```bash
+cd your-project
+sg build
+sg route "fix the auth token validation bug"
+sg prepare "fix the auth token validation bug" --out .skeletongraph/context.md
+sg run "fix the auth token validation bug" --dry-run
+```
+
+`sg route`, `sg prepare`, and `sg run --dry-run` do not need an API key.
+
+To call a provider:
+
+```bash
+sg config --cli-provider anthropic
+$env:ANTHROPIC_API_KEY = "..."
+sg run "fix the auth token validation bug" --execute
+```
+
+To test locally without a paid provider key:
+
+```bash
+ollama pull qwen3-coder:latest
+ollama serve
+sg config --cli-provider local
+sg run "fix the auth token validation bug" --dry-run
+sg run "fix the auth token validation bug" --execute
+```
+
+Local execution is intended for cheap pipeline testing. Use provider models for
+quality benchmarks unless the benchmark is specifically for local models.
+
+## Model Routing
+
+SkeletonGraph separates IDE-facing model labels from CLI provider model names.
+
+For IDEs, model tiers are recommendations:
+
+| Tier | Typical use |
+| --- | --- |
+| SLM | docs, explanations, simple lookup |
+| MLM | normal coding, debugging, tests, review |
+| LLM | architecture, broad migrations, low-confidence tasks |
+
+For CLI execution, SkeletonGraph can route to provider model names:
+
+```bash
+sg config --cli-provider anthropic
+sg config --cli-provider openai
+sg config --cli-provider google
+sg config --cli-provider local
+```
+
+Dynamic routing uses task mode, confidence, candidate count, token size, and
+complexity. Code-changing work keeps an MLM floor by default so cost savings do
+not come from making weak models edit code unsafely.
+
+## CLI Reference
+
+| Command | Purpose | API key |
+| --- | --- | --- |
+| `sg init` | configure project, IDE, MCP, rules | no |
+| `sg build` | index source files and graph | no |
+| `sg doctor` | check index, routing, provider readiness | no |
+| `sg route "task"` | show task mode, tier, model route | no |
+| `sg prepare "task"` | create/copy context packet | no |
+| `sg run "task" --dry-run` | plan routed execution | no |
+| `sg run "task" --execute` | call configured provider/local model | provider or local |
+| `sg query "task"` | inspect assembled context | no |
+| `sg config` | configure IDE and CLI models | no |
+| `sg status` | show index status | no |
+| `sg metrics` | show logged metrics | no |
+
+Provider output from `sg run --execute` is written under:
+
+```text
+.skeletongraph/runs/
+```
+
+Automatic patch application is intentionally not enabled yet. The next release
+milestone is safe diff parsing, approval gates, `sg verify`, and `sg runs`.
 
 ## Python API
 
 ```python
-from skeletongraph import build_index, resolve_context, assemble_context
-from pathlib import Path
+from skeletongraph.engine import SGEngine
 
-# Build index
-store = build_index(Path("."))
+engine = SGEngine(project_root=".")
+result = engine.query("fix the content-length bug", delivery="cli")
 
-# Query
-result = resolve_context("fix the authentication bug", store)
-context = assemble_context(result, store, Path("."))
-
-print(f"Tokens: {context.token_count}")
-print(f"Confidence: {context.confidence}")
-print(context.text)
+print(result.context_text)
+print(result.query_mode)
+print(result.model_tier)
+print(result.recommended_model)
+print(result.routing_reason)
 ```
-
-## MCP Server (IDE Integration)
-
-Add to your Claude Code / Cursor MCP config:
-
-```json
-{
-  "mcpServers": {
-    "skeletongraph": {
-      "command": "python",
-      "args": ["-m", "skeletongraph.cli.main", "serve", "--path", "."]
-    }
-  }
-}
-```
-
-Available tools:
-- `query_context` — Prompt → assembled context
-- `expand_function` — Page-fault: get full source of a function
-- `show_graph` — Dependency graph around a function
-- `search_index` — Keyword search across all functions
-- `index_status` — Index health check
 
 ## Architecture
 
-```
+```text
 src/skeletongraph/
-├── parser/           # Tree-sitter AST extraction (Python, TypeScript)
-├── graph/            # Dependency graph + search structures
-├── storage/          # Persistence to .skeletongraph/
-├── retrieval/        # Intent → candidates pipeline
-├── assembly/         # Context construction (4-zone)
-├── llm/              # LLM integration
-├── server/           # MCP server
-├── eval/             # Evaluation framework
-│   ├── datasets/     # SWE-bench, custom dataset loaders
-│   ├── benchmarks/   # Token efficiency, retrieval quality
-│   ├── parsers/      # Antigravity, Cursor, Claude, Copilot, Codex
-│   ├── scorer.py     # P/R/F1/MRR/Hit@k + aggregate stats
-│   └── schema.py     # AgentTrace schema
-├── cli/              # CLI commands
-└── build.py          # Build orchestrator
+  parser/       AST extraction
+  graph/        dependency graph and ranking
+  storage/      .skeletongraph persistence
+  retrieval/    classification, resolution, model routing
+  assembly/     context packet construction
+  session/      memory and dedup
+  server/       MCP server
+  llm/          LiteLLM wrapper for optional CLI execution
+  cli/          Click commands
+  engine.py     unified query pipeline
 ```
 
-## Supported Languages
+## Evaluation
 
-- Python (.py)
-- TypeScript (.ts, .tsx)
-- JavaScript (.js, .jsx, .mjs, .cjs)
+The architecture/pipeline blueprint and evaluation plan are in:
+
+```text
+docs/blueprint.md
+docs/evaluation.md
+```
+
+SkeletonGraph should be evaluated on both quality and cost:
+
+- target recall and packet completeness
+- missed tests/callers
+- first useful answer latency
+- file reads after SG context
+- pass rate
+- cost per passing task
+- dynamic routing overkill/underpower rate
+- IDE compliance with SG-first context usage
+
+Cost savings are only meaningful when reported with pass rate.
+
+## Current Status
+
+SG IDE is a context pipeline. SG CLI now has route, prepare, dry-run execution,
+provider/local configuration, and provider output logging. The remaining work
+before a stronger CLI release is safe patch apply, verification, run history,
+and benchmark-backed routing results.
 
 ## License
 

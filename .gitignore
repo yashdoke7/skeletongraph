@@ -40,7 +40,6 @@ htmlcov/
 benchmarks/repos/
 
 # Internal planning docs (not public)
-docs/blueprint.md
 docs/plan.md
 docs/*.local.md
 EVALUATION_WORKFLOW.md
@@ -49,9 +48,4 @@ SWE_BENCH_WORKFLOW.md
 
 test_mcp_tools.py
 
-eval_logs/
-
-docs/evaluation_publication/
-
-benchmark_traces/
-benchmark_results/
+eval/runs
