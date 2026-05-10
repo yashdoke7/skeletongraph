@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -34,9 +36,21 @@ console = Console()
 @click.argument("prompt")
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--mode-override", "-m", default=None, help="Override mode: fast|standard|deep|planning|review")
+@click.option("--out", "-o", default=None, help="Write context to this file instead of .skeletongraph/context.md")
+@click.option("--copy", "copy_to_clipboard", is_flag=True, help="Copy the prepared context to the clipboard")
+@click.option("--for", "for_agent", default=None, help="Target workflow hint: aider|copilot|web|claude|codex")
 @click.option("--shadows/--no-shadows", default=True, help="Write shadow files for Claude Code")
 @click.option("--quiet", "-q", is_flag=True, help="Minimal output")
-def prepare(prompt: str, path: str, mode_override: Optional[str], shadows: bool, quiet: bool):
+def prepare(
+    prompt: str,
+    path: str,
+    mode_override: Optional[str],
+    out: Optional[str],
+    copy_to_clipboard: bool,
+    for_agent: Optional[str],
+    shadows: bool,
+    quiet: bool,
+):
     """Run the full v3 pipeline and write context files."""
     project_root = Path(path).resolve()
     sg_dir = project_root / ".skeletongraph"
@@ -47,96 +61,81 @@ def prepare(prompt: str, path: str, mode_override: Optional[str], shadows: bool,
 
     t0 = time.perf_counter()
 
-    # Late imports to avoid slow startup
-    from ..storage.local import load_index
-    from ..retrieval.resolver import resolve_context
-    from ..retrieval.classifier import classify_query, ContextMode
-    from ..assembly.prompt_builder import assemble
+    from ..engine import SGEngine
+    from ..retrieval.resolver import Tier
 
-    # 1. Load index
-    store = load_index(project_root)
-    if not store:
-        console.print("[red]Error:[/red] Failed to load index.")
+    engine = SGEngine(project_root=project_root)
+    result = engine.query(prompt, delivery="cli")
+    config = engine.get_config()
+    if not result.success:
+        console.print(f"[red]Error:[/red] {result.error}")
         sys.exit(1)
 
-    # 2. Resolve targets
-    result = resolve_context(prompt, store)
-
-    # 3. Classify query
-    n_files = len({c.skeleton.file_path for c in result.candidates})
-    target_fqns = {c.skeleton.fqn for c in result.candidates}
-    classification = classify_query(
-        intent=result.intent,
-        confidence=result.confidence_score,
-        target_fqns=target_fqns,
-        n_files_involved=n_files,
-    )
-
-    # 4. Apply mode override if specified
-    if mode_override:
-        try:
-            classification.mode = ContextMode(mode_override.lower())
-        except ValueError:
-            console.print(f"[yellow]Warning:[/yellow] Unknown mode '{mode_override}', using auto-selected.")
-
-    # 5. Assemble
-    assembled = assemble(
-        classification=classification,
-        resolver_result=result,
-        store=store,
-        project_root=project_root,
-    )
+    targets = [
+        c.skeleton.fqn for c in result.candidates
+        if c.tier == Tier.TIER1
+    ]
 
     duration_ms = int((time.perf_counter() - t0) * 1000)
 
     # 6. Write context.md
-    context_path = sg_dir / "context.md"
-    context_path.write_text(assembled.text, encoding="utf-8")
+    context_path = Path(out).resolve() if out else sg_dir / "context.md"
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(result.context_text, encoding="utf-8")
+
+    copied = False
+    if copy_to_clipboard:
+        copied = _copy_text_to_clipboard(result.context_text)
 
     # 7. Write shadow files (for Claude Code)
-    if shadows and assembled.mode not in (ContextMode.PLANNING, ContextMode.REVIEW, ContextMode.PASS_THROUGH):
+    if shadows and targets:
         shadow_dir = sg_dir / "shadows"
         shadow_dir.mkdir(parents=True, exist_ok=True)
-        _write_shadow_files(assembled, store, project_root, shadow_dir)
+        _write_shadow_files(result.candidates, project_root, shadow_dir)
 
     # 8. Log to hit_log.jsonl
     eval_dir = sg_dir / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
-    _log_hit(eval_dir / "hit_log.jsonl", prompt, assembled, duration_ms)
+    _log_hit(eval_dir / "hit_log.jsonl", prompt, result, targets, duration_ms)
 
     # Output
     if quiet:
-        console.print(f"{assembled.mode.value} {assembled.token_count}tok {duration_ms}ms")
+        console.print(
+            f"{result.query_mode.value} {result.context_tokens}tok "
+            f"{result.model_tier.value} {duration_ms}ms"
+        )
     else:
         table = Table(show_header=False, border_style="dim")
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
-        table.add_row("Mode", assembled.mode.value.upper())
-        table.add_row("Query Type", assembled.query_type.value)
-        table.add_row("Confidence", assembled.confidence_level)
-        table.add_row("Tokens", str(assembled.token_count))
-        table.add_row("Targets", ", ".join(assembled.targets[:3]) or "none")
-        table.add_row("Layers", ", ".join(assembled.layers_loaded))
-        table.add_row("Modifiers", ", ".join(assembled.modifiers) or "none")
-        if assembled.extended_thinking:
-            table.add_row("Extended Thinking", "✓ recommended")
-        if assembled.reduction_ratio > 0:
-            table.add_row("Reduction", f"{assembled.reduction_ratio}x")
+        table.add_row("Mode", result.query_mode.value.upper())
+        table.add_row("Model Tier", result.model_tier.value)
+        table.add_row("CLI Provider", config.cli_provider)
+        table.add_row("Recommended Model", result.recommended_model or "default")
+        table.add_row("Confidence", result.confidence)
+        table.add_row("Complexity", f"{result.complexity_score:.2f}")
+        table.add_row("Routing", result.routing_reason or "static")
+        table.add_row("Tokens", str(result.context_tokens))
+        table.add_row("Targets", ", ".join(targets[:3]) or "none")
+        table.add_row("Pipeline", result.pipeline_path)
+        if for_agent:
+            table.add_row("Prepared For", for_agent)
+        if result.slm_used:
+            table.add_row("SLM Entities", str(result.slm_entities_found))
         table.add_row("Time", f"{duration_ms}ms")
-        if assembled.warning:
-            table.add_row("Warning", assembled.warning)
         console.print(Panel(table, title="sg prepare", border_style="blue"))
-        console.print(f"  → {context_path}")
+        console.print(f"  -> {context_path}")
+        if copy_to_clipboard:
+            status = "copied" if copied else "clipboard unavailable"
+            console.print(f"  -> {status}")
 
 
-def _write_shadow_files(assembled, store, project_root: Path, shadow_dir: Path):
+def _write_shadow_files(candidates, project_root: Path, shadow_dir: Path):
     """Write pre-assembled file views as shadow files."""
     # Collect unique file paths from targets
     files_seen = set()
-    for fqn in assembled.targets:
-        sk = store.skeleton_table.get(fqn)
-        if not sk:
-            continue
+    for candidate in candidates:
+        sk = candidate.skeleton
         fp = sk.file_path
         if fp in files_seen:
             continue
@@ -157,20 +156,22 @@ def _write_shadow_files(assembled, store, project_root: Path, shadow_dir: Path):
             pass
 
 
-def _log_hit(log_path: Path, prompt: str, assembled, duration_ms: int):
+def _log_hit(log_path: Path, prompt: str, result, targets: list[str], duration_ms: int):
     """Append a hit log entry for passive evaluation."""
     entry = {
         "timestamp": time.time(),
         "prompt": prompt[:200],
-        "mode": assembled.mode.value,
-        "query_type": assembled.query_type.value,
-        "confidence": assembled.confidence_level,
-        "tokens": assembled.token_count,
-        "targets": assembled.targets[:5],
-        "layers": assembled.layers_loaded,
-        "modifiers": assembled.modifiers,
-        "extended_thinking": assembled.extended_thinking,
-        "reduction_ratio": assembled.reduction_ratio,
+        "mode": result.query_mode.value,
+        "model_tier": result.model_tier.value,
+        "base_model_tier": result.base_model_tier.value,
+        "complexity_score": result.complexity_score,
+        "routing_reason": result.routing_reason,
+        "confidence": result.confidence,
+        "tokens": result.context_tokens,
+        "targets": targets[:5],
+        "pipeline_path": result.pipeline_path,
+        "slm_used": result.slm_used,
+        "slm_entities_found": result.slm_entities_found,
         "duration_ms": duration_ms,
     }
     try:
@@ -178,3 +179,30 @@ def _log_hit(log_path: Path, prompt: str, assembled, duration_ms: int):
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass
+
+
+def _copy_text_to_clipboard(text: str) -> bool:
+    """Copy text using common platform clipboard commands."""
+    commands = [
+        ("clip", []),
+        ("pbcopy", []),
+        ("xclip", ["-selection", "clipboard"]),
+        ("xsel", ["--clipboard", "--input"]),
+    ]
+    for executable, args in commands:
+        if not shutil.which(executable):
+            continue
+        try:
+            proc = subprocess.run(
+                [executable, *args],
+                input=text,
+                text=True,
+                encoding="utf-8",
+                check=False,
+                capture_output=True,
+            )
+            if proc.returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False

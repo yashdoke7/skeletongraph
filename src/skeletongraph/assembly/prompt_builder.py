@@ -215,7 +215,7 @@ def assemble(
                 for affected_fqn, dist in sorted(blast.items(), key=lambda x: x[1])[:10]:
                     affected_sk = store.skeleton_table.get(affected_fqn)
                     if affected_sk:
-                        lines.append(f"  {'→' * dist} {_short_name(affected_fqn)} ({affected_sk.file_display})")
+                        lines.append(f"  {'>' * dist} {_short_name(affected_fqn)} ({affected_sk.file_display})")
                 l4_blast_parts.append("\n".join(lines))
 
         layers_loaded.append("task_code")
