@@ -164,7 +164,7 @@ def main():
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2))
+    args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     # Print summary
     n = f"{native_score}" + (f" ({'✓' if native_test else '✗' if native_test is False else '?'})" if native_test is not None else "")

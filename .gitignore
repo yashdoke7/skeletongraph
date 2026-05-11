@@ -38,6 +38,10 @@ htmlcov/
 
 # Benchmark repos (too large to commit)
 benchmarks/repos/
+eval/runs/
+eval/results/
+eval/results.json
+eval/dataset/
 
 # Internal planning docs (not public)
 docs/plan.md
@@ -48,4 +52,7 @@ SWE_BENCH_WORKFLOW.md
 
 test_mcp_tools.py
 
-eval/runs
+# Local scratch and one-off migration helpers
+scratch_*.py
+scratch_select.py
+eval/scripts/patch_setup.py

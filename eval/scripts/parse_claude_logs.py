@@ -212,7 +212,7 @@ def main():
         result["flags"].append("NO_HITLOG: SG may not have fired")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2))
+    args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     # Print summary
     ratio = reduction.get("reduction_ratio")

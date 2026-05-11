@@ -255,7 +255,7 @@ def main():
 
     out = args.eval_dir / "results" / "benchmark_report.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(report)
+    out.write_text(report, encoding="utf-8")
     print(f"\nReport: {out}")
     print("\n" + "="*50)
     print(report[:2000] + ("..." if len(report) > 2000 else ""))

@@ -4,12 +4,12 @@
 
 The goal is **maximum reach** with the first published results. We target platforms and audiences in this order:
 
-### Wave 1: First Publish (Week 1) — Claude Code + `sg prompt` (UI LLMs)
-**Why Claude Code first:**
-- Only fully automated agent (bash script runs everything)
-- Tier A: per-turn token breakdown, tool call analysis, exact reduction ratios
-- Highest data quality → strongest claims
-- Claude Code is the most popular agentic coding CLI → largest audience
+### Wave 1: First Publish (Week 1) — GitHub Copilot + `sg prompt` (UI LLMs)
+**Why GitHub Copilot first:**
+- The most widely used IDE coding agent by a massive margin.
+- Copilot agent logs provide session total tokens, MCP tool usage, and LLM turns.
+- Proves integration with the largest developer ecosystem (VS Code + Copilot).
+- MCP support allows for clean, native-feeling integration.
 
 **Why `sg prompt` (UI LLMs) alongside:**
 - Zero integration friction — user pastes context into Claude.ai/ChatGPT/Gemini
@@ -20,12 +20,11 @@ The goal is **maximum reach** with the first published results. We target platfo
 **Wave 1 Metrics to publish:**
 | Metric | Source | How |
 |:---|:---|:---|
-| Token reduction ratio (>5x) | `hit_log.jsonl` + Claude JSON | Auto-extracted |
-| Correctness (test pass rate) | `native_test_result.txt` vs `sg_test_result.txt` | Auto-extracted |
+| Token reduction ratio (>5x) | `hit_log.jsonl` + Copilot Agent Log | Manually extracted from log |
+| Correctness (test pass rate) | `native.patch` vs `sg.patch` against tests | Automated comparison |
 | Mode routing accuracy | Expected vs actual mode in hit_log | Auto-compared |
 | Modifier firing accuracy | Expected modifier in TASKS vs hit_log | Auto-compared |
-| Cost savings ($/query) | Token counts × model pricing | Calculated |
-| Hit rate (zero additional tool calls) | `tool_calls_after` in hit_log | Auto-extracted |
+| Hit rate (zero additional tool calls) | `tool_calls_after` in hit_log / Copilot log | Cross-referenced |
 
 **Wave 1 Task subset (15 tasks):**
 - 5 CODE_FIX/FAST (single function, prove FAST mode works)
@@ -35,17 +34,12 @@ The goal is **maximum reach** with the first published results. We target platfo
 
 ### Wave 2: IDE Agents (Week 2-3) — Cursor + Codex
 **Why Cursor second:**
-- Largest IDE coding agent user base after Claude Code
-- MCP support is mature → clean integration story
-- Tier B: session-level token totals (not per-turn, but still quantitative)
+- Largest independent IDE coding agent user base.
+- Tier B: session-level token totals from UI.
 
 **Why Codex third:**
 - Growing rapidly, CLI-based → semi-automatable
 - `AGENTS.md` integration is simple and demonstrable
-- Tier B: session totals available
-
-**Wave 2 Metrics:**
-Same as Wave 1 but with the caveat that token counts are session-level, not per-turn.
 
 **Wave 2 Task subset (10 tasks per agent):**
 - 3 CODE_FIX/FAST
@@ -53,13 +47,9 @@ Same as Wave 1 but with the caveat that token counts are session-level, not per-
 - 2 PLANNING
 - 2 REFACTOR (prove BLAST_FIRST modifier)
 
-### Wave 3: Remaining Agents (Week 3-4) — Antigravity + Copilot
-**Antigravity (Tier C):** Qualitative + partial metrics. Good for demonstrating breadth of support.
-**Copilot (Tier D):** Correctness only (Copilot doesn't expose token counts). Shows SG works everywhere but can't make quantitative token claims.
-
-**What NOT to publish for Tier C/D:**
-- Do NOT claim specific reduction ratios without measured tokens
-- DO claim: "SG integration maintained correctness while reducing agent exploration"
+### Wave 3: Remaining Agents (Week 3-4) — Claude Code + Antigravity
+**Claude Code (Tier A):** Fully automated, per-turn metrics. Scheduled for later when access is procured.
+**Antigravity (Tier C):** Qualitative + partial metrics.
 
 ---
 
@@ -127,14 +117,14 @@ eval/runs/<agent>/<task_id>/RUNBOOK.md
 
 ## What Each Agent Provides (and Doesn't)
 
-| Capability | Claude Code | Cursor | Codex | Antigravity | Copilot | UI LLM |
+| Capability | Copilot | Cursor | Codex | Antigravity | Claude Code | UI LLM |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Per-turn token breakdown | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Session total tokens | ✅ | ✅ | ✅ | Partial | ❌ | Manual |
-| Tool call breakdown | ✅ | ✅ | Partial | ❌ | ❌ | N/A |
+| Per-turn token breakdown | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Session total tokens | ✅ | ✅ | ✅ | Partial | ✅ | Manual |
+| Tool call breakdown | ✅ | ✅ | Partial | ❌ | ✅ | N/A |
 | MCP tool invocation log | ✅ | ✅ | ✅ | ✅ | ✅ | N/A |
 | `hit_log.jsonl` (SG metrics) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Automated runner | ✅ | ❌ | Partial | ❌ | ❌ | ❌ |
+| Automated runner | ❌ | ❌ | Partial | ❌ | ✅ | ❌ |
 | Patch export (git diff) | ✅ | ✅ | ✅ | ✅ | ✅ | Manual |
 | Test execution | ✅ | ✅ | ✅ | ✅ | ✅ | Manual |
 
@@ -142,16 +132,9 @@ eval/runs/<agent>/<task_id>/RUNBOOK.md
 
 **YES, but publish separately.**
 
-- **Wave 1 paper/post:** Claude Code + UI LLM (full quantitative claims)
-- **Wave 2 addendum:** Cursor + Codex (session-level quantitative)
-- **Wave 3 appendix:** Antigravity + Copilot (correctness + qualitative + SG-side metrics from hit_log)
-
-For Antigravity/Copilot, we can still report:
-- SG tokens delivered (from `hit_log.jsonl` — our side)
-- Mode routing accuracy (from `hit_log.jsonl`)
-- Modifier firing accuracy (from `hit_log.jsonl`)
-- Correctness (test pass/fail)
-- We just can't report the *native* token consumption or exact reduction ratio.
+- **Wave 1 paper/post:** GitHub Copilot + UI LLM (session-level quantitative + mass appeal)
+- **Wave 2 addendum:** Cursor + Codex
+- **Wave 3 appendix:** Claude Code (when available) + Antigravity
 
 ---
 
@@ -160,9 +143,9 @@ For Antigravity/Copilot, we can still report:
 | Day | Action |
 |:---|:---|
 | Day 1 | Download SWE-bench dataset, populate commit hashes, run `setup_workspaces.py` |
-| Day 1 | Verify pipeline on 1 task (`requests-1142`) with Claude Code |
-| Day 2-3 | Run all 15 Wave 1 tasks on Claude Code (automated) |
+| Day 1 | Verify pipeline on 1 task (`requests-1142`) with Copilot |
+| Day 2-3 | Run all 15 Wave 1 tasks on Copilot (manual UI runs) |
 | Day 3 | Run 5 `sg prompt` tasks manually on Claude.ai |
 | Day 4 | Aggregate results, write Wave 1 publish post |
 | Day 5-7 | Run Wave 2 (Cursor + Codex, 10 tasks each, manual) |
-| Day 8+ | Wave 3 (Antigravity + Copilot) if Wave 1 results are strong |
+| Day 8+ | Wave 3 (Claude Code + Antigravity) |
