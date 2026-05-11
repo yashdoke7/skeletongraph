@@ -22,13 +22,15 @@ from rich.prompt import Prompt
 console = Console()
 
 
-def run_init(project_root: Path, store=None, non_interactive: bool = False) -> bool:
+def run_init(project_root: Path, store=None, non_interactive: bool = False,
+             agent: str | None = None) -> bool:
     """Run init logic. Called from sg build on first run.
 
     Args:
         project_root: Project root directory.
         store: Optional IndexStore (if build already ran).
         non_interactive: If True, skip prompts and use defaults.
+        agent: IDE agent preset name (cursor, copilot, codex, claude_code, antigravity).
 
     Returns:
         True if project.md was created/updated.
@@ -93,6 +95,57 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False) -> b
         if not decisions.strip():
             decisions = "[Add key architectural decisions here]"
 
+    # ── Agent Selection ───────────────────────────────────────────────
+    from ..config import AGENT_PRESETS, save_config, SGConfig
+
+    selected_agent = agent  # from --agent flag
+
+    if not selected_agent and not non_interactive:
+        console.print()
+        agent_names = list(AGENT_PRESETS.keys())
+        console.print("[bold cyan]Which IDE are you using?[/bold cyan]")
+        for i, name in enumerate(agent_names, 1):
+            preset = AGENT_PRESETS[name]
+            console.print(
+                f"  [cyan]{i}[/cyan]. {name}  "
+                f"[dim](SLM: {preset['slm']}, MLM: {preset['mlm']}, LLM: {preset['llm']})[/dim]"
+            )
+        choice = Prompt.ask(
+            "\n[bold]Select agent[/bold] (number or name)",
+            default="1",
+        )
+        # Accept number or name
+        if choice.isdigit() and 1 <= int(choice) <= len(agent_names):
+            selected_agent = agent_names[int(choice) - 1]
+        elif choice in agent_names:
+            selected_agent = choice
+        else:
+            console.print(f"[yellow]Unknown agent '{choice}', defaulting to cursor[/yellow]")
+            selected_agent = "cursor"
+
+    if not selected_agent:
+        selected_agent = "cursor"  # default for non-interactive
+
+    preset = AGENT_PRESETS[selected_agent]
+    config = SGConfig.from_agent_preset(selected_agent)
+    config.agent = selected_agent
+
+    if not non_interactive:
+        console.print(f"\n[green]✓[/green] Agent: [bold]{selected_agent}[/bold]")
+        console.print(f"  SLM: {preset['slm']}  MLM: {preset['mlm']}  LLM: {preset['llm']}")
+        hint = preset.get('select_model_hint', '')
+        if hint:
+            console.print(f"\n  [yellow]⚠ ACTION REQUIRED:[/yellow] {hint}")
+
+        # Show available models
+        models = preset.get('models_available', [])
+        if models:
+            console.print(f"\n  [dim]All {selected_agent} models: {', '.join(models[:10])}")
+            if len(models) > 10:
+                console.print(f"  ... and {len(models) - 10} more[/dim]")
+            else:
+                console.print("[/dim]", end="")
+
     # Detect stack
     stack = _detect_stack(project_root)
     project_type = _detect_project_type(project_root)
@@ -120,9 +173,20 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False) -> b
     arch_md = _generate_architecture(project_root, store)
     arch_path.write_text(arch_md, encoding="utf-8")
 
+    # ── Save agent config ────────────────────────────────────────────
+    save_config(config, project_root)
+
     if not non_interactive:
         console.print(f"\n[green]✓[/green] Created {project_path.relative_to(project_root)}")
         console.print(f"[green]✓[/green] Created {arch_path.relative_to(project_root)}")
+        console.print(f"[green]✓[/green] Saved config to .skeletongraph/config.json")
+
+        # Auto-run sg install for the selected agent
+        console.print(f"\n[cyan]Auto-configuring {selected_agent} integration...[/cyan]")
+        from .main import _install_platform, _write_mcp_config
+        _install_platform(selected_agent if selected_agent != "copilot" else "copilot",
+                          project_root)
+        _write_mcp_config(project_root, platforms=[selected_agent])
 
     return True
 
@@ -255,7 +319,11 @@ def _generate_architecture(project_root: Path, store=None) -> str:
 @click.command("init")
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts, use defaults")
-def init_command(path: str, non_interactive: bool):
+@click.option("--agent", "-a", type=click.Choice(
+    ["cursor", "copilot", "codex", "claude_code", "antigravity"],
+    case_sensitive=False,
+), default=None, help="IDE agent preset")
+def init_command(path: str, non_interactive: bool, agent: str):
     """Initialize project.md and architecture.md for SkeletonGraph."""
     project_root = Path(path).resolve()
 
@@ -263,4 +331,4 @@ def init_command(path: str, non_interactive: bool):
         console.print(f"[red]Error:[/red] {project_root} is not a directory")
         sys.exit(1)
 
-    run_init(project_root, non_interactive=non_interactive)
+    run_init(project_root, non_interactive=non_interactive, agent=agent)
