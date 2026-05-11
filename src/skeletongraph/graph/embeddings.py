@@ -46,11 +46,17 @@ def _get_model():
 
 
 def is_available() -> bool:
-    """Check if embedding support is available (sentence-transformers installed)."""
+    """Check if embedding support is importable.
+
+    Optional dependencies can be installed but unusable (for example a
+    transformers/Keras mismatch). Treat any import failure as "not available" so
+    deterministic indexing never breaks because optional embeddings are broken.
+    """
     try:
         import sentence_transformers  # noqa: F401
         return True
-    except ImportError:
+    except Exception as e:
+        logger.debug("sentence-transformers unavailable. Embeddings disabled: %s", e)
         return False
 
 

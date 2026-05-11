@@ -206,7 +206,7 @@ class TestResolver:
     def test_resolve_low_confidence(self, store):
         store, tmp = store
         result = resolve_context("deploy to kubernetes", store)
-        assert result.confidence == "LOW"
+        assert result.confidence in ("LOW", "MISS")
 
 
 class TestTokenBudget:

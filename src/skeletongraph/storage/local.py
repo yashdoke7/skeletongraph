@@ -188,6 +188,9 @@ def save_index(store: IndexStore, project_root: Path) -> None:
     # hashes.json
     store.dirty_tracker.save(sg_dir)
 
+    # pagerank.json (v5 structural importance scores)
+    _atomic_write_json(sg_dir / "pagerank.json", store.pagerank_scores)
+
     # embeddings.npz (optional — only if embeddings were built)
     if store.embeddings and not store.embeddings.is_empty:
         store.embeddings.save(sg_dir)
@@ -263,6 +266,16 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
     # Load embeddings (optional)
     embeddings = EmbeddingStore.load(sg_dir)
 
+    # Load PageRank scores
+    pagerank_scores: Dict[str, float] = {}
+    pagerank_path = sg_dir / "pagerank.json"
+    if pagerank_path.exists():
+        try:
+            raw_scores = json.loads(pagerank_path.read_text(encoding="utf-8"))
+            pagerank_scores = {str(k): float(v) for k, v in raw_scores.items()}
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pagerank_scores = {}
+
     return IndexStore(
         meta=meta,
         file_skeletons=file_skeletons,
@@ -274,6 +287,7 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
         dirty_tracker=dirty_tracker,
         embeddings=embeddings,
         constraints=constraints,
+        pagerank_scores=pagerank_scores,
     )
 
 

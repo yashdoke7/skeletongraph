@@ -169,7 +169,7 @@ def build_file_map(file_skeletons: Dict, file_summaries: Optional[Dict[str, str]
     """
     lines = []
     for file_path, sks in sorted(file_skeletons.items()):
-        n_funcs = len(sks) if isinstance(sks, list) else 0
+        n_funcs = len(sks) if isinstance(sks, list) else len(getattr(sks, "all_skeletons", []))
         desc = ""
         if file_summaries and file_path in file_summaries:
             desc = f" — {file_summaries[file_path]}"

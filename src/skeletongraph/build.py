@@ -326,7 +326,7 @@ def build_index(
                 logging.getLogger(__name__).warning(f"Auto-summarize failed: {e}")
 
     # Embeddings (optional — requires sentence-transformers)
-    if embeddings_available():
+    if cfg.enable_embeddings and embeddings_available():
         emb_entries = []
         for fqn, sk in store.skeleton_table.items():
             body_kw = []
@@ -470,7 +470,22 @@ def update_index(
 
             # Update inverted index
             name = sk.fqn.split("::")[-1] if "::" in sk.fqn else sk.fqn
-            store.inverted_index.add(sk.fqn, name, sk.signature, docstring=sk.docstring)
+            body_kw = []
+            fp = project_root / sk.file_path
+            if fp.exists():
+                try:
+                    lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+                    body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+                    body_kw = extract_body_keywords(body)
+                except Exception:
+                    pass
+            store.inverted_index.add(
+                sk.fqn,
+                name,
+                sk.signature,
+                docstring=sk.docstring,
+                body_keywords=body_kw,
+            )
 
         store.dirty_tracker.update_file(
             file_path,
@@ -534,6 +549,15 @@ def update_index(
             store.bloom.add(short)
             if "." in short:
                 store.bloom.add(short.split(".")[-1])
+
+    # Recompute PageRank after graph changes.
+    edges_list = []
+    for src, edge_list in store.graph.forward.items():
+        for edge in edge_list:
+            edges_list.append((src, edge.target_fqn))
+    store.pagerank_scores = (
+        compute_pagerank(edges_list, nodes=all_fqns) if edges_list else {}
+    )
 
     # Reload constraints
     store.constraints = ConstraintStore()

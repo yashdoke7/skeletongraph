@@ -68,6 +68,7 @@ def resolve_context(
     max_depth: int = 2,
     session: Optional[Session] = None,
     top_n: int = 50,
+    seed_fqns: Optional[Set[str]] = None,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
@@ -76,6 +77,8 @@ def resolve_context(
         store: The loaded index.
         max_depth: Maximum graph traversal depth.
         session: Optional session for cross-turn deduplication.
+        top_n: Max number of candidates to return.
+        seed_fqns: Optional exact or fuzzy FQN seeds supplied by the caller.
 
     Returns:
         ResolverResult with ranked candidates and confidence.
@@ -95,6 +98,9 @@ def resolve_context(
 
     # Step 2: Resolve entities to FQNs
     target_fqns = _resolve_entities(intent, store)
+    explicit_seed_fqns = _resolve_seed_fqns(seed_fqns or set(), store)
+    if explicit_seed_fqns:
+        target_fqns.update(explicit_seed_fqns)
 
     # Track how targets were found (for confidence scoring)
     match_source = "none"
@@ -305,7 +311,7 @@ def resolve_context(
         confidence=confidence,
         confidence_reason=confidence_reason,
         confidence_score=conf_score,
-        entities_matched=[e.value for e in intent.entities],
+        entities_matched=[e.value for e in intent.entities] + sorted(explicit_seed_fqns),
         session_dedup_count=session_dedup_count,
     )
 
@@ -346,6 +352,40 @@ def _resolve_entities(intent: Intent, store: IndexStore) -> Set[str]:
                         fqns.add(sk.fqn)
 
     return fqns
+
+
+def _resolve_seed_fqns(seed_fqns: Set[str], store: IndexStore) -> Set[str]:
+    """Resolve caller-supplied entity seeds to indexed FQNs.
+
+    Agents can pass exact FQNs from a function index, while humans and wrappers
+    often pass partial names. Keep the matching conservative and let ranking
+    handle any remaining ambiguity.
+    """
+    resolved: Set[str] = set()
+    for raw in seed_fqns:
+        seed = raw.strip()
+        if not seed:
+            continue
+
+        if seed in store.skeleton_table:
+            resolved.add(seed)
+            continue
+
+        alt_seed = f"src/{seed}" if not seed.startswith("src/") else seed.replace("src/", "", 1)
+        if alt_seed in store.skeleton_table:
+            resolved.add(alt_seed)
+            continue
+
+        seed_name = seed.split("::")[-1]
+        matches: List[str] = []
+        for fqn in store.skeleton_table:
+            short = fqn.split("::")[-1] if "::" in fqn else fqn
+            if fqn.endswith(seed) or short == seed_name or short.endswith(f".{seed_name}"):
+                matches.append(fqn)
+
+        resolved.update(sorted(matches, key=len)[:5])
+
+    return resolved
 
 
 def _auto_include_constructors(
