@@ -7,6 +7,11 @@ edges, tests, and project metadata. It then builds compact context packets for
 IDE agents and CLI model runs, so the model starts with the code it most likely
 needs instead of burning turns on broad exploration.
 
+SkeletonGraph is wrapper-first: it can return a full packet or expose a
+retrieval index (AST skeletons + summaries + graph neighbors + memory) so the
+IDE agent can choose targets. For CLI, a cheap retrieval planner can propose
+targets before a heavier model does the actual reasoning and edits.
+
 SkeletonGraph has two product surfaces:
 
 - **SG IDE**: MCP context server for Cursor, Claude Code, Copilot, Codex,
@@ -25,7 +30,7 @@ search -> read file -> read neighbor -> read tests -> realize the target
 SkeletonGraph moves that work into a deterministic graph pipeline:
 
 ```text
-prompt -> classify task -> find target nodes -> expand graph -> assemble packet
+prompt -> (optional) retrieval planner -> classify task -> find target nodes -> expand graph -> assemble packet
 ```
 
 The goal is not only lower token cost. The useful product outcomes are:
@@ -63,7 +68,8 @@ sg doctor
 
 `sg init` writes the MCP config and the agent instruction file for the selected
 IDE. SG IDE does not require an API key. Your IDE subscription/model still does
-the reasoning and editing; SkeletonGraph supplies the context.
+the reasoning and editing; SkeletonGraph supplies the packet or retrieval
+signals for efficient target selection.
 
 Supported IDE setup targets include:
 
@@ -134,7 +140,8 @@ sg config --cli-provider local
 
 Dynamic routing uses task mode, confidence, candidate count, token size, and
 complexity. Code-changing work keeps an MLM floor by default so cost savings do
-not come from making weak models edit code unsafely.
+not come from making weak models edit code unsafely. Retrieval planning can use
+small models to propose targets over AST/summaries before the heavy model runs.
 
 ## CLI Reference
 

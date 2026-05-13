@@ -1,7 +1,7 @@
 # SkeletonGraph Blueprint
 
 Status: canonical project handoff and implementation blueprint.
-Last updated: 2026-05-08.
+Last updated: 2026-05-13.
 Authorial stance: this is the project as I would explain it to a new engineer
 or a new model before asking them to implement anything.
 
@@ -12,9 +12,10 @@ whether SkeletonGraph is actually useful.
 
 ## 1. One-Sentence Summary
 
-SkeletonGraph is a graph-based context engine for coding agents that turns a
-user prompt and a codebase into a small, high-signal context packet, then
-optionally routes CLI execution to the cheapest sufficient model tier.
+SkeletonGraph is a wrapper-first context engine for coding agents that builds
+an AST- and summary-backed code graph, uses a cheap retrieval planner to pick
+targets, assembles a compact context packet, and optionally routes CLI
+execution to the cheapest sufficient model tier.
 
 ## 2. The Core Idea
 
@@ -39,12 +40,14 @@ results, instructions, file contents, and schema overhead. Even if grep or file
 read is computationally cheap, it is not token-free once it becomes part of the
 next model input.
 
-SkeletonGraph moves the repo-discovery step into deterministic code:
+SkeletonGraph moves the repo-discovery step into deterministic code (with an
+optional cheap retrieval planner on top of the index):
 
 ```text
 user prompt
+  -> (optional) small-model retrieval planner over AST/summaries/index
   -> classify task shape
-  -> find likely target functions/files
+  -> resolve likely target functions/files
   -> walk dependency/test/blast-radius graph
   -> assemble a bounded context packet
   -> expose route, confidence, and reasons
@@ -59,6 +62,27 @@ The point is not only "save tokens." The real goal is:
 - cheaper model choice when possible
 - repeatable routing and packet logs
 - workflows that work in IDEs and terminals
+
+## 2.1 Planned Concept Shifts (2026)
+
+These are plan-level changes (product concept), not just implementation tasks:
+
+- Wrapper-first remains the main path: SG supplies context/routing, while edits
+  and apply are owned by the IDE/CLI agent the user already trusts.
+- IDE uses retrieval tools first: the agent can ask for a retrieval index and
+  pick targets, or directly request a packet. SG does not depend on mid-chat
+  model switching in IDEs.
+- CLI becomes planner-first: a small model can produce a retrieval plan from
+  the function index, and SG assembles a deterministic packet before any heavy
+  model execution.
+- Docstrings/comments are the primary summaries. Stored summaries are fallback
+  only when docstrings/comments are missing or stale.
+- Error-only follow-up packets allow the next run to carry only the failure
+  signals instead of re-sending the full context packet.
+- Auto rebuild after completion (IDE report_completion or CLI run) keeps the
+  index and summaries fresh without manual rebuild calls.
+- No BM25 default. Optional keyword fallback can exist, but it is not a core
+  path and should stay off unless explicitly enabled.
 
 ## 3. What SkeletonGraph Is and Is Not
 
@@ -87,6 +111,14 @@ SG IDE = context infrastructure for the agent the user already pays for
 SG CLI = route + prepare + optional execute + verify + logs
 ```
 
+A second, equally valid mental model is:
+
+```text
+SG IDE = either a full packet OR a retrieval index the IDE agent uses to pick
+         targets (AST/summaries/graph/memory exposed via tools)
+SG CLI = cheap retrieval planning + deterministic assembly + heavy model
+```
+
 ## 4. Product Surfaces
 
 ## 4.1 SG IDE
@@ -112,11 +144,58 @@ sg build
 IDE starts MCP server
 agent sees compact SG instructions
 agent calls SG before broad exploration
-SG returns target/test/blast-radius packet
+SG returns either:
+  - a target/test/blast-radius packet (query_context), or
+  - a retrieval index (get_retrieval_context) so the IDE agent can choose
+    targets using AST/summaries/graph/memory signals
 agent edits normally
 agent reports completion or hook records it
 SG updates memory
 ```
+
+### 4.1.1 IDE Core Pipeline (planned)
+
+In-depth flow (what is stored, retrieved, and passed):
+
+```text
+build:
+  sg build
+    -> parse AST/skeletons
+    -> graph edges
+    -> summaries (docstrings first)
+    -> hashes + staleness
+    -> store in .skeletongraph/*
+
+retrieve:
+  IDE agent -> get_retrieval_context(prompt)
+    -> project_summary
+    -> file_map
+    -> function_index (docstring-first summaries)
+    -> session_context
+  IDE agent chooses targets (or skips and calls query_context)
+
+assemble:
+  IDE agent -> query_context(prompt or entities)
+    -> SG resolves targets
+    -> graph expansion (callers/callees/tests/blast radius)
+    -> attach diagnostics + memory
+    -> assemble packet + metadata
+
+execute:
+  IDE agent edits code
+  if docstring summary is wrong for a modified function, update the docstring
+  IDE agent -> report_completion(files_modified)
+    -> SG updates index + summaries + session memory
+```
+
+Stored artifacts used by IDE:
+- skeletons, graph, hashes, summaries, pagerank (when present)
+- session memory and diagnostics
+- run/query logs
+
+Data passed to the IDE agent:
+- retrieval index (project_summary, file_map, function_index, session_context)
+- context packet text + metadata (mode, confidence, route, reasons)
 
 The important product constraint:
 
@@ -135,6 +214,10 @@ SG IDE must win even when the active model does not change. That means packet
 quality, MCP discipline, and small rules matter more than runtime model
 switching.
 
+SG IDE can also win by making retrieval cheaper for the agent: it can expose
+AST skeletons, summaries, graph neighbors, and session memory so the IDE agent
+can decide what to open without broad search.
+
 ## 4.2 SG CLI
 
 SG CLI is the explicit model-routing surface.
@@ -152,8 +235,9 @@ terminal agent, or a web UI. SG CLI should give them:
 The SG CLI promise:
 
 ```text
-Route the task, pack the repo context, use the cheapest sufficient model, and
-record what happened.
+Route the task, pack the repo context, use a cheap retrieval planner plus
+deterministic assembly, call the cheapest sufficient heavy model, and record
+what happened.
 ```
 
 The intended CLI workflow:
@@ -168,6 +252,50 @@ sg run "fix auth token validation" --execute
 sg verify
 sg runs
 ```
+
+### 4.2.1 CLI Core Pipeline (planned)
+
+In-depth flow (what is stored, retrieved, and passed):
+
+```text
+build:
+  sg build
+    -> parse AST/skeletons
+    -> graph edges
+    -> summaries (docstrings first)
+    -> hashes + staleness
+    -> store in .skeletongraph/*
+
+plan (turn 1):
+  sg run --plan-first (or sg prepare/route)
+    -> optional small-model planner reads function_index + file_map
+    -> planner proposes targets + constraints + warnings
+
+assemble (turn 2):
+  SG assembles packet deterministically from plan
+    -> graph expansion (callers/callees/tests/blast radius)
+    -> attach diagnostics + memory
+    -> packet + route + confidence
+
+execute:
+  sg run --execute
+    -> provider call with packet
+    -> if error, store error-only followup in session
+    -> record run log
+
+refresh:
+  after completion, SG updates index + summaries + session memory
+```
+
+Stored artifacts used by CLI:
+- same core index as IDE
+- run logs and query logs
+- error-followup cache in session
+
+Data passed to the CLI user or provider:
+- plan output (targets, filters, rationale)
+- context packet text + metadata (mode, confidence, route, reasons)
+- execution output and diagnostics
 
 Current implementation has the first six pieces partly working. `sg verify`,
 `sg runs`, and safe patch application are still planned.
@@ -436,7 +564,9 @@ Language-specific tools can be plugged in where they provide better semantics:
 Retrieval should not be graph-only. The target direction is hybrid:
 
 ```text
-lexical search + graph traversal + optional embeddings + session memory
+graph traversal + planner over function index + session memory
+optional keyword fallback (off by default)
+optional embeddings after eval data exists
 ```
 
 Claude's point about vague prompts is correct. "Users get logged out" may not
@@ -540,7 +670,7 @@ discover files
   -> parse source files
   -> extract functions/classes/symbols
   -> extract imports/calls/edges
-  -> build inverted index
+  -> build lightweight keyword index (optional fallback)
   -> compute graph metadata
   -> persist .skeletongraph artifacts
 ```
@@ -583,7 +713,8 @@ Why each artifact exists:
 - `hashes.json`: stale detection and incremental rebuild.
 - `bloom.bin`: quick membership/changed checks.
 - `summaries.json`: optional semantic summaries; useful but not correctness
-  critical.
+  critical. Use docstrings/comments first; fallback to summaries when missing,
+  then refresh incrementally.
 - `pagerank.json`: structural importance; helps when many candidates match.
 - `vocabulary.json`: project-specific terms and noise words.
 - `learned_edges.json`: memory of files/functions changed together.
@@ -597,6 +728,7 @@ The ideal query path:
 
 ```text
 input prompt
+  -> (optional) small-model retrieval plan over AST/summaries/index
   -> classify task mode/shape
   -> find seed candidates
   -> score candidates
@@ -605,6 +737,32 @@ input prompt
   -> assemble packet under budget
   -> calculate confidence and route
   -> return result object
+```
+
+### 9.1 IDE Query Flow (planned)
+
+```text
+IDE prompt
+  -> (optional) get_retrieval_context
+     returns: function_index + file_map + session_context
+  -> IDE agent selects targets
+  -> query_context(prompt or entities)
+  -> SG resolves targets and expands graph
+  -> SG assembles packet + route + confidence
+  -> IDE agent edits
+  -> report_completion triggers rebuild + summary refresh
+```
+
+### 9.2 CLI Query Flow (planned)
+
+```text
+CLI prompt
+  -> optional small-model plan over function_index
+  -> deterministic assembly + graph expansion
+  -> packet + route + confidence
+  -> execute or export
+  -> error-only followup stored on failure
+  -> auto rebuild after completion
 ```
 
 Current query path is partly legacy but usable. It has:
@@ -802,7 +960,7 @@ SG IDE should output:
 - recommended tier
 - short explanation
 - confidence
-- packet
+- packet (or retrieval index for agent-driven target selection)
 
 SG IDE should not require:
 
@@ -830,6 +988,10 @@ Current behavior:
 - `--auto-model` is the default dynamic route behavior.
 - API keys are never stored.
 - local provider uses an Ollama/LiteLLM-compatible base URL.
+
+Retrieval planning uses a small model when enabled; it reads the AST-based
+function index and summaries to propose targets, then SG assembles the packet
+deterministically before the heavy model executes.
 
 No API key is needed for:
 
@@ -1076,6 +1238,14 @@ Memory types:
    - type/lint errors
    - commands run
 
+5. Error-only follow-up packets
+  - when a tool or command fails, store the error separately
+  - next run can send only the error instead of the full packet
+
+Auto rebuild after completion:
+- IDE: report_completion triggers index refresh if enabled
+- CLI: after execute, SG can refresh index and summaries
+
 Why memory matters:
 
 - reduces repeated context
@@ -1099,6 +1269,9 @@ Current/desired tools:
 - `expand_context`
 - `report_completion`
 - maybe `index_status`
+
+IDE agents can call `get_retrieval_context` first to choose targets using AST
+and summary signals, or call `query_context` to get a full packet directly.
 
 Rules should be short. Long rules become prompt overhead and are often ignored.
 
