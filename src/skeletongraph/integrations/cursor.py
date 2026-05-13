@@ -20,5 +20,8 @@ This project uses SkeletonGraph for intelligent, graph-powered context assembly.
 3. Use `expand_context` only if you need full bodies of specific functions that were returned as skeletons.
 4. Use your normal grep/read_file tools for any additional detail — do NOT call other SG tools.
 5. If `query_context` confidence is LOW, fall back to your native search tools.
+6. If a provided summary/docstring is inaccurate for a function you modify,
+   update its docstring/comment to match actual behavior.
+7. After finishing, call report_completion with files_modified.
 """.strip()
 

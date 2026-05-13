@@ -72,6 +72,10 @@ sg_expand(target="file.py::ClassName.method_name", include_neighbors=true)
 2. Trust SG's confidence: if MISS, explore freely via file reading
 3. Use sg_expand for back-routing instead of reading entire files
 4. Do NOT re-read files that SG already provided in context
+5. If a provided summary/docstring is inaccurate for a function you modify,
+    update its docstring/comment to match actual behavior
+6. After finishing, call report_completion with files_modified so SG can
+    refresh the index and summaries
 '''
 
 CURSOR_RULES = '''# .cursorrules — SkeletonGraph v4 Integration
@@ -98,6 +102,11 @@ If you need more detail on a function mentioned in context:
 - Use `sg_expand` instead of reading the entire file
 - This costs zero tokens and returns just the function body
 
+## Comment Hygiene
+If a provided summary/docstring is inaccurate for a function you modify,
+update its docstring/comment to match actual behavior.
+After finishing, call report_completion with files_modified.
+
 ## Cost Transparency  
 Each response includes cost data:
 - `slm_cost_usd`: how much the SLM retrieval cost
@@ -121,6 +130,11 @@ SG recommends model tiers per query:
 - `slm` tier → use `--profile fast` (mini models)
 - `mlm` tier → use default profile
 - `llm` tier → use `--profile deep` (strongest model)
+
+## Comment Hygiene
+If a provided summary/docstring is inaccurate for a function you modify,
+update its docstring/comment to match actual behavior.
+After finishing, call report_completion with files_modified.
 
 ## Available MCP Tools
 - `query_context(prompt)`: Main entry — returns assembled context
