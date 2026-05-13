@@ -21,6 +21,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import List
 
 import click
 from rich.console import Console
@@ -36,6 +37,17 @@ console = Console()
 def app():
     """SkeletonGraph - Token-minimal context assembly for AI coding agents."""
     pass
+
+
+@app.command(name="init")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--agent", "-a", default=None, help="IDE agent preset name")
+@click.option("--non-interactive", is_flag=True, help="Skip prompts and use defaults")
+def init_cmd(path: str, agent: str | None, non_interactive: bool):
+    """Initialize project metadata and IDE integration files."""
+    project_root = Path(path).resolve()
+    from .init import run_init
+    run_init(project_root, non_interactive=non_interactive, agent=agent)
 
 
 @app.command()
@@ -400,6 +412,10 @@ def route(prompt: str, path: str, json_output: bool):
 @click.option("--response-out", default=None, help="Write provider output to this file")
 @click.option("--max-output-tokens", type=int, default=2000, help="Max provider output tokens")
 @click.option("--temperature", type=float, default=0.1, help="Provider sampling temperature")
+@click.option("--plan-first/--no-plan-first", default=True, help="Use SLM tool planning before execution")
+@click.option("--plan-max-tokens", type=int, default=800, help="Max tokens per planned expansion")
+@click.option("--error-followup/--no-error-followup", default=False, help="Use last error-only follow-up instead of full context")
+@click.option("--update-comments/--no-update-comments", default=True, help="Ask the model to update docstrings/comments if needed")
 @click.option("--json-output", is_flag=True, help="Print machine-readable JSON")
 def run(
     prompt: str,
@@ -412,6 +428,10 @@ def run(
     response_out: str | None,
     max_output_tokens: int,
     temperature: float,
+    plan_first: bool,
+    plan_max_tokens: int,
+    error_followup: bool,
+    update_comments: bool,
     json_output: bool,
 ):
     """Plan or execute an SG CLI model-routed task."""
@@ -425,15 +445,19 @@ def run(
     from ..llm.provider import LLMConfig, complete
     from ..retrieval.resolver import Tier
     from .run_exec import (
-        RUN_SYSTEM_PROMPT,
+        ErrorFollowup,
         RunPlan,
         build_execution_prompt,
+        build_system_prompt,
+        clear_error_followup,
         default_run_paths,
+        load_error_followup,
+        save_error_followup,
         write_run_log,
     )
 
     engine = SGEngine(project_root=project_root)
-    result = engine.query(prompt, delivery="cli")
+    result = engine.query(prompt, delivery="cli", force_slm=plan_first)
     config = engine.get_config()
 
     if not result.success:
@@ -448,6 +472,77 @@ def run(
         if c.tier == Tier.TIER1
     ]
 
+    plan_payload = None
+    extra_context = ""
+    expansion_errors: List[str] = []
+    if plan_first:
+        try:
+            from ..retrieval.slm_extractor import slm_plan_tools
+            store = engine.get_store()
+            session = engine.get_session()
+            session_fqns = session.get_last_target_fqns() if session else set()
+            sg_dir = project_root / ".skeletongraph"
+
+            slm_plan = slm_plan_tools(
+                prompt=prompt,
+                store=store,
+                sg_dir=sg_dir,
+                config=config,
+                session_fqns=session_fqns,
+            )
+
+            plan_payload = {
+                "success": slm_plan.success,
+                "reasoning": slm_plan.reasoning,
+                "tool_calls": [
+                    {
+                        "type": c.call_type,
+                        "target": c.target,
+                        "start_line": c.start_line,
+                        "end_line": c.end_line,
+                        "include_neighbors": c.include_neighbors,
+                    }
+                    for c in slm_plan.tool_calls
+                ],
+                "input_tokens": slm_plan.input_tokens,
+                "output_tokens": slm_plan.output_tokens,
+                "cost": slm_plan.cost_usd,
+                "latency_ms": slm_plan.latency_ms,
+                "error": slm_plan.error,
+            }
+
+            if slm_plan.success and slm_plan.tool_calls:
+                expansions = []
+                for call in slm_plan.tool_calls:
+                    try:
+                        expanded = engine.expand(
+                            target=call.target,
+                            expand_type=call.call_type,
+                            start_line=call.start_line or None,
+                            end_line=call.end_line or None,
+                            include_neighbors=call.include_neighbors,
+                            max_tokens=plan_max_tokens,
+                        )
+                        expansions.append(f"### {call.call_type} {call.target}\n{expanded}")
+                        if expanded.startswith(("File not found:", "Function not found:", "Unknown expand type:")):
+                            expansion_errors.append(f"{call.call_type} {call.target}: {expanded}")
+                    except Exception as e:
+                        expansions.append(f"### {call.call_type} {call.target}\n[ERROR] {e}")
+                        expansion_errors.append(f"{call.call_type} {call.target}: {e}")
+                if expansions:
+                    extra_context = "## Planned Expansions\n" + "\n\n".join(expansions)
+        except Exception:
+            plan_payload = {
+                "success": False,
+                "reasoning": "",
+                "tool_calls": [],
+                "error": "planner_failed",
+            }
+
+    if extra_context:
+        result.context_text = f"{result.context_text}\n\n---\n\n{extra_context}"
+        result.context_tokens = len(result.context_text) // 4
+
     if out:
         out_path = Path(out).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -457,6 +552,21 @@ def run(
 
     default_response_path, run_log_path = default_run_paths(project_root)
     response_path = Path(response_out).resolve() if response_out else default_response_path
+
+    error_followup_saved = False
+    if expansion_errors:
+        save_error_followup(
+            project_root,
+            ErrorFollowup(
+                prompt=prompt,
+                timestamp=time.time(),
+                source="planner_expand",
+                errors=expansion_errors,
+                context_path=str(out_path) if out_path else None,
+                run_log_path=str(run_log_path),
+            ),
+        )
+        error_followup_saved = True
 
     plan = RunPlan(
         prompt=prompt,
@@ -482,11 +592,18 @@ def run(
         "execute": execute,
         "routing_mode": routing_mode,
         "auto_model": auto_model or tier is None,
+        "plan_first": plan_first,
+        "plan_max_tokens": plan_max_tokens,
+        "error_followup_used": bool(error_followup_data),
+        "error_followup_saved": error_followup_saved,
         **plan.to_dict(),
         "response_path": str(response_path),
         "run_log_path": str(run_log_path),
         "next_status": "dry-run only; pass --execute to call the provider",
     }
+
+    if plan_payload is not None:
+        payload["planner"] = plan_payload
 
     provider_response = None
     if execute:
@@ -497,16 +614,34 @@ def run(
 
         exec_prompt = build_execution_prompt(prompt, result.context_text)
         started = time.time()
-        resp = complete(
-            exec_prompt,
-            system=RUN_SYSTEM_PROMPT,
-            config=LLMConfig(
-                model=selected_model,
-                temperature=temperature,
-                max_tokens=max_output_tokens,
-                api_base=config.get_cli_api_base(),
-            ),
-        )
+        try:
+            resp = complete(
+                exec_prompt,
+                system=build_system_prompt(update_comments=update_comments),
+                config=LLMConfig(
+                    model=selected_model,
+                    temperature=temperature,
+                    max_tokens=max_output_tokens,
+                    api_base=config.get_cli_api_base(),
+                ),
+            )
+        except Exception as e:
+            save_error_followup(
+                project_root,
+                ErrorFollowup(
+                    prompt=prompt,
+                    timestamp=time.time(),
+                    source="provider_execute",
+                    errors=[str(e)],
+                    context_path=str(out_path) if out_path else None,
+                    run_log_path=str(run_log_path),
+                ),
+            )
+            payload["next_status"] = f"provider error: {e}"
+            write_run_log(run_log_path, {"timestamp": time.time(), **payload})
+            console.print(f"[red]Provider error:[/red] {e}")
+            return
+
         elapsed_ms = int((time.time() - started) * 1000)
         response_path.parent.mkdir(parents=True, exist_ok=True)
         response_path.write_text(resp.text, encoding="utf-8")
@@ -520,6 +655,17 @@ def run(
         }
         payload["provider_response"] = provider_response
         payload["next_status"] = "provider output written; inspect/apply patch manually"
+
+        if not expansion_errors:
+            clear_error_followup(project_root)
+
+        if config.auto_rebuild_on_completion:
+            try:
+                from ..build import update_index
+                update_index(project_root)
+                payload["index_updated"] = True
+            except Exception:
+                payload["index_updated"] = False
 
     write_run_log(run_log_path, {
         "timestamp": time.time(),
@@ -545,6 +691,16 @@ def run(
     table.add_row("Confidence", payload["confidence"])
     table.add_row("Complexity", f"{payload['complexity_score']:.2f}")
     table.add_row("Targets", ", ".join(targets[:3]) or "none")
+    if payload.get("error_followup_used"):
+        table.add_row("Error followup", "used")
+    if payload.get("error_followup_saved"):
+        table.add_row("Error followup", "saved")
+    if update_comments:
+        table.add_row("Update comments", "yes")
+    if plan_payload is not None:
+        tool_count = len(plan_payload.get("tool_calls", []))
+        status = "ok" if plan_payload.get("success") else "failed"
+        table.add_row("Planner", f"{status} ({tool_count} calls)")
     if out_path:
         table.add_row("Packet path", str(out_path))
     table.add_row("Response path", str(response_path))
@@ -1282,7 +1438,7 @@ def pack_context(prompt: str, path: str):
     
     with console.status("[dim]Building context map...[/dim]"):
         store = build_index(project_root)
-        result = resolve_context(prompt, store)
+        result = resolve_context(prompt, store, enable_keyword_fallback=False)
         assembled = assemble_context(result, store, project_root)
     
     # Payload for clipboard
@@ -1465,6 +1621,11 @@ def watch(path: str):
     project_root = Path(path).resolve()
     from ..daemon import start_daemon
     start_daemon(project_root)
+
+
+# Register additional commands from submodules
+from .prepare import prepare as _prepare_command
+app.add_command(_prepare_command)
 
 
 # -- Evaluation commands ------------------------------------------------

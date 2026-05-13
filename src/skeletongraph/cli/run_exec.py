@@ -18,6 +18,18 @@ Do not wrap the patch in Markdown fences.
 Do not invent files, tests, or APIs not present in the context.
 """
 
+_UPDATE_COMMENTS_PROMPT = (
+    "If you modify functions with missing or vague docstrings/comments, "
+    "update or add a one-line docstring or brief comment describing behavior."
+)
+
+
+def build_system_prompt(update_comments: bool = False) -> str:
+    """Build the system prompt for a run."""
+    if update_comments:
+        return f"{RUN_SYSTEM_PROMPT}\n{_UPDATE_COMMENTS_PROMPT}"
+    return RUN_SYSTEM_PROMPT
+
 
 @dataclass
 class RunPlan:
@@ -57,6 +69,68 @@ class RunPlan:
             "targets": self.targets,
             "packet_path": self.packet_path,
         }
+
+
+@dataclass
+class ErrorFollowup:
+    """Minimal error-only follow-up packet for next run."""
+    prompt: str
+    timestamp: float
+    source: str
+    errors: List[str]
+    context_path: Optional[str] = None
+    run_log_path: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "prompt": self.prompt,
+            "timestamp": self.timestamp,
+            "source": self.source,
+            "errors": self.errors,
+            "context_path": self.context_path,
+            "run_log_path": self.run_log_path,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ErrorFollowup":
+        return cls(
+            prompt=data.get("prompt", ""),
+            timestamp=float(data.get("timestamp", 0.0)),
+            source=data.get("source", ""),
+            errors=list(data.get("errors", [])),
+            context_path=data.get("context_path"),
+            run_log_path=data.get("run_log_path"),
+        )
+
+
+def _error_followup_path(project_root: Path) -> Path:
+    return project_root / ".skeletongraph" / "session" / "error_followup.json"
+
+
+def save_error_followup(project_root: Path, followup: ErrorFollowup) -> None:
+    """Persist error-only follow-up info for next run."""
+    path = _error_followup_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(followup.to_dict(), indent=2), encoding="utf-8")
+
+
+def load_error_followup(project_root: Path) -> Optional[ErrorFollowup]:
+    """Load the most recent error-only follow-up, if any."""
+    path = _error_followup_path(project_root)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return ErrorFollowup.from_dict(data)
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+
+
+def clear_error_followup(project_root: Path) -> None:
+    """Remove stored error-only follow-up info."""
+    path = _error_followup_path(project_root)
+    if path.exists():
+        path.unlink()
 
 
 def build_execution_prompt(user_prompt: str, context_text: str) -> str:

@@ -217,6 +217,9 @@ class SGConfig:
     slm_timeout: int = 3                    # Seconds before SLM call times out
     slm_max_fqns_in_prompt: int = 200       # Max FQN names sent to SLM for matching
 
+    # ── Retrieval Fallbacks ─────────────────────────────────────────────
+    enable_keyword_fallback: bool = False   # Allow inverted-index fallback when no entity matches
+
     # ── Tier Routing ───────────────────────────────────────────────────
     enable_dynamic_model_routing: bool = True  # Adjust tier by complexity/confidence
     tier_routing: Dict[str, str] = field(
@@ -237,6 +240,10 @@ class SGConfig:
     parallel_parse: bool = False            # Reserved for future concurrent parsing
     auto_summarize: bool = False            # Summarize on build?
     auto_summarize_on_build: bool = True    # Auto-summarize top 20% by PageRank
+    auto_summarize_on_update: bool = True   # Auto-summarize changed functions on update
+    summary_use_docstrings: bool = True     # Seed summaries from docstrings/comments
+    summary_min_words: int = 6              # Minimum word count to accept a summary
+    auto_rebuild_on_completion: bool = True # Rebuild index after task completion
     enable_embeddings: bool = True          # Use embeddings if available
 
     # ── Session ────────────────────────────────────────────────────────
@@ -354,6 +361,19 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
         "SG_SERVER_PORT": ("server_port", int),
         "SG_BATCH_SIZE": ("summary_batch_size", int),
         "SG_MCP_PROFILE": ("mcp_tool_profile", str),
+        "SG_SUMMARY_MIN_WORDS": ("summary_min_words", int),
+        "SG_SUMMARY_DOCSTRINGS": (
+            "summary_use_docstrings",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
+        "SG_AUTO_SUMMARY_UPDATE": (
+            "auto_summarize_on_update",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
+        "SG_AUTO_REBUILD": (
+            "auto_rebuild_on_completion",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
         # v4 tier overrides
         "SG_SLM_MODEL": ("slm_model", str),
         "SG_MLM_MODEL": ("mlm_model", str),
@@ -368,6 +388,10 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
         "SG_ENABLE_SLM": ("enable_slm_fallback", lambda v: v.lower() in ("1", "true", "yes")),
+        "SG_ENABLE_KEYWORD_FALLBACK": (
+            "enable_keyword_fallback",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
         "SG_SHOW_COST": ("show_cost_per_query", lambda v: v.lower() in ("1", "true", "yes")),
     }
 
@@ -420,6 +444,7 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "cli_llm_model": config.cli_llm_model,
         "cli_api_base": config.cli_api_base,
         "enable_slm_fallback": config.enable_slm_fallback,
+        "enable_keyword_fallback": config.enable_keyword_fallback,
         "enable_dynamic_model_routing": config.enable_dynamic_model_routing,
         "tier_routing": config.tier_routing,
         # Legacy
@@ -440,6 +465,10 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "mcp_tool_profile": config.mcp_tool_profile,
         # Build
         "auto_summarize_on_build": config.auto_summarize_on_build,
+        "auto_summarize_on_update": config.auto_summarize_on_update,
+        "summary_use_docstrings": config.summary_use_docstrings,
+        "summary_min_words": config.summary_min_words,
+        "auto_rebuild_on_completion": config.auto_rebuild_on_completion,
         "enable_embeddings": config.enable_embeddings,
     }
     config_file = sg_dir / "config.json"

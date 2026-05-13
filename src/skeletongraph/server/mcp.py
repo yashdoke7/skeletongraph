@@ -33,6 +33,7 @@ from ..metrics.metrics_logger import MetricsLogger
 from ..eval.token_counter import measure_text_tokens
 from ..engine import SGEngine, PipelineResult
 from ..session.memory import SessionMemory
+from ..storage.staleness import check_staleness
 
 
 # ── Tool Registry ──────────────────────────────────────────────────────
@@ -269,6 +270,15 @@ def query_context_tool(params: dict) -> dict:
                     "latency_ms": round(result.phase1_ms, 1),
                 }
 
+            # Stale-index warning: alert agent before it uses outdated context
+            try:
+                staleness = check_staleness(store, root)
+                if staleness.stale:
+                    response["warning"] = staleness.warning_text()
+                    response["staleness"] = staleness.to_dict()
+            except Exception:
+                pass  # Best-effort, never block the pipeline
+
             return response
 
         except Exception as e:
@@ -279,7 +289,13 @@ def query_context_tool(params: dict) -> dict:
     _update_session_memory(prompt)
 
     # ── v3 pipeline fallback ─────────────────────────────────────────
-    result = resolve_context(prompt, store, session=session, top_n=top_n)
+    result = resolve_context(
+        prompt,
+        store,
+        session=session,
+        top_n=top_n,
+        enable_keyword_fallback=config.enable_keyword_fallback if config else False,
+    )
 
     try:
         from ..retrieval.classifier import classify_query
@@ -565,6 +581,16 @@ def report_completion_tool(params: dict) -> dict:
             files_modified=files_modified,
         )
 
+        index_updated = False
+        config: SGConfig = _server_state.get("config")
+        if config and config.auto_rebuild_on_completion:
+            try:
+                from ..build import update_index
+                update_index(_get_root())
+                index_updated = True
+            except Exception:
+                index_updated = False
+
         if session_end:
             mem.compress()
 
@@ -573,6 +599,7 @@ def report_completion_tool(params: dict) -> dict:
             "session_turn": mem._turn_count,
             "files_tracked": len(mem._files_this_session),
             "compressed": session_end,
+            "index_updated": index_updated,
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}

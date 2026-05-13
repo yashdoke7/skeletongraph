@@ -166,6 +166,7 @@ class SGEngine:
         max_retries: int = 2,
         exclude_fqns: Optional[Set[str]] = None,
         delivery: str = "ide",
+        force_slm: bool = False,
     ) -> PipelineResult:
         """Execute the full v4 pipeline: Understand → Retrieve → Assemble.
 
@@ -196,6 +197,7 @@ class SGEngine:
             intent, slm_result, regex_confidence = self._phase1_understand(
                 prompt, store, session,
                 retry_note="" if attempt == 0 else f"Attempt {attempt + 1}: Previous attempt found {result.slm_entities_found} entities. Broaden search.",
+                force_slm=force_slm,
             )
             result.phase1_ms = (time.time() - p1_start) * 1000
 
@@ -303,6 +305,7 @@ class SGEngine:
         store: IndexStore,
         session: Optional[Session],
         retry_note: str = "",
+        force_slm: bool = False,
     ):
         """Phase 1: Regex + (optionally) SLM entity extraction.
 
@@ -325,7 +328,7 @@ class SGEngine:
         # 2. Tiny project (<10 functions) → graph handles everything
         # 3. SLM disabled in config
         should_skip_slm = (
-            regex_confidence == "HIGH"
+            (not force_slm and regex_confidence == "HIGH")
             or len(store.skeleton_table) < 10
             or not self._config.enable_slm_fallback
         )
@@ -394,6 +397,8 @@ class SGEngine:
             session=session,
             top_n=50,
             seed_fqns=seed_fqns,
+            mode_spec=mode_spec,
+            enable_keyword_fallback=self._config.enable_keyword_fallback,
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -610,6 +615,10 @@ class SGEngine:
     def get_config(self) -> SGConfig:
         """Access the current configuration."""
         return self._config
+
+    def get_store(self) -> IndexStore:
+        """Access the loaded index store (lazy loaded)."""
+        return self._ensure_loaded()
 
     def _model_for_tier(self, tier: str, delivery: str) -> str:
         """Resolve a tier to an IDE label or CLI provider model."""
