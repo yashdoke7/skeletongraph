@@ -141,7 +141,7 @@ def run_evaluation(
     success_count = 0
 
     for case in eval_cases:
-        result = resolve_context(case.prompt, store)
+        result = resolve_context(case.prompt, store, enable_keyword_fallback=False)
         assembled = assemble_context(result, store, target)
 
         # Check which expected FQNs are in the candidates

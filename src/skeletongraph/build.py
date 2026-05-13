@@ -289,11 +289,17 @@ def build_index(
     else:
         store.pagerank_scores = {}
 
-    # ── Phase 3c: Auto-summarize top 20% hub functions (v4) ──────────
+    # ── Phase 3c: Seed summaries from docstrings/comments ────────────
+    if cfg.summary_use_docstrings:
+        seeded = _seed_summaries_from_docstrings(store, min_words=cfg.summary_min_words)
+        if seeded and on_progress:
+            on_progress(f"Seeded {seeded} summaries from docstrings", 0, 0)
+
+    # ── Phase 3d: Auto-summarize top 20% hub functions (v4) ──────────
     if cfg.auto_summarize_on_build and store.pagerank_scores:
         hub_fqns = get_hub_functions(store.pagerank_scores, top_percent=0.20)
         # Filter out already-summarized ones
-        unsummarized = [f for f in hub_fqns if not store.summaries.get(f)]
+        unsummarized = [f for f in hub_fqns if _summary_needs_refresh(f, store, cfg)]
         
         if unsummarized:
             if on_progress:
@@ -362,6 +368,7 @@ def build_index(
         build_duration_seconds=time.time() - start_time,
     )
 
+
     # Persist
     save_index(store, project_root)
 
@@ -423,9 +430,10 @@ def update_index(
     Returns:
         Updated IndexStore.
     """
+    cfg = config or load_config(project_root)
     store = load_index(project_root)
     if store is None:
-        return build_index(project_root, on_progress, config)
+        return build_index(project_root, on_progress, cfg)
 
     start_time = time.time()
     current_files = discover_files(project_root)
@@ -486,6 +494,10 @@ def update_index(
                 docstring=sk.docstring,
                 body_keywords=body_kw,
             )
+
+            # Seed summary from docstring if enabled
+            if cfg.summary_use_docstrings:
+                _maybe_seed_summary_from_docstring(sk, store, cfg)
 
         store.dirty_tracker.update_file(
             file_path,
@@ -570,5 +582,91 @@ def update_index(
     store.meta.total_edges = store.graph.edge_count
     store.meta.build_duration_seconds = time.time() - start_time
 
+
+    # Auto-summarize changed functions (if enabled)
+    if cfg.auto_summarize_on_update and cached_results:
+        _summarize_changed_functions(cached_results, store, project_root, cfg, on_progress)
+
     save_index(store, project_root)
     return store
+
+
+def _summary_needs_refresh(fqn: str, store: IndexStore, cfg: SGConfig) -> bool:
+    """Return True when summary is missing or too short to be useful."""
+    summary = store.summaries.get(fqn)
+    if not summary:
+        return True
+    return _word_count(summary) < cfg.summary_min_words
+
+
+def _word_count(text: str) -> int:
+    return len([w for w in text.strip().split() if w])
+
+
+def _maybe_seed_summary_from_docstring(sk, store: IndexStore, cfg: SGConfig) -> None:
+    """Seed summary from docstring if no usable summary exists."""
+    if store.summaries.get(sk.fqn):
+        return
+    if not sk.docstring:
+        return
+    doc_line = sk.docstring.strip().splitlines()[0]
+    if _word_count(doc_line) >= cfg.summary_min_words:
+        store.summaries.set(sk.fqn, doc_line)
+
+
+def _seed_summaries_from_docstrings(store: IndexStore, min_words: int) -> int:
+    """Seed summaries from docstrings when possible. Returns count seeded."""
+    seeded = 0
+    for sk in store.skeleton_table.values():
+        if store.summaries.get(sk.fqn):
+            continue
+        if not sk.docstring:
+            continue
+        doc_line = sk.docstring.strip().splitlines()[0]
+        if _word_count(doc_line) >= min_words:
+            store.summaries.set(sk.fqn, doc_line)
+            seeded += 1
+    return seeded
+
+
+def _summarize_changed_functions(
+    cached_results: Dict[str, FileExtractionResult],
+    store: IndexStore,
+    project_root: Path,
+    cfg: SGConfig,
+    on_progress: Optional[Callable[[str, int, int], None]] = None,
+) -> None:
+    """Summarize changed functions using the configured summary model."""
+    from .retrieval.slm_extractor import batch_summarize_functions
+
+    bodies = []
+    fqns_to_summarize = []
+
+    for file_path in cached_results:
+        file_skel = store.file_skeletons.get(file_path)
+        if not file_skel:
+            continue
+        for sk in file_skel.all_skeletons:
+            if not _summary_needs_refresh(sk.fqn, store, cfg):
+                continue
+            fp = project_root / sk.file_path
+            if not fp.exists():
+                continue
+            try:
+                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+                body = "\n".join(lines[sk.line_start - 1:sk.line_end])
+                if body:
+                    bodies.append(body)
+                    fqns_to_summarize.append(sk.fqn)
+            except Exception:
+                continue
+
+    if not bodies:
+        return
+
+    if on_progress:
+        on_progress(f"Summarizing {len(bodies)} changed functions...", 0, 0)
+
+    summaries = batch_summarize_functions(bodies, fqns_to_summarize, cfg)
+    for fqn, summary in summaries.items():
+        store.summaries.set(fqn, summary)

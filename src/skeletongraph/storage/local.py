@@ -196,6 +196,7 @@ def save_index(store: IndexStore, project_root: Path) -> None:
         store.embeddings.save(sg_dir)
 
 
+
 def load_index(project_root: Path) -> Optional[IndexStore]:
     """Load the full index from .skeletongraph/ directory.
 
@@ -275,6 +276,7 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
             pagerank_scores = {str(k): float(v) for k, v in raw_scores.items()}
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             pagerank_scores = {}
+
 
     return IndexStore(
         meta=meta,

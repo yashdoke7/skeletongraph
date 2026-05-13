@@ -81,7 +81,7 @@ class SkeletonCore:
     # ── Documentation ──────────────────────────────────────────────────────
     docstring: str = ""
     """First line of the function/class docstring. Used for search indexing
-    (inverted index + BM25). NOT sent to LLM context — purely for retrieval."""
+    (inverted index). NOT sent to LLM context — purely for retrieval."""
 
     # ── Dirty tracking ─────────────────────────────────────────────────────
     sha256: str = ""

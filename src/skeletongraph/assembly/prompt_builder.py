@@ -86,30 +86,33 @@ def assemble(
     This is the main entry point. Accepts both v3 and v4 call signatures.
     v4 params (prompt, sg_dir, config) are optional and enhance layer loading.
     """
-    mode = classification.mode
+    legacy_mode = classification.mode
+    mode_spec = classification.mode_spec or MODE_SPECS[classification.query_mode]
     prompt = resolver_result.intent.raw_prompt
 
     # ── PASS_THROUGH: get out of the way ─────────────────────────────
-    if mode == ContextMode.PASS_THROUGH:
+    if legacy_mode == ContextMode.PASS_THROUGH:
         return _pass_through(classification, resolver_result)
 
     sg_dir = project_root / ".skeletongraph"
-    budget = _MODE_BUDGETS.get(mode, 4000)
+    budget = mode_spec.budget
     layers_loaded: List[str] = []
     layer_breakdown: Dict[str, int] = {}
     tokens_used = 0
 
     # ── Load layers based on mode ────────────────────────────────────
 
-    # L0: Project DNA (always loaded)
-    l0 = _load_file_layer(sg_dir / "project.md", "project", budget=300)
-    if l0:
-        layers_loaded.append("project")
-        layer_breakdown["L0_project"] = l0.tokens
+    # L0: Project DNA
+    l0 = None
+    if mode_spec.load_project:
+        l0 = _load_file_layer(sg_dir / "project.md", "project", budget=300)
+        if l0:
+            layers_loaded.append("project")
+            layer_breakdown["L0_project"] = l0.tokens
 
     # L1: Architecture Map
     l1 = None
-    if mode in (ContextMode.STANDARD, ContextMode.DEEP, ContextMode.PLANNING):
+    if mode_spec.load_architecture:
         l1 = _load_file_layer(sg_dir / "architecture.md", "architecture", budget=800)
         if l1:
             layers_loaded.append("architecture")
@@ -117,7 +120,7 @@ def assemble(
 
     # L2: Domain Context
     l2_parts: List[LayerContent] = []
-    if mode in (ContextMode.STANDARD, ContextMode.DEEP, ContextMode.PLANNING):
+    if mode_spec.load_domain:
         target_fqns = {c.skeleton.fqn for c in resolver_result.candidates if c.tier == Tier.TIER1}
         domain_files = _detect_relevant_domains(target_fqns, store, sg_dir / "domain")
         for df in domain_files:
@@ -129,23 +132,21 @@ def assemble(
 
     # L3: Session Memory
     l3_parts: List[LayerContent] = []
-    # current.md — loaded in all modes except REVIEW (REVIEW loads all)
-    l3_current = _load_file_layer(sg_dir / "session" / "current.md", "current_session", budget=250)
-    if l3_current:
-        l3_parts.append(l3_current)
-        layers_loaded.append("current_session")
-        layer_breakdown["L3_current"] = l3_current.tokens
+    if mode_spec.load_current_session:
+        l3_current = _load_file_layer(sg_dir / "session" / "current.md", "current_session", budget=250)
+        if l3_current:
+            l3_parts.append(l3_current)
+            layers_loaded.append("current_session")
+            layer_breakdown["L3_current"] = l3_current.tokens
 
-    # recent.md — loaded in STANDARD, DEEP, PLANNING, REVIEW
-    if mode in (ContextMode.STANDARD, ContextMode.DEEP, ContextMode.PLANNING, ContextMode.REVIEW):
+    if mode_spec.load_recent_session:
         l3_recent = _load_file_layer(sg_dir / "session" / "recent.md", "recent_decisions", budget=500)
         if l3_recent:
             l3_parts.append(l3_recent)
             layers_loaded.append("recent_decisions")
             layer_breakdown["L3_recent"] = l3_recent.tokens
 
-    # project_log.md — loaded in DEEP and REVIEW only
-    if mode in (ContextMode.DEEP, ContextMode.REVIEW):
+    if mode_spec.load_project_log:
         l3_log = _load_file_layer(sg_dir / "session" / "project_log.md", "project_log", budget=200)
         if l3_log:
             l3_parts.append(l3_log)
@@ -156,26 +157,24 @@ def assemble(
     l4_target_parts: List[str] = []
     l4_caller_parts: List[str] = []
     l4_blast_parts: List[str] = []
+    l4_test_parts: List[str] = []
     l4_targets: List[str] = []
     session_dedup_count = 0
 
-    if mode not in (ContextMode.PLANNING, ContextMode.REVIEW):
-        # Determine depth based on mode
-        candidates = resolver_result.candidates
-        tier1 = [c for c in candidates if c.tier == Tier.TIER1]
-        tier2 = [c for c in candidates if c.tier == Tier.TIER2]
-        tier3 = [c for c in candidates if c.tier == Tier.TIER3]
+    candidates = resolver_result.candidates
+    tier1 = [c for c in candidates if c.tier == Tier.TIER1]
+    tier2 = [c for c in candidates if c.tier == Tier.TIER2]
+    tier3 = [c for c in candidates if c.tier == Tier.TIER3]
 
-        # FAST: only target + direct caller
-        # STANDARD: target + 1-hop (Tier 1 + Tier 2)
-        # DEEP: target + 2-hop (all tiers)
+    test_candidates = [c for c in candidates if _is_test_candidate(c)]
+    test_fqns = {c.skeleton.fqn for c in test_candidates}
 
-        # Target bodies (Tier 1 — always full bodies)
+    # Target bodies or signatures
+    if mode_spec.load_target_bodies:
         for c in tier1:
             sk = c.skeleton
             l4_targets.append(sk.fqn)
 
-            # Session dedup
             if session and c.session_cached:
                 header = f"# {sk.file_display} — {_short_name(sk.fqn)}"
                 l4_target_parts.append(f"{header}\n{sk.signature}  # [body already provided]")
@@ -186,58 +185,75 @@ def assemble(
             if body:
                 header = f"# {sk.file_display}:{sk.line_start} — {_short_name(sk.fqn)}"
                 l4_target_parts.append(f"{header}\n{body}")
+    else:
+        for c in tier1:
+            sk = c.skeleton
+            l4_targets.append(sk.fqn)
+            summary = _pick_summary(sk, store)
+            entry = f"  {sk.signature}"
+            if summary:
+                entry += f"  # {summary[:80]}"
+            l4_target_parts.append(entry)
 
-        # Caller/neighbor context (Tier 2)
-        if mode != ContextMode.FAST or not tier1:
-            for c in sorted(tier2, key=lambda x: -x.score):
-                sk = c.skeleton
-                if mode == ContextMode.FAST:
-                    # FAST: only direct callers, signature only
-                    l4_caller_parts.append(f"  {sk.signature}  # {_short_name(sk.fqn)}")
-                else:
-                    # STANDARD/DEEP: skeleton + summary
-                    summary = store.summaries.get(sk.fqn, "")
-                    entry = f"  {sk.signature}"
-                    if summary:
-                        entry += f"  # {summary[:80]}"
-                    l4_caller_parts.append(entry)
+    # Neighbor context (Tier 2/3)
+    if mode_spec.load_neighbor_sigs:
+        for c in sorted(tier2, key=lambda x: -x.score):
+            if c.skeleton.fqn in test_fqns:
+                continue
+            sk = c.skeleton
+            summary = _pick_summary(sk, store)
+            entry = f"  {sk.signature}"
+            if summary:
+                entry += f"  # {summary[:80]}"
+            l4_caller_parts.append(entry)
 
-        # Periphery (Tier 3 — DEEP only, FQN + return type)
-        if mode == ContextMode.DEEP:
+        if mode_spec.blast_depth > 1 or mode_spec.dep_depth > 1:
             for c in sorted(tier3, key=lambda x: -x.score)[:15]:
                 l4_caller_parts.append(f"  {c.skeleton.to_tier3_str()}")
 
-        # Blast radius
+    # Tests (Tier 2 flagged by resolver)
+    if mode_spec.load_tests and test_candidates:
+        for c in sorted(test_candidates, key=lambda x: -x.score)[:10]:
+            sk = c.skeleton
+            if mode_spec.test_detail == "bodies":
+                body = _read_function_body(sk, project_root)
+                if body:
+                    header = f"# {sk.file_display}:{sk.line_start} — {_short_name(sk.fqn)}"
+                    l4_test_parts.append(f"{header}\n{body}")
+            else:
+                entry = f"  {sk.signature}  # {sk.file_display}"
+                l4_test_parts.append(entry)
+
+    # Blast radius
+    if l4_targets:
         for fqn in l4_targets[:3]:
-            blast = store.graph.blast_radius(fqn, max_depth=2 if mode == ContextMode.DEEP else 1)
+            blast = store.graph.blast_radius(
+                fqn,
+                max_depth=2 if (mode_spec.blast_depth > 1 or mode_spec.dep_depth > 1) else 1,
+            )
             if blast:
                 lines = [f"Blast radius for {_short_name(fqn)}:"]
                 for affected_fqn, dist in sorted(blast.items(), key=lambda x: x[1])[:10]:
                     affected_sk = store.skeleton_table.get(affected_fqn)
                     if affected_sk:
-                        lines.append(f"  {'>' * dist} {_short_name(affected_fqn)} ({affected_sk.file_display})")
+                        lines.append(
+                            f"  {'>' * dist} {_short_name(affected_fqn)} ({affected_sk.file_display})"
+                        )
                 l4_blast_parts.append("\n".join(lines))
 
-        layers_loaded.append("task_code")
+    if l4_test_parts:
+        layers_loaded.append("tests")
 
-    elif mode == ContextMode.PLANNING:
-        # PLANNING: signatures only, no bodies
-        candidates = resolver_result.candidates
-        if candidates:
-            sig_lines = []
-            for c in sorted(candidates, key=lambda x: -x.score)[:20]:
-                sk = c.skeleton
-                sig_lines.append(f"  {sk.signature}  # {sk.file_display}")
-                l4_targets.append(sk.fqn)
-            l4_caller_parts = sig_lines
-            layers_loaded.append("signatures_only")
+    layers_loaded.append("task_code")
 
     # ── Compute L4 tokens ────────────────────────────────────────────
     l4_target_text = "\n\n".join(l4_target_parts)
     l4_caller_text = "\n".join(l4_caller_parts)
+    l4_test_text = "\n\n".join(l4_test_parts)
     l4_blast_text = "\n\n".join(l4_blast_parts)
     layer_breakdown["L4_target"] = _est_tokens(l4_target_text)
     layer_breakdown["L4_callers"] = _est_tokens(l4_caller_text)
+    layer_breakdown["L4_tests"] = _est_tokens(l4_test_text)
     layer_breakdown["L4_blast"] = _est_tokens(l4_blast_text)
 
     # ── Modifiers ────────────────────────────────────────────────────
@@ -249,12 +265,20 @@ def assemble(
     warning = ""
     if total_est > budget:
         warning = _truncate_to_budget(
-            l4_target_parts, l4_caller_parts, l4_blast_parts,
-            l1, l2_parts, layer_breakdown, budget, total_est
+            l4_target_parts,
+            l4_caller_parts,
+            l4_test_parts,
+            l4_blast_parts,
+            l1,
+            l2_parts,
+            layer_breakdown,
+            budget,
+            total_est,
         )
         # Recompute texts after truncation
         l4_target_text = "\n\n".join(l4_target_parts)
         l4_caller_text = "\n".join(l4_caller_parts)
+        l4_test_text = "\n\n".join(l4_test_parts)
         l4_blast_text = "\n\n".join(l4_blast_parts)
 
     # ── Constraints text (L0 constraints + L2 domain constraints) ────
@@ -292,8 +316,12 @@ def assemble(
 
     # 7. Callers/structural (L4 neighbors)
     if l4_caller_text:
-        header = "## Context" if mode != ContextMode.PLANNING else "## Module Signatures"
+        header = "## Context" if legacy_mode != ContextMode.PLANNING else "## Module Signatures"
         sections.append(f"{header}\n{l4_caller_text}")
+
+    # 7b. Tests (if requested by mode)
+    if l4_test_text:
+        sections.append(f"## Tests\n{l4_test_text}")
 
     # 8. Target code (BOTTOM — recency attention)
     if l4_target_text:
@@ -311,7 +339,7 @@ def assemble(
     reduction = raw_tokens / max(total_tokens, 1) if raw_tokens > 0 else 0
 
     # Record to session
-    if session and mode not in (ContextMode.PLANNING, ContextMode.REVIEW):
+    if session and legacy_mode not in (ContextMode.PLANNING, ContextMode.REVIEW):
         fqns_returned = {c.skeleton.fqn for c in resolver_result.candidates}
         zone2_fqns = {c.skeleton.fqn for c in resolver_result.candidates if c.tier == Tier.TIER1}
         session.record_turn(
@@ -326,7 +354,7 @@ def assemble(
     return AssembledPrompt(
         text=assembled,
         token_count=total_tokens,
-        mode=mode,
+        mode=legacy_mode,
         query_type=classification.query_type,
         confidence_level=resolver_result.confidence,
         modifiers=classification.modifiers,
@@ -433,6 +461,16 @@ def _short_name(fqn: str) -> str:
     return fqn.split("::")[-1] if "::" in fqn else fqn
 
 
+def _pick_summary(sk: SkeletonCore, store: IndexStore) -> str:
+    """Pick the best available summary (LLM summary or docstring fallback)."""
+    if sk.docstring:
+        return sk.docstring.strip().splitlines()[0]
+    summary = store.summaries.get(sk.fqn, "")
+    if summary:
+        return summary
+    return ""
+
+
 # ── Token estimation ─────────────────────────────────────────────────────
 
 def _est_tokens(text: str) -> int:
@@ -465,6 +503,7 @@ def _estimate_raw_tokens(candidates: List[RankedCandidate], project_root: Path) 
 def _truncate_to_budget(
     target_parts: List[str],
     caller_parts: List[str],
+    test_parts: List[str],
     blast_parts: List[str],
     l1: Optional[LayerContent],
     l2_parts: List[LayerContent],
@@ -496,7 +535,20 @@ def _truncate_to_budget(
         current -= _est_tokens(removed)
         trimmed.append("blast_radius")
 
-    # 3. Trim L1
+    # 3. Trim test bodies to signatures
+    if current > budget and test_parts:
+        for i, entry in enumerate(list(test_parts)):
+            if current <= budget:
+                break
+            if "\n" in entry:
+                head = entry.split("\n", 1)[0]
+                new_entry = f"{head}  # [truncated]"
+                current -= _est_tokens(entry)
+                current += _est_tokens(new_entry)
+                test_parts[i] = new_entry
+                trimmed.append("tests")
+
+    # 4. Trim L1
     if current > budget and l1 and l1.text:
         # Keep only first 200 chars
         old_tokens = l1.tokens
@@ -507,7 +559,7 @@ def _truncate_to_budget(
             breakdown["L1_architecture"] = l1.tokens
         trimmed.append("architecture")
 
-    # 4. Trim L2
+    # 5. Trim L2
     if current > budget and l2_parts:
         for dl in l2_parts:
             old_tokens = dl.tokens

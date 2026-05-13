@@ -50,6 +50,30 @@ class SLMResult:
     error: str = ""
 
 
+@dataclass
+class SLMToolCall:
+    """A planned tool call for context expansion."""
+    call_type: str                  # "function" | "file" | "range" | "directory"
+    target: str                     # FQN or path
+    start_line: int = 0
+    end_line: int = 0
+    include_neighbors: bool = False
+
+
+@dataclass
+class SLMPlan:
+    """Structured plan of tool calls from the SLM."""
+    tool_calls: List[SLMToolCall] = field(default_factory=list)
+    reasoning: str = ""
+    raw_response: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    latency_ms: float = 0.0
+    success: bool = True
+    error: str = ""
+
+
 # ── System Prompt ───────────────────────────────────────────────────────
 
 
@@ -74,6 +98,29 @@ Rules:
 - "concepts" = domain terms from the prompt that aren't code names
 - If unsure, include MORE candidates rather than fewer
 - If the user references recent work ("fix it", "that thing"), use session context to resolve"""
+
+
+_PLAN_SYSTEM = """You are a tool planner for context expansion.
+
+Given a user request and a function index, propose a small list of tool calls
+that will gather the most important context for a coding task.
+
+Return ONLY valid JSON (no markdown):
+{
+    "reasoning": "one short sentence",
+    "tool_calls": [
+        {"type": "function", "target": "path/file.py::Class.method", "include_neighbors": false},
+        {"type": "file", "target": "path/file.py"},
+        {"type": "range", "target": "path/file.py", "start_line": 10, "end_line": 60}
+    ]
+}
+
+Rules:
+- Max 5 tool_calls total
+- Only use targets that appear in the function index or file list
+- Prefer function-level expansions over whole files
+- If unsure, return an empty tool_calls list
+"""
 
 
 # ── SLM Prompt Builder ──────────────────────────────────────────────────
@@ -128,7 +175,7 @@ def build_function_index(
     """Build the function index segment for the SLM prompt.
 
     For small projects (<500 functions): include all.
-    For larger projects: use prefilter_fqns (from BM25/PageRank pre-filter).
+    For larger projects: use prefilter_fqns (from PageRank + session/file hints).
 
     Format: "file.py::Class.method — one-line summary"
     """
@@ -148,7 +195,11 @@ def build_function_index(
         sk = skeleton_table.get(fqn)
         if sk is None:
             continue
-        summary = summaries.get(fqn, "")
+        summary = ""
+        if hasattr(sk, "docstring") and sk.docstring:
+            summary = sk.docstring.strip().splitlines()[0]
+        if not summary:
+            summary = summaries.get(fqn, "")
         short_name = fqn.split("::")[-1] if "::" in fqn else fqn
         file_display = sk.file_path if hasattr(sk, "file_path") else ""
 
@@ -197,6 +248,87 @@ def build_session_context(sg_dir) -> str:
     return ""
 
 
+def slm_plan_tools(
+    prompt: str,
+    store,
+    sg_dir,
+    config,
+    session_fqns: Optional[Set[str]] = None,
+) -> SLMPlan:
+    """Plan a small list of expansion tool calls using an SLM."""
+    try:
+        from ..llm.provider import complete, LLMConfig
+    except ImportError:
+        return SLMPlan(success=False, error="litellm not installed")
+
+    start = time.time()
+
+    prefilter = None
+    if len(store.skeleton_table) > 500:
+        prefilter = prefilter_for_slm(prompt, store, session_fqns=session_fqns)
+
+    project_summary = build_project_summary(sg_dir)
+    file_map = build_file_map(store.file_skeletons)
+    function_index = build_function_index(
+        store.skeleton_table,
+        store.summaries._store if hasattr(store, "summaries") else {},
+        pagerank_scores=getattr(store, "pagerank_scores", None),
+        max_entries=400,
+        prefilter_fqns=prefilter,
+    )
+    session_context = build_session_context(sg_dir)
+
+    user_prompt = build_slm_prompt(
+        user_prompt=prompt,
+        project_summary=project_summary,
+        file_map=file_map,
+        function_index=function_index,
+        session_context=session_context,
+    )
+
+    plan = SLMPlan()
+    try:
+        resp = complete(
+            user_prompt,
+            system=_PLAN_SYSTEM,
+            config=LLMConfig(
+                model=config.slm_model,
+                temperature=0.0,
+                max_tokens=250,
+                timeout=config.slm_timeout,
+                max_retries=0,
+            ),
+        )
+        plan.raw_response = resp.text
+        plan.input_tokens = resp.input_tokens
+        plan.output_tokens = resp.output_tokens
+        plan.cost_usd = resp.cost
+        plan.latency_ms = (time.time() - start) * 1000
+
+        payload = json.loads(resp.text)
+        plan.reasoning = str(payload.get("reasoning", ""))
+        calls = payload.get("tool_calls", [])
+        for raw in calls[:5]:
+            call_type = str(raw.get("type", ""))
+            target = str(raw.get("target", ""))
+            if not call_type or not target:
+                continue
+            plan.tool_calls.append(
+                SLMToolCall(
+                    call_type=call_type,
+                    target=target,
+                    start_line=int(raw.get("start_line", 0) or 0),
+                    end_line=int(raw.get("end_line", 0) or 0),
+                    include_neighbors=bool(raw.get("include_neighbors", False)),
+                )
+            )
+    except Exception as e:
+        plan.success = False
+        plan.error = str(e)
+
+    return plan
+
+
 # ── Pre-Filter for Large Projects ───────────────────────────────────────
 
 
@@ -209,32 +341,15 @@ def prefilter_for_slm(
     """Pre-filter function index for large projects (>500 functions).
 
     Combines:
-    1. BM25/keyword hits (top 100)
-    2. Top PageRank hub functions (top 100)
-    3. Functions in mentioned files
-    4. Recently modified functions from session
+    1. Top PageRank hub functions (top 100)
+    2. Functions in mentioned files
+    3. Recently modified functions from session
 
     All pure code — zero LLM cost, ~2ms.
     """
     candidates: Set[str] = set()
 
-    # 1. Keyword search (inverted index)
-    if hasattr(store, "inverted_index"):
-        keyword_hits = store.inverted_index.search(prompt, top_k=100)
-        candidates.update(fqn for fqn, _ in keyword_hits)
-
-    # 2. BM25 on summaries
-    if hasattr(store, "summaries") and len(store.summaries._store) > 0:
-        try:
-            from ..graph.bm25 import BM25Model
-            bm25 = BM25Model()
-            bm25.fit(store.summaries._store)
-            bm25_hits = bm25.search(prompt, top_k=100)
-            candidates.update(fqn for fqn, _ in bm25_hits)
-        except Exception:
-            pass
-
-    # 3. Top hub functions by PageRank
+    # 1. Top hub functions by PageRank
     if hasattr(store, "pagerank_scores") and store.pagerank_scores:
         top_hubs = sorted(
             store.pagerank_scores.keys(),
@@ -243,7 +358,7 @@ def prefilter_for_slm(
         )[:100]
         candidates.update(top_hubs)
 
-    # 4. Functions in files mentioned in prompt
+    # 2. Functions in files mentioned in prompt
     import re
     file_pattern = re.compile(r'[\w./\\-]+\.(?:py|js|ts|tsx|jsx|java|go|rs|cpp|cs|rb|php)')
     mentioned = file_pattern.findall(prompt)
@@ -252,7 +367,7 @@ def prefilter_for_slm(
             if hasattr(sk, "file_path") and sk.file_path.endswith(file_ref):
                 candidates.add(fqn)
 
-    # 5. Session context (recently modified)
+    # 3. Session context (recently modified)
     if session_fqns:
         candidates.update(session_fqns)
 
@@ -486,8 +601,9 @@ def batch_summarize_functions(
     )
 
     results: Dict[str, str] = {}
+    summary_model = getattr(config, "summary_model", None) or config.slm_model
     llm_config = LLMConfig(
-        model=config.slm_model,
+        model=summary_model,
         temperature=0.0,
         max_tokens=40,
         timeout=5,

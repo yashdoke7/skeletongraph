@@ -227,7 +227,7 @@ class InvertedIndex:
         Returns:
             List of (fqn, score) tuples, sorted by score descending.
         """
-        query_tokens = set(tokenize_text(query))
+        query_tokens = set(tokenize_query(query))
         if not query_tokens:
             return []
 

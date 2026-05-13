@@ -9,8 +9,9 @@ The core retrieval algorithm:
   5. Assign tiers (Tier 1: full body, Tier 2: skeleton + summary, Tier 3: FQN only)
   6. Session-aware deduplication (skip bodies agent already has)
 
-v4 additions:
-  - resolve_with_mode_spec(): mode-driven expansion (reads depth/direction from ModeSpec)
+v4/v5 additions:
+  - ModeSpec-driven expansion: graph_direction, blast_depth, dep_depth, load_tests
+    read directly from classifier ModeSpec instead of switching on TaskType
   - SLM entity resolution: resolves SLM-extracted FQNs via fuzzy matching
   - Uses tokenize_query() instead of tokenize_text() for query-time matching
 """
@@ -19,7 +20,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .classifier import ModeSpec
 
 from ..graph.dependency import DependencyGraph, EdgeType
 from ..graph.inverted_index import InvertedIndex, tokenize_query
@@ -69,16 +73,21 @@ def resolve_context(
     session: Optional[Session] = None,
     top_n: int = 50,
     seed_fqns: Optional[Set[str]] = None,
+    mode_spec: Optional["ModeSpec"] = None,
+    enable_keyword_fallback: bool = False,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
     Args:
         prompt: User's natural language request.
         store: The loaded index.
-        max_depth: Maximum graph traversal depth.
+        max_depth: Maximum graph traversal depth (used as fallback if no mode_spec).
         session: Optional session for cross-turn deduplication.
         top_n: Max number of candidates to return.
         seed_fqns: Optional exact or fuzzy FQN seeds supplied by the caller.
+        mode_spec: Optional ModeSpec from classifier — drives graph expansion.
+            When provided, graph_direction/blast_depth/dep_depth/load_tests
+            are read from this spec instead of switching on TaskType.
 
     Returns:
         ResolverResult with ranked candidates and confidence.
@@ -111,31 +120,22 @@ def resolve_context(
         confidence_reason = f"Exact entity match: {', '.join(list(target_fqns)[:3])}"
         match_source = "entity"
     else:
-        # Fallback 1: Semantic BM25 search over LLM Summaries (if any exist)
-        if len(store.summaries._store) > 0:
-            from ..graph.bm25 import BM25Model
-            bm25 = BM25Model()
-            bm25.fit(store.summaries._store)
-            bm25_results = bm25.search(prompt, top_k=5)
-            if bm25_results:
-                target_fqns = {fqn for fqn, _ in bm25_results}
-                confidence = "MEDIUM"
-                confidence_reason = "Matched via semantic BM25 summary search"
-                match_source = "bm25"
-
-        # Fallback 2: Keyword search on Inverted Index (if BM25 fails or no summaries)
-        if not target_fqns:
-            # Discovery Phase: Search more broadly if we don't have direct entity matches.
-            # Increase top_k to 15 to ensure better coverage for cross-file configs.
+        # Optional keyword fallback (disabled by default)
+        if enable_keyword_fallback:
             search_results = store.inverted_index.search(prompt, top_k=15)
             if search_results:
                 target_fqns = {fqn for fqn, _ in search_results}
                 confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
-                confidence_reason = f"Matched {len(search_results)} entities via discovery keyword search"
+                confidence_reason = (
+                    f"Matched {len(search_results)} entities via keyword search"
+                )
                 match_source = "keyword"
             else:
                 confidence = "LOW"
-                confidence_reason = "No entity, semantic, or keyword matches found"
+                confidence_reason = "No entity or keyword matches found"
+        else:
+            confidence = "LOW"
+            confidence_reason = "No entity matches; keyword fallback disabled"
 
     # Step 4: Build ranker with hub scores
     ranker = Ranker(store.graph)
@@ -166,123 +166,15 @@ def resolve_context(
                 session_cached=is_cached,
             )
 
-    # Expand based on task type
-    if intent.task_type in (TaskType.DEBUG, TaskType.EDIT, TaskType.REFACTOR):
-        for fqn in list(target_fqns):
-            # Blast radius (who calls this?)
-            affected = store.graph.blast_radius(fqn, max_depth=max_depth)
-            for affected_fqn, dist in affected.items():
-                if affected_fqn not in candidates:
-                    sk = store.skeleton_table.get(affected_fqn)
-                    if sk:
-                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
-                        candidates[affected_fqn] = RankedCandidate(
-                            skeleton=sk, tier=tier, distance=dist,
-                            score=ranker.score(
-                                affected_fqn, sk, dist,
-                                f"Blast radius (depth {dist})", target_file,
-                            ),
-                            reason=f"Blast radius (depth {dist})",
-                        )
-
-            # Dependency chain (what does this call?)
-            deps = store.graph.dependency_chain(fqn, max_depth=max_depth)
-            for dep_fqn, dist in deps.items():
-                if dep_fqn not in candidates:
-                    sk = store.skeleton_table.get(dep_fqn)
-                    if sk:
-                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
-                        candidates[dep_fqn] = RankedCandidate(
-                            skeleton=sk, tier=tier, distance=dist,
-                            score=ranker.score(
-                                dep_fqn, sk, dist,
-                                f"Dependency (depth {dist})", target_file,
-                            ),
-                            reason=f"Dependency (depth {dist})",
-                        )
-
-        # Include related tests
-        for fqn in list(target_fqns):
-            tests = store.graph.test_coverage(fqn)
-            for test_fqn in tests:
-                if test_fqn not in candidates:
-                    sk = store.skeleton_table.get(test_fqn)
-                    if sk:
-                        candidates[test_fqn] = RankedCandidate(
-                            skeleton=sk, tier=Tier.TIER2, distance=1,
-                            score=ranker.score(
-                                test_fqn, sk, 1, "Test coverage", target_file,
-                            ),
-                            reason="Test coverage",
-                        )
-
-    elif intent.task_type == TaskType.EXPLAIN:
-        for fqn in list(target_fqns):
-            # Dependency chain (what does this call?)
-            deps = store.graph.dependency_chain(fqn, max_depth=max_depth + 1)
-            for dep_fqn, dist in deps.items():
-                if dep_fqn not in candidates:
-                    sk = store.skeleton_table.get(dep_fqn)
-                    if sk:
-                        tier = Tier.TIER2 if dist <= 2 else Tier.TIER3
-                        candidates[dep_fqn] = RankedCandidate(
-                            skeleton=sk, tier=tier, distance=dist,
-                            score=ranker.score(
-                                dep_fqn, sk, dist,
-                                f"Dependency for explanation (depth {dist})",
-                                target_file,
-                            ),
-                            reason=f"Dependency for explanation (depth {dist})",
-                        )
-            
-            # Shallow blast radius (who calls this?)
-            affected = store.graph.blast_radius(fqn, max_depth=1)
-            for affected_fqn, dist in affected.items():
-                if affected_fqn not in candidates:
-                    sk = store.skeleton_table.get(affected_fqn)
-                    if sk:
-                        candidates[affected_fqn] = RankedCandidate(
-                            skeleton=sk, tier=Tier.TIER2, distance=dist,
-                            score=ranker.score(
-                                affected_fqn, sk, dist,
-                                f"Explaining callers (depth {dist})",
-                                target_file,
-                            ),
-                            reason=f"Explaining callers (depth {dist})",
-                        )
-
-    elif intent.task_type == TaskType.CREATE:
-        for fqn in list(target_fqns):
-            file_path = store.skeleton_table[fqn].file_path if fqn in store.skeleton_table else ""
-            if file_path and file_path in store.file_skeletons:
-                for sk in store.file_skeletons[file_path].all_skeletons:
-                    if sk.fqn not in candidates:
-                        candidates[sk.fqn] = RankedCandidate(
-                            skeleton=sk, tier=Tier.TIER2, distance=1,
-                            score=ranker.score(
-                                sk.fqn, sk, 1, "Same file context", target_file,
-                            ),
-                            reason="Same file context",
-                        )
-
-    elif intent.task_type == TaskType.REVIEW:
-        # For review tasks, include all changed functions and their blast radius
-        for fqn in list(target_fqns):
-            affected = store.graph.blast_radius(fqn, max_depth=max_depth)
-            for affected_fqn, dist in affected.items():
-                if affected_fqn not in candidates:
-                    sk = store.skeleton_table.get(affected_fqn)
-                    if sk:
-                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
-                        candidates[affected_fqn] = RankedCandidate(
-                            skeleton=sk, tier=tier, distance=dist,
-                            score=ranker.score(
-                                affected_fqn, sk, dist,
-                                f"Review blast radius (depth {dist})",
-                                target_file,
-                            ),
-                            reason=f"Review blast radius (depth {dist})",
-                        )
+    # ── Graph expansion: ModeSpec-driven (v5) or TaskType-based (legacy) ──
+    if mode_spec is not None:
+        _expand_from_mode_spec(
+            target_fqns, mode_spec, store, ranker, candidates, target_file,
+        )
+    else:
+        _expand_from_task_type(
+            target_fqns, intent, max_depth, store, ranker, candidates, target_file,
+        )
 
     # Step 6: Auto-include constructors for any class that's in context
     _auto_include_constructors(candidates, store, ranker, target_file)
@@ -386,6 +278,209 @@ def _resolve_seed_fqns(seed_fqns: Set[str], store: IndexStore) -> Set[str]:
         resolved.update(sorted(matches, key=len)[:5])
 
     return resolved
+
+
+# ── ModeSpec-driven expansion (v5) ──────────────────────────────────────
+
+
+def _expand_from_mode_spec(
+    target_fqns: Set[str],
+    mode_spec: "ModeSpec",
+    store: IndexStore,
+    ranker: Ranker,
+    candidates: Dict[str, RankedCandidate],
+    target_file: str,
+) -> None:
+    """Expand graph based on ModeSpec fields. Replaces TaskType switching.
+
+    Reads graph_direction, blast_depth, dep_depth, and load_tests directly
+    from the classifier ModeSpec, making the 12-mode taxonomy functional.
+    """
+    direction = mode_spec.graph_direction
+    blast_depth = mode_spec.blast_depth
+    dep_depth = mode_spec.dep_depth
+
+    # Skip expansion entirely for "none" direction modes (e.g. RETRIEVAL_FAST)
+    if direction == "none" and not mode_spec.load_tests:
+        return
+
+    for fqn in list(target_fqns):
+        # Reverse BFS (blast radius): "who calls this?"
+        if direction in ("reverse", "both") and blast_depth > 0:
+            affected = store.graph.blast_radius(fqn, max_depth=blast_depth)
+            for affected_fqn, dist in affected.items():
+                if affected_fqn not in candidates:
+                    sk = store.skeleton_table.get(affected_fqn)
+                    if sk:
+                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
+                        candidates[affected_fqn] = RankedCandidate(
+                            skeleton=sk, tier=tier, distance=dist,
+                            score=ranker.score(
+                                affected_fqn, sk, dist,
+                                f"Blast radius (depth {dist})", target_file,
+                            ),
+                            reason=f"Blast radius (depth {dist})",
+                        )
+
+        # Forward BFS (dependency chain): "what does this call?"
+        if direction in ("forward", "both") and dep_depth > 0:
+            deps = store.graph.dependency_chain(fqn, max_depth=dep_depth)
+            for dep_fqn, dist in deps.items():
+                if dep_fqn not in candidates:
+                    sk = store.skeleton_table.get(dep_fqn)
+                    if sk:
+                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
+                        candidates[dep_fqn] = RankedCandidate(
+                            skeleton=sk, tier=tier, distance=dist,
+                            score=ranker.score(
+                                dep_fqn, sk, dist,
+                                f"Dependency (depth {dist})", target_file,
+                            ),
+                            reason=f"Dependency (depth {dist})",
+                        )
+
+        # Test coverage (controlled by load_tests flag)
+        if mode_spec.load_tests:
+            tests = store.graph.test_coverage(fqn)
+            for test_fqn in tests:
+                if test_fqn not in candidates:
+                    sk = store.skeleton_table.get(test_fqn)
+                    if sk:
+                        candidates[test_fqn] = RankedCandidate(
+                            skeleton=sk, tier=Tier.TIER2, distance=1,
+                            score=ranker.score(
+                                test_fqn, sk, 1, "Test coverage", target_file,
+                            ),
+                            reason="Test coverage",
+                        )
+
+
+# ── Legacy TaskType-based expansion (v3 compat) ────────────────────────
+
+
+def _expand_from_task_type(
+    target_fqns: Set[str],
+    intent: Intent,
+    max_depth: int,
+    store: IndexStore,
+    ranker: Ranker,
+    candidates: Dict[str, RankedCandidate],
+    target_file: str,
+) -> None:
+    """Legacy expansion based on TaskType. Used when no ModeSpec is provided.
+
+    Preserved for backward compatibility with v3 callers (e.g. MCP v3 fallback).
+    """
+    if intent.task_type in (TaskType.DEBUG, TaskType.EDIT, TaskType.REFACTOR):
+        for fqn in list(target_fqns):
+            affected = store.graph.blast_radius(fqn, max_depth=max_depth)
+            for affected_fqn, dist in affected.items():
+                if affected_fqn not in candidates:
+                    sk = store.skeleton_table.get(affected_fqn)
+                    if sk:
+                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
+                        candidates[affected_fqn] = RankedCandidate(
+                            skeleton=sk, tier=tier, distance=dist,
+                            score=ranker.score(
+                                affected_fqn, sk, dist,
+                                f"Blast radius (depth {dist})", target_file,
+                            ),
+                            reason=f"Blast radius (depth {dist})",
+                        )
+
+            deps = store.graph.dependency_chain(fqn, max_depth=max_depth)
+            for dep_fqn, dist in deps.items():
+                if dep_fqn not in candidates:
+                    sk = store.skeleton_table.get(dep_fqn)
+                    if sk:
+                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
+                        candidates[dep_fqn] = RankedCandidate(
+                            skeleton=sk, tier=tier, distance=dist,
+                            score=ranker.score(
+                                dep_fqn, sk, dist,
+                                f"Dependency (depth {dist})", target_file,
+                            ),
+                            reason=f"Dependency (depth {dist})",
+                        )
+
+        for fqn in list(target_fqns):
+            tests = store.graph.test_coverage(fqn)
+            for test_fqn in tests:
+                if test_fqn not in candidates:
+                    sk = store.skeleton_table.get(test_fqn)
+                    if sk:
+                        candidates[test_fqn] = RankedCandidate(
+                            skeleton=sk, tier=Tier.TIER2, distance=1,
+                            score=ranker.score(
+                                test_fqn, sk, 1, "Test coverage", target_file,
+                            ),
+                            reason="Test coverage",
+                        )
+
+    elif intent.task_type == TaskType.EXPLAIN:
+        for fqn in list(target_fqns):
+            deps = store.graph.dependency_chain(fqn, max_depth=max_depth + 1)
+            for dep_fqn, dist in deps.items():
+                if dep_fqn not in candidates:
+                    sk = store.skeleton_table.get(dep_fqn)
+                    if sk:
+                        tier = Tier.TIER2 if dist <= 2 else Tier.TIER3
+                        candidates[dep_fqn] = RankedCandidate(
+                            skeleton=sk, tier=tier, distance=dist,
+                            score=ranker.score(
+                                dep_fqn, sk, dist,
+                                f"Dependency for explanation (depth {dist})",
+                                target_file,
+                            ),
+                            reason=f"Dependency for explanation (depth {dist})",
+                        )
+
+            affected = store.graph.blast_radius(fqn, max_depth=1)
+            for affected_fqn, dist in affected.items():
+                if affected_fqn not in candidates:
+                    sk = store.skeleton_table.get(affected_fqn)
+                    if sk:
+                        candidates[affected_fqn] = RankedCandidate(
+                            skeleton=sk, tier=Tier.TIER2, distance=dist,
+                            score=ranker.score(
+                                affected_fqn, sk, dist,
+                                f"Explaining callers (depth {dist})",
+                                target_file,
+                            ),
+                            reason=f"Explaining callers (depth {dist})",
+                        )
+
+    elif intent.task_type == TaskType.CREATE:
+        for fqn in list(target_fqns):
+            file_path = store.skeleton_table[fqn].file_path if fqn in store.skeleton_table else ""
+            if file_path and file_path in store.file_skeletons:
+                for sk in store.file_skeletons[file_path].all_skeletons:
+                    if sk.fqn not in candidates:
+                        candidates[sk.fqn] = RankedCandidate(
+                            skeleton=sk, tier=Tier.TIER2, distance=1,
+                            score=ranker.score(
+                                sk.fqn, sk, 1, "Same file context", target_file,
+                            ),
+                            reason="Same file context",
+                        )
+
+    elif intent.task_type == TaskType.REVIEW:
+        for fqn in list(target_fqns):
+            affected = store.graph.blast_radius(fqn, max_depth=max_depth)
+            for affected_fqn, dist in affected.items():
+                if affected_fqn not in candidates:
+                    sk = store.skeleton_table.get(affected_fqn)
+                    if sk:
+                        tier = Tier.TIER2 if dist == 1 else Tier.TIER3
+                        candidates[affected_fqn] = RankedCandidate(
+                            skeleton=sk, tier=tier, distance=dist,
+                            score=ranker.score(
+                                affected_fqn, sk, dist,
+                                f"Review blast radius (depth {dist})",
+                                target_file,
+                            ),
+                            reason=f"Review blast radius (depth {dist})",
+                        )
 
 
 def _auto_include_constructors(

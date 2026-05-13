@@ -15,7 +15,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-from .inverted_index import tokenize_text
+from .inverted_index import tokenize_text, tokenize_query
 
 
 @dataclass
@@ -67,7 +67,7 @@ class BM25Model:
         if not self.doc_names:
             return []
             
-        q_tokens = tokenize_text(query)
+        q_tokens = tokenize_query(query)
         scores = []
         
         for idx in range(len(self.doc_names)):
@@ -99,3 +99,38 @@ class BM25Model:
         # Filter 0-scores and sort descending
         ranked = sorted([s for s in scores if s[1] > 0], key=lambda x: x[1], reverse=True)
         return ranked[:top_k]
+
+    @property
+    def is_fitted(self) -> bool:
+        """Check if the model has been fitted."""
+        return self.doc_names is not None and len(self.doc_names) > 0
+
+    def to_dict(self) -> dict:
+        """Serialize for JSON storage."""
+        if not self.is_fitted:
+            return {}
+        return {
+            "k1": self.k1,
+            "b": self.b,
+            "doc_len_avg": self.doc_len_avg,
+            "idf": self.idf or {},
+            "doc_freqs": [dict(d) for d in (self.doc_freqs or [])],
+            "doc_lens": self.doc_lens or [],
+            "doc_names": self.doc_names or [],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BM25Model":
+        """Deserialize from JSON."""
+        if not data:
+            return cls()
+        model = cls(
+            k1=data.get("k1", 1.5),
+            b=data.get("b", 0.75),
+            doc_len_avg=data.get("doc_len_avg", 0.0),
+            idf=data.get("idf"),
+            doc_freqs=[dict(d) for d in data.get("doc_freqs", [])],
+            doc_lens=data.get("doc_lens", []),
+            doc_names=data.get("doc_names", []),
+        )
+        return model
