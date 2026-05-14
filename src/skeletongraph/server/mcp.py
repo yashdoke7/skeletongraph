@@ -33,6 +33,7 @@ from ..metrics.metrics_logger import MetricsLogger
 from ..eval.token_counter import measure_text_tokens
 from ..engine import SGEngine, PipelineResult
 from ..session.memory import SessionMemory
+from ..session.conversation_logger import get_conversation_logger
 from ..storage.staleness import check_staleness
 
 
@@ -198,6 +199,7 @@ def query_context_tool(params: dict) -> dict:
     session = _get_session()
     config: SGConfig = _server_state.get("config")
     metrics: MetricsLogger = _server_state["metrics"]
+    conv_logger = get_conversation_logger(root)
 
     prompt = params["prompt"]
     entities = params.get("entities") or []
@@ -219,6 +221,18 @@ def query_context_tool(params: dict) -> dict:
 
     t0 = time.perf_counter()
 
+    # Check if we've recently queried this (prevent loops)
+    if conv_logger.was_recently_queried(prompt, minutes_back=5):
+        last_entry = conv_logger.get_last_queried("Query")
+        if last_entry:
+            # Provide context about prior discovery
+            context_note = f"\n[From session log] This was already queried on {last_entry.timestamp}. Result: {last_entry.summary}"
+            prompt_with_context = prompt + context_note
+        else:
+            prompt_with_context = prompt
+    else:
+        prompt_with_context = prompt
+
     # If agent passed previous_response, retroactively record it
     # onto the LAST turn in the session. This gives us L2 data.
     if previous_response and session._turns:
@@ -230,13 +244,24 @@ def query_context_tool(params: dict) -> dict:
     engine: SGEngine = _server_state.get("engine")
     if engine:
         try:
-            result = engine.query(prompt, entities=set(entities))
+            result = engine.query(prompt_with_context, entities=set(entities))
             duration_ms = int((time.perf_counter() - t0) * 1000)
             session.save(root)
 
+            # Log to conversation history
+            files_found = list({c.skeleton.file_path for c in result.candidates})
+            conv_logger.add_entry(
+                user_prompt=prompt,
+                agent_action="Query context",
+                discovered_patterns=list({c.skeleton.fqn for c in result.candidates[:5]}),
+                files_modified=[],
+                summary=f"Retrieved {len(result.candidates)} candidates in {duration_ms}ms",
+                reason="IDE agent queried for context",
+            )
+
             # Log metrics
             if metrics:
-                files_involved = list({c.skeleton.file_path for c in result.candidates})
+                files_involved = files_found
                 metrics.log_skeleton_query(
                     prompt=prompt,
                     sg_tokens=result.context_tokens,
@@ -295,6 +320,7 @@ def query_context_tool(params: dict) -> dict:
         session=session,
         top_n=top_n,
         enable_keyword_fallback=config.enable_keyword_fallback if config else False,
+        enable_bm25_fallback=config.enable_bm25_fallback if config else True,
     )
 
     try:
@@ -569,10 +595,15 @@ def report_completion_tool(params: dict) -> dict:
     if mem is None:
         return {"status": "skipped", "reason": "session memory not loaded"}
 
+    root = _get_root()
+    conv_logger = get_conversation_logger(root)
     summary = params.get("summary", "")
     files_modified = params.get("files_modified", [])
     agent_response = params.get("agent_response", summary)
     session_end = params.get("session_end", False)
+    task = params.get("task", summary)
+    discovered_patterns = params.get("discovered_patterns", [])
+    metadata_updated = params.get("metadata_updated", {})
 
     try:
         mem.post_process(
@@ -586,10 +617,21 @@ def report_completion_tool(params: dict) -> dict:
         if config and config.auto_rebuild_on_completion:
             try:
                 from ..build import update_index
-                update_index(_get_root())
+                update_index(root)
                 index_updated = True
             except Exception:
                 index_updated = False
+
+        # Log to conversation history
+        conv_logger.add_entry(
+            user_prompt=task,
+            agent_action="Complete task",
+            discovered_patterns=discovered_patterns,
+            files_modified=files_modified,
+            metadata_updated=metadata_updated,
+            summary=summary,
+            reason="Agent reported completion",
+        )
 
         if session_end:
             mem.compress()
