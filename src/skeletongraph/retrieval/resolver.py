@@ -75,6 +75,7 @@ def resolve_context(
     seed_fqns: Optional[Set[str]] = None,
     mode_spec: Optional["ModeSpec"] = None,
     enable_keyword_fallback: bool = False,
+    enable_bm25_fallback: bool = False,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
@@ -120,22 +121,48 @@ def resolve_context(
         confidence_reason = f"Exact entity match: {', '.join(list(target_fqns)[:3])}"
         match_source = "entity"
     else:
-        # Optional keyword fallback (disabled by default)
-        if enable_keyword_fallback:
-            search_results = store.inverted_index.search(prompt, top_k=15)
-            if search_results:
-                target_fqns = {fqn for fqn, _ in search_results}
-                confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
+        # Optional BM25 fallback (disabled by default)
+        if enable_bm25_fallback:
+            bm25_results = _bm25_fallback(prompt, store, top_k=15)
+            if bm25_results:
+                target_fqns = {fqn for fqn, _ in bm25_results}
+                confidence = "MEDIUM" if len(bm25_results) > 3 else "LOW"
                 confidence_reason = (
-                    f"Matched {len(search_results)} entities via keyword search"
+                    f"Matched {len(bm25_results)} entities via BM25 fallback"
                 )
-                match_source = "keyword"
+                match_source = "bm25"
+            elif enable_keyword_fallback:
+                search_results = store.inverted_index.search(prompt, top_k=15)
+                if search_results:
+                    target_fqns = {fqn for fqn, _ in search_results}
+                    confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
+                    confidence_reason = (
+                        f"Matched {len(search_results)} entities via keyword search"
+                    )
+                    match_source = "keyword"
+                else:
+                    confidence = "LOW"
+                    confidence_reason = "No entity, BM25, or keyword matches found"
             else:
                 confidence = "LOW"
-                confidence_reason = "No entity or keyword matches found"
+                confidence_reason = "No entity or BM25 matches found"
         else:
-            confidence = "LOW"
-            confidence_reason = "No entity matches; keyword fallback disabled"
+            # Optional keyword fallback (disabled by default)
+            if enable_keyword_fallback:
+                search_results = store.inverted_index.search(prompt, top_k=15)
+                if search_results:
+                    target_fqns = {fqn for fqn, _ in search_results}
+                    confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
+                    confidence_reason = (
+                        f"Matched {len(search_results)} entities via keyword search"
+                    )
+                    match_source = "keyword"
+                else:
+                    confidence = "LOW"
+                    confidence_reason = "No entity or keyword matches found"
+            else:
+                confidence = "LOW"
+                confidence_reason = "No entity matches; keyword fallback disabled"
 
     # Step 4: Build ranker with hub scores
     ranker = Ranker(store.graph)
@@ -278,6 +305,25 @@ def _resolve_seed_fqns(seed_fqns: Set[str], store: IndexStore) -> Set[str]:
         resolved.update(sorted(matches, key=len)[:5])
 
     return resolved
+
+
+def _bm25_fallback(prompt: str, store: IndexStore, top_k: int = 10) -> List[Tuple[str, float]]:
+    """Run BM25 search against the indexed token corpus."""
+    from ..graph.bm25 import BM25Model
+
+    if store.inverted_index.entry_count == 0:
+        return []
+
+    bm25 = store.bm25_model
+    if bm25 is None or not bm25.is_fitted:
+        corpus = store.inverted_index.build_bm25_corpus()
+        if not corpus:
+            return []
+        bm25 = BM25Model()
+        bm25.fit(corpus)
+        store.bm25_model = bm25
+
+    return bm25.search(prompt, top_k=top_k)
 
 
 # ── ModeSpec-driven expansion (v5) ──────────────────────────────────────

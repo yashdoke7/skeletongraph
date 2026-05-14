@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..graph.bloom import BloomFilter
+from ..graph.bm25 import BM25Model
 from ..graph.dependency import DependencyGraph
 from ..graph.embeddings import EmbeddingStore
 from ..graph.inverted_index import InvertedIndex
@@ -89,6 +90,7 @@ class IndexStore:
     bloom: BloomFilter
     dirty_tracker: DirtyTracker
     embeddings: EmbeddingStore = field(default_factory=EmbeddingStore)
+    bm25_model: Optional[BM25Model] = None
     constraints: Optional[ConstraintStore] = None  # Loaded at build time
     pagerank_scores: Dict[str, float] = field(default_factory=dict)  # v4: FQN → PageRank
 
@@ -288,6 +290,7 @@ def load_index(project_root: Path) -> Optional[IndexStore]:
         bloom=bloom,
         dirty_tracker=dirty_tracker,
         embeddings=embeddings,
+        bm25_model=None,
         constraints=constraints,
         pagerank_scores=pagerank_scores,
     )
@@ -305,4 +308,5 @@ def create_empty_index() -> IndexStore:
         bloom=BloomFilter(),
         dirty_tracker=DirtyTracker(),
         embeddings=EmbeddingStore(),
+        bm25_model=None,
     )

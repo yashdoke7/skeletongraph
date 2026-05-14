@@ -399,6 +399,7 @@ class SGEngine:
             seed_fqns=seed_fqns,
             mode_spec=mode_spec,
             enable_keyword_fallback=self._config.enable_keyword_fallback,
+            enable_bm25_fallback=self._config.enable_bm25_fallback,
         )
 
         # Filter excluded FQNs (for supplementary queries)

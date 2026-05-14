@@ -274,6 +274,18 @@ class InvertedIndex:
         """Direct keyword lookup. Returns all FQNs indexed under this keyword."""
         return set(self._index.get(keyword.lower(), set()))
 
+    def build_bm25_corpus(self) -> Dict[str, str]:
+        """Build a lightweight corpus for BM25 from indexed tokens.
+
+        Uses the token set per FQN, which already includes docstrings,
+        signatures, and body keywords. Each token appears once to keep
+        the corpus compact and deterministic.
+        """
+        return {
+            fqn: " ".join(sorted(tokens))
+            for fqn, tokens in self._fqn_tokens.items()
+        }
+
     @property
     def term_count(self) -> int:
         """Number of unique terms in the index."""

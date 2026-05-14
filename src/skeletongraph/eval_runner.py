@@ -141,7 +141,11 @@ def run_evaluation(
     success_count = 0
 
     for case in eval_cases:
-        result = resolve_context(case.prompt, store, enable_keyword_fallback=False)
+        result = resolve_context(
+            case.prompt, store, 
+            enable_keyword_fallback=False,
+            enable_bm25_fallback=config.enable_bm25_fallback,
+        )
         assembled = assemble_context(result, store, target)
 
         # Check which expected FQNs are in the candidates

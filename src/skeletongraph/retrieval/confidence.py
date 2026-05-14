@@ -143,6 +143,9 @@ def compute_confidence(
     elif match_source == "embedding":
         score.entity_match = 0.55
         score.factors_detail["entity_match"] = "Embedding similarity match"
+    elif match_source == "bm25":
+        score.entity_match = 0.5
+        score.factors_detail["entity_match"] = "BM25 fallback match"
     elif match_source == "keyword":
         score.entity_match = 0.4
         score.factors_detail["entity_match"] = "Keyword search match"
