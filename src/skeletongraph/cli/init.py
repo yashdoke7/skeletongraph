@@ -23,13 +23,14 @@ console = Console()
 
 
 def run_init(project_root: Path, store=None, non_interactive: bool = False,
-             agent: str | None = None) -> bool:
+             agent: str | None = None, auto_infer: bool = False) -> bool:
     """Run init logic. Called from sg build on first run.
 
     Args:
         project_root: Project root directory.
         store: Optional IndexStore (if build already ran).
         non_interactive: If True, skip prompts and use defaults.
+        auto_infer: If True, use LLM to infer metadata (no prompts).
         agent: IDE agent preset name (cursor, copilot, codex, claude_code, antigravity).
 
     Returns:
@@ -49,7 +50,12 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
     # ── project.md ───────────────────────────────────────────────────
     project_name = project_root.name
 
-    if non_interactive:
+    if auto_infer:
+        # Use LLM to infer metadata from codebase
+        if not non_interactive:
+            console.print("[cyan]Inferring project metadata from codebase...[/cyan]")
+        goal, constraints, phase, decisions = _infer_metadata_with_llm(project_root, store)
+    elif non_interactive:
         goal = f"{project_name} project"
         constraints = "[Add constraints here]"
         phase = _detect_phase(project_root, store)
@@ -105,11 +111,7 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
         agent_names = list(AGENT_PRESETS.keys())
         console.print("[bold cyan]Which IDE are you using?[/bold cyan]")
         for i, name in enumerate(agent_names, 1):
-            preset = AGENT_PRESETS[name]
-            console.print(
-                f"  [cyan]{i}[/cyan]. {name}  "
-                f"[dim](SLM: {preset['slm']}, MLM: {preset['mlm']}, LLM: {preset['llm']})[/dim]"
-            )
+            console.print(f"  [cyan]{i}[/cyan]. {name}")
         choice = Prompt.ask(
             "\n[bold]Select agent[/bold] (number or name)",
             default="1",
@@ -132,19 +134,7 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
 
     if not non_interactive:
         console.print(f"\n[green]✓[/green] Agent: [bold]{selected_agent}[/bold]")
-        console.print(f"  SLM: {preset['slm']}  MLM: {preset['mlm']}  LLM: {preset['llm']}")
-        hint = preset.get('select_model_hint', '')
-        if hint:
-            console.print(f"\n  [yellow]⚠ ACTION REQUIRED:[/yellow] {hint}")
-
-        # Show available models
-        models = preset.get('models_available', [])
-        if models:
-            console.print(f"\n  [dim]All {selected_agent} models: {', '.join(models[:10])}")
-            if len(models) > 10:
-                console.print(f"  ... and {len(models) - 10} more[/dim]")
-            else:
-                console.print("[/dim]", end="")
+        console.print("  [dim]Configured integration and defaults for this IDE.[/dim]")
 
     # Detect stack
     stack = _detect_stack(project_root)
@@ -189,6 +179,143 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
         _write_mcp_config(project_root, platforms=[selected_agent])
 
     return True
+
+
+def _detect_phase(project_root: Path, store=None) -> str:
+    """Detect project phase from git/README/files."""
+    # Check git for recent activity
+    git_dir = project_root / ".git"
+    if git_dir.exists():
+        try:
+            from datetime import datetime, timedelta
+            mtime = git_dir.stat().st_mtime
+            last_updated = datetime.fromtimestamp(mtime)
+            if (datetime.now() - last_updated).days < 30:
+                return "active"
+            elif (datetime.now() - last_updated).days < 180:
+                return "maintenance"
+            else:
+                return "inactive"
+        except Exception:
+            pass
+
+    # Check README for lifecycle hints
+    readme_files = [
+        project_root / "README.md",
+        project_root / "README.rst",
+        project_root / "README.txt",
+    ]
+    for readme in readme_files:
+        if readme.exists():
+            content = readme.read_text(errors="ignore").lower()
+            if "deprecated" in content or "no longer" in content:
+                return "deprecated"
+            if "in development" in content or "work in progress" in content:
+                return "active"
+
+    return "active"
+
+
+def _infer_metadata_with_llm(project_root: Path, store=None) -> tuple:
+    """Use LLM to infer project metadata from codebase.
+    
+    Returns: (goal, constraints, phase, decisions)
+    """
+    try:
+        import litellm
+    except ImportError:
+        # Fallback if litellm not available
+        return (
+            f"{project_root.name} project",
+            "[Add constraints here]",
+            _detect_phase(project_root, store),
+            "[Add key architectural decisions here]",
+        )
+
+    # Gather codebase signals
+    readme_text = ""
+    readme_files = [
+        project_root / "README.md",
+        project_root / "README.rst",
+        project_root / "setup.py",
+        project_root / "pyproject.toml",
+    ]
+    for f in readme_files:
+        if f.exists():
+            try:
+                readme_text += f.read_text(errors="ignore")[:500]  # First 500 chars
+            except Exception:
+                pass
+
+    top_files = []
+    try:
+        for py_file in (project_root / "src").rglob("*.py") if (project_root / "src").exists() else project_root.rglob("*.py"):
+            if "__pycache__" not in str(py_file) and ".git" not in str(py_file):
+                top_files.append(py_file.read_text(errors="ignore")[:200])
+                if len(top_files) >= 3:
+                    break
+    except Exception:
+        pass
+
+    # Build inference prompt
+    codebase_context = "\n\n".join([readme_text] + top_files)[:1000]
+    
+    prompt = f"""Analyze this codebase and infer 4 key metadata fields. Be concise.
+
+## Codebase Context:
+{codebase_context}
+
+## Your Task:
+Return ONLY a JSON object (no markdown, no explanation) with:
+{{
+  "goal": "1-2 sentence description of what this project does",
+  "constraints": "2-3 key constraints that must never be violated (comma-separated)",
+  "phase": "active|maintenance|deprecated|experimental",
+  "decisions": "2-3 key architectural decisions (comma-separated)"
+}}
+
+## Example:
+{{
+  "goal": "Python package for AST-based code retrieval using tree-sitter",
+  "constraints": "No SQL database required, BM25 fallback always available",
+  "phase": "active",
+  "decisions": "Wrapper-first architecture, docstring-first summaries, tree-sitter for polyglot support"
+}}
+"""
+
+    try:
+        from ..config import SGConfig
+        cfg = SGConfig()
+        response = litellm.completion(
+            model=cfg.cli_mlm_model,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=10,
+            temperature=0.3,
+        )
+        
+        import json
+        text = response.choices[0].message.content
+        # Extract JSON from response (handle markdown code blocks)
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0]
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0]
+        
+        data = json.loads(text.strip())
+        return (
+            data.get("goal", f"{project_root.name} project"),
+            data.get("constraints", "[Add constraints here]"),
+            data.get("phase", "active"),
+            data.get("decisions", "[Add key architectural decisions here]"),
+        )
+    except Exception as e:
+        # Fallback on any LLM error
+        return (
+            f"{project_root.name} project",
+            "[Add constraints here]",
+            _detect_phase(project_root, store),
+            "[Add key architectural decisions here]",
+        )
 
 
 def _detect_phase(project_root: Path, store=None) -> str:
@@ -319,11 +446,12 @@ def _generate_architecture(project_root: Path, store=None) -> str:
 @click.command("init")
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts, use defaults")
+@click.option("--auto-infer", is_flag=True, help="Use LLM to infer metadata from codebase")
 @click.option("--agent", "-a", type=click.Choice(
     ["cursor", "copilot", "codex", "claude_code", "antigravity"],
     case_sensitive=False,
 ), default=None, help="IDE agent preset")
-def init_command(path: str, non_interactive: bool, agent: str):
+def init_command(path: str, non_interactive: bool, auto_infer: bool, agent: str):
     """Initialize project.md and architecture.md for SkeletonGraph."""
     project_root = Path(path).resolve()
 
@@ -331,4 +459,4 @@ def init_command(path: str, non_interactive: bool, agent: str):
         console.print(f"[red]Error:[/red] {project_root} is not a directory")
         sys.exit(1)
 
-    run_init(project_root, non_interactive=non_interactive, agent=agent)
+    run_init(project_root, non_interactive=non_interactive, auto_infer=auto_infer, agent=agent)

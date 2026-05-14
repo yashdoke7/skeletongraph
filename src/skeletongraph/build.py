@@ -22,6 +22,7 @@ from .parser.edge_extractor import build_short_name_index, extract_edges
 from .parser.import_resolver import ImportResolver
 from .parser.skeleton import FileSkeleton
 from .graph.bloom import BloomFilter
+from .graph.bm25 import BM25Model
 from .graph.dependency import DependencyGraph
 from .graph.embeddings import EmbeddingStore, is_available as embeddings_available
 from .graph.inverted_index import InvertedIndex, extract_body_keywords
@@ -296,7 +297,7 @@ def build_index(
             on_progress(f"Seeded {seeded} summaries from docstrings", 0, 0)
 
     # ── Phase 3d: Auto-summarize top 20% hub functions (v4) ──────────
-    if cfg.auto_summarize_on_build and store.pagerank_scores:
+    if cfg.auto_summarize_on_build and (not cfg.summary_use_docstrings) and store.pagerank_scores:
         hub_fqns = get_hub_functions(store.pagerank_scores, top_percent=0.20)
         # Filter out already-summarized ones
         unsummarized = [f for f in hub_fqns if _summary_needs_refresh(f, store, cfg)]
@@ -352,6 +353,10 @@ def build_index(
         store.embeddings.build(emb_entries)
     else:
         store.embeddings = EmbeddingStore()
+
+    # BM25 model (lazy-built on first fallback use, but can be eager-built now)
+    # Disabled by default for build speed; will be built on-demand in resolver
+    store.bm25_model = None
 
     # Load constraints
     store.constraints = ConstraintStore()
@@ -446,9 +451,14 @@ def update_index(
     if changed_count == 0:
         return store
 
+    removed_fqns: Set[str] = set()
+    changed_entries: List[tuple] = []
+
     # Remove deleted files
     for file_path in deleted_files:
-        _remove_file_from_store(store, file_path, remove_summaries=True)
+        removed_fqns.update(
+            _remove_file_from_store(store, file_path, remove_summaries=True)
+        )
 
     # Process new and modified files — cache results for edge phase
     cached_results: Dict[str, FileExtractionResult] = {}
@@ -460,7 +470,7 @@ def update_index(
 
         # Remove old data for modified files
         if file_path in modified_files:
-            _remove_file_from_store(store, file_path)
+            removed_fqns.update(_remove_file_from_store(store, file_path))
 
         # Parse new/modified file
         result = extract_file(file_path, project_root)
@@ -494,6 +504,11 @@ def update_index(
                 docstring=sk.docstring,
                 body_keywords=body_kw,
             )
+
+            if cfg.enable_embeddings and embeddings_available():
+                changed_entries.append(
+                    (sk.fqn, sk.signature, sk.docstring or "", body_kw)
+                )
 
             # Seed summary from docstring if enabled
             if cfg.summary_use_docstrings:
@@ -575,6 +590,16 @@ def update_index(
     store.constraints = ConstraintStore()
     store.constraints.load(project_root)
 
+    # Update embeddings (incremental) if enabled
+    if cfg.enable_embeddings and embeddings_available():
+        if store.embeddings:
+            store.embeddings.update(changed_entries, sorted(removed_fqns))
+    else:
+        store.embeddings = EmbeddingStore()
+
+    # Invalidate BM25 model so it can be rebuilt on-demand
+    store.bm25_model = None
+
     # Update meta
     store.meta.build_timestamp = time.time()
     store.meta.total_files = len(store.file_skeletons)
@@ -584,7 +609,7 @@ def update_index(
 
 
     # Auto-summarize changed functions (if enabled)
-    if cfg.auto_summarize_on_update and cached_results:
+    if cfg.auto_summarize_on_update and (not cfg.summary_use_docstrings) and cached_results:
         _summarize_changed_functions(cached_results, store, project_root, cfg, on_progress)
 
     save_index(store, project_root)
@@ -593,6 +618,10 @@ def update_index(
 
 def _summary_needs_refresh(fqn: str, store: IndexStore, cfg: SGConfig) -> bool:
     """Return True when summary is missing or too short to be useful."""
+    if cfg.summary_use_docstrings:
+        sk = store.skeleton_table.get(fqn)
+        if sk and sk.docstring:
+            return False
     summary = store.summaries.get(fqn)
     if not summary:
         return True
@@ -605,12 +634,13 @@ def _word_count(text: str) -> int:
 
 def _maybe_seed_summary_from_docstring(sk, store: IndexStore, cfg: SGConfig) -> None:
     """Seed summary from docstring if no usable summary exists."""
-    if store.summaries.get(sk.fqn):
-        return
     if not sk.docstring:
         return
     doc_line = sk.docstring.strip().splitlines()[0]
-    if _word_count(doc_line) >= cfg.summary_min_words:
+    if _word_count(doc_line) < cfg.summary_min_words:
+        return
+    existing = store.summaries.get(sk.fqn) or ""
+    if existing != doc_line:
         store.summaries.set(sk.fqn, doc_line)
 
 
@@ -647,6 +677,8 @@ def _summarize_changed_functions(
         if not file_skel:
             continue
         for sk in file_skel.all_skeletons:
+            if cfg.summary_use_docstrings and sk.docstring:
+                continue
             if not _summary_needs_refresh(sk.fqn, store, cfg):
                 continue
             fp = project_root / sk.file_path

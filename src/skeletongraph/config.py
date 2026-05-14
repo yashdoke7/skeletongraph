@@ -218,6 +218,7 @@ class SGConfig:
     slm_max_fqns_in_prompt: int = 200       # Max FQN names sent to SLM for matching
 
     # ── Retrieval Fallbacks ─────────────────────────────────────────────
+    enable_bm25_fallback: bool = True       # Use BM25 over comment/token corpus when no entity matches
     enable_keyword_fallback: bool = False   # Allow inverted-index fallback when no entity matches
 
     # ── Tier Routing ───────────────────────────────────────────────────
@@ -239,8 +240,8 @@ class SGConfig:
     ignore_patterns: List[str] = field(default_factory=list)  # Extra ignore patterns
     parallel_parse: bool = False            # Reserved for future concurrent parsing
     auto_summarize: bool = False            # Summarize on build?
-    auto_summarize_on_build: bool = True    # Auto-summarize top 20% by PageRank
-    auto_summarize_on_update: bool = True   # Auto-summarize changed functions on update
+    auto_summarize_on_build: bool = False   # Keep build LLM-free by default (docstring + BM25 path)
+    auto_summarize_on_update: bool = False  # Keep update LLM-free by default (docstring + BM25 path)
     summary_use_docstrings: bool = True     # Seed summaries from docstrings/comments
     summary_min_words: int = 6              # Minimum word count to accept a summary
     auto_rebuild_on_completion: bool = True # Rebuild index after task completion
@@ -392,6 +393,10 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
             "enable_keyword_fallback",
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
+        "SG_ENABLE_BM25_FALLBACK": (
+            "enable_bm25_fallback",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
         "SG_SHOW_COST": ("show_cost_per_query", lambda v: v.lower() in ("1", "true", "yes")),
     }
 
@@ -444,6 +449,7 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "cli_llm_model": config.cli_llm_model,
         "cli_api_base": config.cli_api_base,
         "enable_slm_fallback": config.enable_slm_fallback,
+        "enable_bm25_fallback": config.enable_bm25_fallback,
         "enable_keyword_fallback": config.enable_keyword_fallback,
         "enable_dynamic_model_routing": config.enable_dynamic_model_routing,
         "tier_routing": config.tier_routing,
