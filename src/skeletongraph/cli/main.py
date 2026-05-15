@@ -2946,67 +2946,6 @@ def log_cmd(path: str, last_n: int, session_id: str):
     console.print(table)
 
 
-@app.command(name="config")
-@click.option("--path", "-p", default=".", help="Project root directory")
-@click.option("--json-output", is_flag=True, help="Machine-readable JSON")
-def config_cmd(path: str, json_output: bool):
-    """Show the active SG configuration."""
-    project_root = Path(path).resolve()
-
-    from ..config import load_config
-
-    config = load_config(project_root)
-
-    if json_output:
-        payload = {
-            "agent": config.agent,
-            "ide": {
-                "slm": config.slm_model,
-                "mlm": config.mlm_model,
-                "llm": config.llm_model,
-            },
-            "cli": {
-                "provider": config.cli_provider,
-                "slm": config.cli_slm_model,
-                "mlm": config.cli_mlm_model,
-                "llm": config.cli_llm_model,
-            },
-            "features": {
-                "slm_fallback": config.enable_slm_fallback,
-                "bm25_fallback": config.enable_bm25_fallback,
-                "keyword_fallback": config.enable_keyword_fallback,
-                "dynamic_routing": config.enable_dynamic_model_routing,
-                "session": config.enable_session,
-            },
-        }
-        console.print(json.dumps(payload, indent=2))
-        return
-
-    table = Table(title="SG Config", show_header=False)
-    table.add_column("Key", style="cyan")
-    table.add_column("Value", style="green")
-    table.add_row("Agent preset", config.agent or "default")
-    table.add_row("IDE SLM", config.slm_model)
-    table.add_row("IDE MLM", config.mlm_model)
-    table.add_row("IDE LLM", config.llm_model)
-    table.add_row("CLI provider", config.cli_provider)
-    table.add_row("CLI SLM", config.cli_slm_model)
-    table.add_row("CLI MLM", config.cli_mlm_model)
-    table.add_row("CLI LLM", config.cli_llm_model)
-    table.add_row("SLM fallback", "on" if config.enable_slm_fallback else "off")
-    table.add_row("BM25 fallback", "on" if config.enable_bm25_fallback else "off")
-    table.add_row("Dynamic routing", "on" if config.enable_dynamic_model_routing else "off")
-    console.print(table)
-
-
-if __name__ == "__main__":
-    app()
-
-
-# ── Register v3 subcommands ────────────────────────────────────────────
-from .prepare import prepare as prepare_cmd
-from .init import init_command as init_cmd
-
 @app.command("hook")
 @click.argument("event_name",
                 type=click.Choice([
@@ -3069,6 +3008,6 @@ def hook_cmd(event_name: str, path: str):
     if result:
         click.echo(_json.dumps(result))
 
-app.add_command(prepare_cmd)
-app.add_command(init_cmd)
-app.add_command(hook_cmd)
+
+if __name__ == "__main__":
+    app()
