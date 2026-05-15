@@ -119,7 +119,11 @@ def resolve_context(
     if target_fqns:
         confidence = "HIGH"
         confidence_reason = f"Exact entity match: {', '.join(list(target_fqns)[:3])}"
-        match_source = "entity"
+        match_source = (
+            "slm"
+            if any(getattr(e, "entity_type", "") == "slm_entity" for e in intent.entities)
+            else "entity"
+        )
     else:
         # Optional BM25 fallback (disabled by default)
         if enable_bm25_fallback:
@@ -257,6 +261,9 @@ def _resolve_entities(intent: Intent, store: IndexStore) -> Set[str]:
     # Function name mentions not tied to a file
     if not fqns and intent.function_names:
         for name in intent.function_names:
+            if name in store.skeleton_table:
+                fqns.add(name)
+                continue
             for fqn, sk in store.skeleton_table.items():
                 short = fqn.split("::")[-1] if "::" in fqn else fqn
                 if short == name or short.endswith(f".{name}"):

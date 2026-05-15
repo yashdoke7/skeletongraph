@@ -292,11 +292,12 @@ def slm_plan_tools(
             user_prompt,
             system=_PLAN_SYSTEM,
             config=LLMConfig(
-                model=config.slm_model,
+                model=config.get_cli_model_for_tier("slm"),
                 temperature=0.0,
                 max_tokens=250,
                 timeout=config.slm_timeout,
                 max_retries=0,
+                api_base=config.get_cli_api_base(),
             ),
         )
         plan.raw_response = resp.text
@@ -455,11 +456,12 @@ def slm_extract(
     # Call SLM
     try:
         llm_config = LLMConfig(
-            model=config.slm_model,
+            model=config.get_cli_model_for_tier("slm"),
             temperature=0.0,    # Deterministic extraction
             max_tokens=300,     # Structured JSON, ~100-200 tokens
             timeout=config.slm_timeout,
             max_retries=1,
+            api_base=config.get_cli_api_base(),
         )
         resp = complete(user_msg, system=_EXTRACT_SYSTEM, config=llm_config)
     except Exception as e:

@@ -132,6 +132,8 @@ class SGEngine:
         self._config = config or load_config(self._root)
         self._store: Optional[IndexStore] = None
         self._session: Optional[Session] = None
+        self._last_assembly_tokens: int = 0
+        self._last_assembly_native_estimate: int = 0
 
     def _ensure_loaded(self) -> IndexStore:
         """Lazy-load the index store."""
@@ -264,7 +266,8 @@ class SGEngine:
         result.base_model_tier = MODE_SPECS[classification.query_mode].tier
 
         # Token counting
-        result.context_tokens = len(result.context_text) // 4  # ~4 chars/token
+        result.context_tokens = self._last_assembly_tokens or len(result.context_text) // 4
+        result.saved_vs_raw_tokens = self._last_assembly_native_estimate
 
         if self._config.enable_dynamic_model_routing:
             routing = route_model_tier(
@@ -439,11 +442,20 @@ class SGEngine:
                 config=self._config,
             )
             context_text = assembled.text if hasattr(assembled, "text") else str(assembled)
+            self._last_assembly_tokens = getattr(assembled, "token_count", 0) or len(context_text) // 4
+            reduction_ratio = getattr(assembled, "reduction_ratio", 0.0) or 0.0
+            self._last_assembly_native_estimate = (
+                int(reduction_ratio * self._last_assembly_tokens)
+                if reduction_ratio > 0
+                else 0
+            )
         except Exception as e:
             logger.warning("prompt_builder.assemble failed: %s, using minimal assembly", e)
             context_text = self._minimal_assemble(
                 prompt, resolver_result, slm_result
             )
+            self._last_assembly_tokens = len(context_text) // 4
+            self._last_assembly_native_estimate = 0
 
         # Prepend SLM reasoning if available
         if slm_result and slm_result.reasoning:
@@ -451,6 +463,7 @@ class SGEngine:
                 f"## Retrieval Analysis\n{slm_result.reasoning}\n\n"
                 + context_text
             )
+            self._last_assembly_tokens = len(context_text) // 4
 
         return context_text
 

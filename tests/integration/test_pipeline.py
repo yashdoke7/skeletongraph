@@ -9,8 +9,8 @@ from pathlib import Path
 
 from skeletongraph.build import build_index, update_index, discover_files
 from skeletongraph.storage.local import load_index, save_index
-from skeletongraph.retrieval.intent import analyze_intent, TaskType
-from skeletongraph.retrieval.resolver import resolve_context, Tier
+from skeletongraph.retrieval.intent import Entity, Intent, analyze_intent, TaskType
+from skeletongraph.retrieval.resolver import _resolve_entities, resolve_context, Tier
 from skeletongraph.retrieval.budget import TokenBudget, Zone3Mode
 from skeletongraph.assembly.zone_assembler import assemble_context
 
@@ -190,6 +190,18 @@ class TestResolver:
         # validate_token should be Tier 1
         tier1_fqns = [c.skeleton.fqn for c in result.candidates if c.tier == Tier.TIER1]
         assert any("validate_token" in fqn for fqn in tier1_fqns)
+
+    def test_resolve_exact_slm_fqn(self, store):
+        store, tmp = store
+        fqn = "auth/middleware.py::validate_token"
+        intent = Intent(
+            task_type=TaskType.DEBUG,
+            entities=[Entity(value=fqn, entity_type="slm_entity", confidence=0.8)],
+            file_paths=[],
+            function_names=[fqn],
+        )
+
+        assert fqn in _resolve_entities(intent, store)
 
     def test_resolve_by_file(self, store):
         store, tmp = store

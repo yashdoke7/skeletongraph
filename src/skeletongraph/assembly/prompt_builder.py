@@ -465,10 +465,26 @@ def _pick_summary(sk: SkeletonCore, store: IndexStore) -> str:
     """Pick the best available summary (LLM summary or docstring fallback)."""
     if sk.docstring:
         return sk.docstring.strip().splitlines()[0]
-    summary = store.summaries.get(sk.fqn, "")
+    summary = store.summaries.get(sk.fqn) or ""
     if summary:
         return summary
     return ""
+
+
+def _is_test_candidate(candidate: RankedCandidate) -> bool:
+    """Return True when a candidate looks like test code."""
+    sk = candidate.skeleton
+    path = sk.file_path.replace("\\", "/").lower()
+    name = sk.fqn.split("::")[-1].lower()
+    return (
+        "/test" in path
+        or path.startswith("test")
+        or "_test." in path
+        or path.endswith("_test.py")
+        or path.endswith("test.py")
+        or name.startswith("test_")
+        or ".test_" in name
+    )
 
 
 # ── Token estimation ─────────────────────────────────────────────────────
