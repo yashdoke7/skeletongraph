@@ -253,6 +253,10 @@ class SGEngine:
         if not resolver_result.candidates and result.confidence in ("LOW", "MISS"):
             result.pipeline_path = "passthrough"
 
+        # ── Enqueue stale summaries for background generation ───────────
+        if self._config.summary_queue_enabled and resolver_result.candidates:
+            self._enqueue_stale_summaries(store, resolver_result)
+
         # ── Phase 3: ASSEMBLE ───────────────────────────────────────────
         p3_start = time.time()
         result.context_text = self._phase3_assemble(
@@ -700,6 +704,28 @@ class SGEngine:
     def get_store(self) -> IndexStore:
         """Access the loaded index store (lazy loaded)."""
         return self._ensure_loaded()
+
+    def _enqueue_stale_summaries(
+        self,
+        store,
+        resolver_result,
+    ) -> None:
+        """Enqueue retrieved functions that have no summary for background generation.
+
+        Best-effort — never raises, never blocks the query path.
+        Only the top 20 candidates are checked (the ones that actually land
+        in the assembled context).
+        """
+        try:
+            from .summary.queue import enqueue_for_summary
+            for c in resolver_result.candidates[:20]:
+                sk = c.skeleton
+                existing = store.summaries.get(sk.fqn)
+                if not existing or existing.startswith("[pending"):
+                    enqueue_for_summary(self._sg_dir, sk)
+                    store.summaries.mark_pending(sk.fqn)
+        except Exception:
+            pass
 
     def _model_for_tier(self, tier: str, delivery: str) -> str:
         """Resolve a tier to an IDE label or CLI provider model."""

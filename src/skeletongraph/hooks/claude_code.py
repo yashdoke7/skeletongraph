@@ -164,6 +164,19 @@ def hook_post_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[s
     except Exception as e:
         _write_hook_log(sg_dir, "post_tool_use", f"ERROR: {e}")
 
+    # ── Background summary queue drain (best-effort) ─────────────────────
+    try:
+        from ..config import load_config
+        from ..summary.queue import drain_queue_background, queue_size
+        cfg = load_config(project_root)
+        if getattr(cfg, "summary_queue_enabled", True):
+            pending = queue_size(sg_dir)
+            if pending > 0:
+                drain_queue_background(project_root, cfg)
+                _write_hook_log(sg_dir, "post_tool_use", f"draining {pending} queued summaries")
+    except Exception:
+        pass
+
     return {}
 
 

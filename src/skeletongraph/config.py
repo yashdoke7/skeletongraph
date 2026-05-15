@@ -237,6 +237,16 @@ class SGConfig:
     default_detail_level: str = "compact"  # compact | full
     compact_body_line_limit: int = 60      # Lines to include for compact bodies
 
+    # ── Tier-0.5 Local LLM (Ollama) ───────────────────────────────────────
+    ollama_base_url: str = "http://localhost:11434"          # Ollama server URL
+    ollama_summary_model: str = "qwen2.5-coder:1.5b"        # Model for Tier-0.5 summaries
+    enable_local_summary: bool = True       # Try Ollama Tier-0.5 if available
+    ollama_timeout: int = 15                # Timeout per Ollama request (seconds)
+
+    # ── Post-turn summary queue ────────────────────────────────────────────
+    summary_queue_enabled: bool = True      # Enable async post-turn summary queue
+    summary_queue_max_batch: int = 10       # Max functions to process per drain run
+
     # ── Build & Indexing ───────────────────────────────────────────────
     ignore_patterns: List[str] = field(default_factory=list)  # Extra ignore patterns
     parallel_parse: bool = False            # Reserved for future concurrent parsing
@@ -404,6 +414,19 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
         "SG_SHOW_COST": ("show_cost_per_query", lambda v: v.lower() in ("1", "true", "yes")),
+        # Tier-0.5 / queue
+        "SG_OLLAMA_URL": ("ollama_base_url", str),
+        "SG_OLLAMA_MODEL": ("ollama_summary_model", str),
+        "SG_LOCAL_SUMMARY": (
+            "enable_local_summary",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
+        "SG_OLLAMA_TIMEOUT": ("ollama_timeout", int),
+        "SG_SUMMARY_QUEUE": (
+            "summary_queue_enabled",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
+        "SG_SUMMARY_QUEUE_BATCH": ("summary_queue_max_batch", int),
     }
 
     for env_key, (attr, type_fn) in _env_overrides.items():
@@ -483,6 +506,13 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "summary_min_words": config.summary_min_words,
         "auto_rebuild_on_completion": config.auto_rebuild_on_completion,
         "enable_embeddings": config.enable_embeddings,
+        # Tier-0.5 / queue
+        "ollama_base_url": config.ollama_base_url,
+        "ollama_summary_model": config.ollama_summary_model,
+        "enable_local_summary": config.enable_local_summary,
+        "ollama_timeout": config.ollama_timeout,
+        "summary_queue_enabled": config.summary_queue_enabled,
+        "summary_queue_max_batch": config.summary_queue_max_batch,
     }
     config_file = sg_dir / "config.json"
     config_file.write_text(

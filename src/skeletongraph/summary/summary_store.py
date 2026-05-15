@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 
 class SummaryStore:
@@ -24,10 +24,14 @@ class SummaryStore:
 
     NOT included in SkeletonCore. Loaded only during context assembly
     for Tier 2 (expanded skeleton) entries.
+
+    _pending_fqns tracks functions queued for background re-generation
+    (in-memory only — the queue file is the durable record).
     """
 
     def __init__(self) -> None:
         self._store: Dict[str, str] = {}
+        self._pending_fqns: Set[str] = set()
 
     def set(self, fqn: str, summary: str) -> None:
         """Set or update a summary."""
@@ -60,14 +64,33 @@ class SummaryStore:
     def has(self, fqn: str) -> bool:
         return fqn in self._store
 
+    # ── Pending / stale tracking (in-memory) ──────────────────────────────
+
+    def mark_pending(self, fqn: str) -> None:
+        """Mark a summary as pending background re-generation (stale)."""
+        self._pending_fqns.add(fqn)
+
+    def is_pending(self, fqn: str) -> bool:
+        """Return True if this FQN is queued for re-generation."""
+        return fqn in self._pending_fqns
+
+    def clear_pending(self, fqn: str) -> None:
+        """Remove FQN from the pending set (called after successful regen)."""
+        self._pending_fqns.discard(fqn)
+
+    def get_pending_fqns(self) -> List[str]:
+        """Return all FQNs currently pending re-generation."""
+        return list(self._pending_fqns)
+
     @property
     def count(self) -> int:
         return len(self._store)
 
     @property
     def pending_count(self) -> int:
-        """Number of entries where summary is a placeholder."""
-        return sum(1 for s in self._store.values() if s.startswith("[pending"))
+        """Number of entries where summary is a placeholder OR in pending set."""
+        placeholder = sum(1 for s in self._store.values() if s.startswith("[pending"))
+        return placeholder + len(self._pending_fqns - set(self._store))
 
     def all_fqns(self) -> List[str]:
         """All FQNs that have summaries."""

@@ -744,24 +744,147 @@ def run(
 
 @app.command()
 @click.option("--path", "-p", default=".", help="Project root directory")
-@click.option("--model", "-m", default="gemini/gemini-2.5-flash", help="LLM model")
-@click.option("--force", is_flag=True, help="Re-summarize all functions")
-@click.option("--api-key", envvar=["GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"], default=None, help="API key for the LLM provider")
-def summarize(path: str, model: str, force: bool, api_key: str):
-    """Generate LLM summaries for indexed functions."""
+@click.option(
+    "--tier", "-t",
+    type=click.Choice(["local", "cloud"], case_sensitive=False),
+    default="cloud",
+    help="Summary tier: local = Ollama (free, on-device), cloud = LLM API",
+)
+@click.option("--model", "-m", default=None, help="Override model (cloud: litellm name; local: ollama model name)")
+@click.option("--force", is_flag=True, help="Re-summarize all functions, not just missing ones")
+@click.option(
+    "--api-key",
+    envvar=["GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+    default=None,
+    help="API key for the cloud LLM provider",
+)
+def summarize(path: str, tier: str, model: str | None, force: bool, api_key: str | None):
+    """Generate summaries for indexed functions.
+
+    \b
+    sg summarize                       cloud tier (LLM API, default model)
+    sg summarize --tier local          Ollama Tier-0.5 (free, no API key)
+    sg summarize --tier local --model qwen2.5-coder:7b   larger Ollama model
+    sg summarize --tier cloud --model gemini/gemini-2.5-flash
+    sg summarize --force               re-summarize everything
+    """
     project_root = Path(path).resolve()
+    tier = tier.lower()
 
     from ..storage.local import load_index
-    from ..llm.summarizer import summarize_index
-    from ..llm.provider import LLMConfig
+    from ..config import load_config
 
     store = load_index(project_root)
     if store is None:
         console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
         return
 
-    cfg = LLMConfig(model=model, api_key=api_key or None)
-    console.print(f"[bold]> Summarizing with {model}[/bold]")
+    config = load_config(project_root)
+
+    # ── Tier: local (Ollama Tier-0.5) ────────────────────────────────────
+    if tier == "local":
+        from ..summary.ollama import is_ollama_available, batch_generate_ollama
+
+        ollama_base = config.ollama_base_url
+        ollama_model = model or config.ollama_summary_model
+
+        console.print(f"[bold]> Ollama Tier-0.5 summarization[/bold]")
+        console.print(f"  Server: {ollama_base}")
+        console.print(f"  Model:  {ollama_model}")
+
+        if not is_ollama_available(ollama_base):
+            console.print(
+                f"[red]Ollama not reachable at {ollama_base}.[/red] "
+                "Start Ollama with: ollama serve"
+            )
+            return
+
+        # Collect candidates
+        candidates = []
+        for fqn, sk in store.skeleton_table.items():
+            if not force and store.summaries.get(fqn):
+                continue
+            if sk.body_token_estimate < 10:
+                continue
+            candidates.append(sk)
+
+        if not candidates:
+            console.print("[green]All functions already summarized.[/green]")
+            return
+
+        console.print(f"  Summarizing [cyan]{len(candidates)}[/cyan] functions...\n")
+
+        import time as _time
+        start = _time.time()
+        summarized = 0
+        errors = 0
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Summarizing (Ollama)...", total=len(candidates))
+
+            for i, sk in enumerate(candidates):
+                short = sk.fqn.split("::")[-1] if "::" in sk.fqn else sk.fqn
+                progress.update(task, completed=i, description=f"[{i+1}/{len(candidates)}] {short}")
+
+                # Read body
+                file_path = project_root / sk.file_path
+                body = ""
+                try:
+                    if file_path.exists():
+                        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                        body = "\n".join(lines[max(0, sk.line_start - 1):sk.line_end])
+                except Exception:
+                    pass
+
+                from ..summary.ollama import generate_summary_ollama
+                summary = generate_summary_ollama(
+                    fqn=sk.fqn,
+                    signature=sk.signature,
+                    body=body,
+                    model=ollama_model,
+                    base_url=ollama_base,
+                    timeout=config.ollama_timeout,
+                )
+                if summary:
+                    store.summaries.set(sk.fqn, summary)
+                    summarized += 1
+                else:
+                    errors += 1
+
+            progress.update(task, completed=len(candidates))
+
+        elapsed = _time.time() - start
+
+        if summarized > 0:
+            sg_dir = project_root / ".skeletongraph"
+            store.summaries.save(sg_dir)
+
+        table = Table(title="Ollama Summarization Complete", show_header=False)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Tier", "0.5 (Ollama local)")
+        table.add_row("Model", ollama_model)
+        table.add_row("Summarized", str(summarized))
+        table.add_row("Skipped (already done)", str(len(store.skeleton_table) - len(candidates)))
+        table.add_row("Errors / timeouts", str(errors))
+        table.add_row("Duration", f"{elapsed:.1f}s")
+        table.add_row("API cost", "$0.00")
+        console.print(table)
+        return
+
+    # ── Tier: cloud (LLM API, Tier-1) ────────────────────────────────────
+    from ..llm.summarizer import summarize_index
+    from ..llm.provider import LLMConfig
+
+    cloud_model = model or config.summary_model or "gemini/gemini-2.5-flash"
+    cfg = LLMConfig(model=cloud_model, api_key=api_key or None)
+    console.print(f"[bold]> Cloud Tier-1 summarization with {cloud_model}[/bold]")
 
     with Progress(
         SpinnerColumn(),
@@ -782,6 +905,8 @@ def summarize(path: str, model: str, force: bool, api_key: str):
     table = Table(title="Summarization Complete", show_header=False)
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
+    table.add_row("Tier", "1 (cloud LLM)")
+    table.add_row("Model", cloud_model)
     table.add_row("Summarized", str(result.summarized))
     table.add_row("Skipped", str(result.skipped))
     table.add_row("Errors", str(result.errors))
