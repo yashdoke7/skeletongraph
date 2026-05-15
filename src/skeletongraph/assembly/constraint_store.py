@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
+import time
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
 
@@ -151,11 +152,20 @@ class ConstraintStore:
         """Add an unconfirmed proposal (from sg_constraint action=propose)."""
         return self.add_constraint(text, provenance=source, confirmed=False)
 
-    def confirm_constraint(self, constraint_id: str) -> bool:
-        """Mark a proposed constraint as confirmed. Returns True if found."""
+    def confirm_constraint(
+        self,
+        constraint_id: str,
+        project_root: Optional[Path] = None,
+    ) -> bool:
+        """Mark a proposed constraint as confirmed. Returns True if found.
+
+        If project_root is given, also promotes to decisions.md.
+        """
         for item in self._items:
             if item.id == constraint_id or item.id.startswith(constraint_id):
                 item.confirmed = True
+                if project_root is not None:
+                    _promote_to_decisions(item, project_root)
                 return True
         return False
 
@@ -252,6 +262,29 @@ _BLOCK_RE = re.compile(
     r"<!-- sg:constraint\s+id=(\S+)\s+confirmed=(\S+)\s+provenance=(\S+)\s*-->\n(.*?)\n<!-- /sg:constraint -->",
     re.DOTALL,
 )
+
+
+def _promote_to_decisions(item: Constraint, project_root: Path) -> None:
+    """Append a confirmed constraint to decisions.md as a persistent decision record."""
+    sg_dir = project_root / ".skeletongraph"
+    sg_dir.mkdir(parents=True, exist_ok=True)
+    decisions_path = sg_dir / "decisions.md"
+
+    date_str = time.strftime("%Y-%m-%d")
+    entry = (
+        f"\n## [{item.id}] {date_str}  —  {item.provenance}\n\n"
+        f"{item.text.strip()}\n"
+    )
+
+    if decisions_path.exists():
+        existing = decisions_path.read_text(encoding="utf-8", errors="replace")
+        # Skip if already promoted
+        if item.id in existing:
+            return
+        decisions_path.write_text(existing.rstrip() + "\n" + entry, encoding="utf-8")
+    else:
+        header = "# Decisions\n\nPromoted constraints and architectural decisions.\n"
+        decisions_path.write_text(header + entry, encoding="utf-8")
 
 
 def _parse_items(raw: str) -> List[Constraint]:

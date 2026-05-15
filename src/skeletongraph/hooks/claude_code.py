@@ -1,194 +1,245 @@
 """
-Claude Code hook integrations.
+Claude Code hook handlers — P3.
 
-Claude Code allows configuring custom scripts for events like session start,
-before prompt submission, and after tool use. These functions implement
-the SkeletonGraph v4 pipeline for those hooks.
+Four hooks used:
+  SessionStart       → start new session JSONL, inject "use SG" system message
+  UserPromptSubmit   → heuristic sg_overview injected as additionalContext (no LLM call)
+  PostToolUse        → append to session log JSONL
+  FileChanged        → background incremental re-index
+
+All hooks:
+  - Read event data from stdin as JSON
+  - Write response to stdout as JSON (where applicable)
+  - Exit 0 on any internal error (never block the agent)
+  - Write errors to .skeletongraph/last_hook.log
+
+Entry point: `sg hook <event_name> --path <project_root>`
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
-from typing import Optional
-
-from ..storage.local import load_index
-from ..retrieval.resolver import resolve_context
-from ..retrieval.classifier import classify_query, ContextMode
-from ..assembly.prompt_builder import assemble
-from ..session.memory import SessionMemory
-from ..engine import SGEngine
-from ..config import load_config
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+_USE_SG_SYSTEM_MSG = (
+    "SkeletonGraph (SG) is active for this project. "
+    "ALWAYS call sg_overview at session start. "
+    "Use sg_search instead of grep/glob, sg_get/sg_expand instead of reading full files, "
+    "sg_constraint to view project rules before proposing changes. "
+    "MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log."
+)
 
-def hook_session_start(project_root: Path) -> str:
-    """Run at session start.
-    
-    1. Triggers an sg build (which handles init if needed).
-    2. Returns the L0 project.md constraints to inject into the system prompt.
+
+# ── Public hook handlers ─────────────────────────────────────────────────
+
+
+def hook_session_start(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """SessionStart: create a fresh session JSONL, inject 'use SG' system message.
+
+    Returns {"systemMessage": "..."} for Claude Code injection.
     """
     sg_dir = project_root / ".skeletongraph"
-    project_md = sg_dir / "project.md"
-    
-    # Run build if index doesn't exist
-    if not sg_dir.exists() or not (sg_dir / "index.json").exists():
-        from ..build import build_index
+    try:
+        sg_dir.mkdir(parents=True, exist_ok=True)
+        session_id = str(uuid.uuid4())[:8]
+        # Persist current session id so PostToolUse can find it
+        (sg_dir / "current_session.txt").write_text(session_id, encoding="utf-8")
+        _write_hook_log(sg_dir, "session_start", f"session_id={session_id}")
+    except Exception as e:
+        _write_hook_log(sg_dir, "session_start", f"ERROR: {e}")
+
+    return {"systemMessage": _USE_SG_SYSTEM_MSG}
+
+
+def hook_user_prompt_submit(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """UserPromptSubmit: inject sg_overview as additionalContext.
+
+    Runs heuristic_query (zero LLM cost) for the prompt, assembles a quick
+    overview (constraints + top functions + session digest), returns it as
+    additionalContext so it lands in Zone 1 of the main LLM context.
+
+    Returns {"additionalContext": "<overview text>"}.
+    """
+    sg_dir = project_root / ".skeletongraph"
+    prompt = event_data.get("prompt", "")
+
+    try:
+        from ..engine import SGEngine
+        from ..config import load_config
+
+        cfg = load_config(project_root)
+        engine = SGEngine(project_root, cfg)
+
+        # Build overview text: constraints + top PageRank + query-specific hits
+        parts: list[str] = [_USE_SG_SYSTEM_MSG, ""]
+
+        # Constraints (Zone 1)
+        cs_file = sg_dir / "constraints.md"
+        if cs_file.exists():
+            cs_text = cs_file.read_text(encoding="utf-8", errors="replace").strip()
+            if cs_text:
+                parts.append(f"## Constraints\n{cs_text}")
+
+        # Session digest
+        from ..session.log import read_log, format_log_digest
+        entries = read_log(sg_dir, last_n=5)
+        digest = format_log_digest(entries, max_turns=5)
+        if digest:
+            parts.append(digest)
+
+        # Query-relevant functions (if prompt given)
+        if prompt.strip():
+            try:
+                result = engine.heuristic_query(prompt.strip(), top_n=8)
+                candidates = result.candidates if hasattr(result, "candidates") else []
+                if candidates:
+                    lines = ["## Relevant functions"]
+                    for c in candidates[:8]:
+                        sk = c.skeleton
+                        lines.append(f"  {sk.signature}  # {sk.fqn}")
+                    parts.append("\n".join(lines))
+            except Exception:
+                pass
+
+        context_text = "\n\n".join(p for p in parts if p)
+        _write_hook_log(sg_dir, "user_prompt_submit", f"injected {len(context_text)} chars")
+        return {"additionalContext": context_text}
+
+    except Exception as e:
+        _write_hook_log(sg_dir, "user_prompt_submit", f"ERROR: {e}")
+        # Return minimal fallback — still useful even if engine failed
+        return {"additionalContext": _USE_SG_SYSTEM_MSG}
+
+
+def hook_post_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """PostToolUse: append a session log entry.
+
+    Reads tool_name / tool_input / tool_response from event_data.
+    Detects modified files from Edit/Write/Bash tool inputs.
+    Returns {} (no injection needed).
+    """
+    sg_dir = project_root / ".skeletongraph"
+    try:
+        session_id = _read_current_session(sg_dir)
+        if not session_id:
+            return {}
+
+        tool_name = event_data.get("tool_name", "")
+        tool_input = event_data.get("tool_input", {})
+        tool_response = event_data.get("tool_response", {})
+
+        # Detect modified files
+        files_touched = _extract_modified_files(tool_name, tool_input, tool_response)
+
+        # Build a short summary
+        summary = f"{tool_name}"
+        if files_touched:
+            summary += f" → {', '.join(files_touched[:3])}"
+
+        from ..session.log import append_log
+        # Read turn index from last entry
+        from ..session.log import read_log
+        existing = read_log(sg_dir, session_id=session_id, last_n=1)
+        turn_index = (existing[0].turn_index + 1) if existing else 1
+
+        append_log(
+            sg_dir=sg_dir,
+            session_id=session_id,
+            user_prompt="",          # no user prompt available here
+            files_touched=files_touched,
+            summary=summary,
+            agent_action=tool_name,
+            turn_index=turn_index,
+        )
+        _write_hook_log(sg_dir, "post_tool_use", f"logged turn {turn_index}: {summary}")
+    except Exception as e:
+        _write_hook_log(sg_dir, "post_tool_use", f"ERROR: {e}")
+
+    return {}
+
+
+def hook_file_changed(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """FileChanged: background incremental re-index for the changed file.
+
+    Returns {} immediately; re-index runs in a daemon thread.
+    """
+    sg_dir = project_root / ".skeletongraph"
+    file_path = event_data.get("file", "")
+
+    def _run_incremental():
         try:
-            build_index(project_root)
+            from ..build import update_index
+            update_index(project_root)
+            _write_hook_log(sg_dir, "file_changed", f"re-indexed after change to {file_path}")
         except Exception as e:
-            logger.error(f"Failed to build index on session start: {e}")
-            return "SkeletonGraph: Failed to build index."
-            
-    if project_md.exists():
-        content = project_md.read_text(encoding="utf-8", errors="replace")
-        return f"=== Project Constraints (SkeletonGraph L0) ===\n{content}"
-        
-    return "SkeletonGraph: Project initialized."
+            _write_hook_log(sg_dir, "file_changed", f"ERROR re-indexing: {e}")
+
+    if file_path and sg_dir.exists():
+        t = threading.Thread(target=_run_incremental, daemon=True)
+        t.start()
+
+    return {}
 
 
-def hook_pre_prompt(project_root: Path, prompt: str) -> str:
-    """Run before user prompt is submitted to Claude.
-    
-    v4: Uses SGEngine for unified pipeline (classify → resolve → assemble).
-    Writes context.md + shadows. Returns status string with model routing.
-    """
-    sg_dir = project_root / ".skeletongraph"
-    
-    if not sg_dir.exists():
-        return "SkeletonGraph: Index not found. Run `sg build`."
-        
+# ── Internal helpers ──────────────────────────────────────────────────────
+
+
+def _read_current_session(sg_dir: Path) -> Optional[str]:
+    """Read the active session ID from disk."""
+    sid_file = sg_dir / "current_session.txt"
+    if sid_file.exists():
+        return sid_file.read_text(encoding="utf-8").strip() or None
+    return None
+
+
+def _write_hook_log(sg_dir: Path, event: str, message: str) -> None:
+    """Append one line to last_hook.log (best-effort, never raises)."""
     try:
-        t0 = time.perf_counter()
-        
-        # v4: Use SGEngine
-        engine = SGEngine(project_root=project_root)
-        result = engine.query(prompt)
-        
-        if not result.success:
-            return f"SkeletonGraph error: {result.error}"
-        
-        # Write context.md
-        context_path = sg_dir / "context.md"
-        context_path.write_text(result.context_text, encoding="utf-8")
-        
-        duration_ms = int((time.perf_counter() - t0) * 1000)
-        
-        # Model routing recommendation
-        routing_hint = ""
-        if result.model_tier.value == "llm":
-            routing_hint = f"\nRecommended: /model {result.recommended_model} (complex task)"
-        elif result.model_tier.value == "slm":
-            routing_hint = "\nThis is a simple lookup — current model is sufficient."
-        
-        cost_info = ""
-        if result.slm_used:
-            cost_info = f" SLM: ${result.slm_cost_usd:.4f}"
-        
-        return (
-            f"SkeletonGraph prepared context ({result.query_mode.value} mode, "
-            f"{result.context_tokens} tokens, {result.confidence}) in {duration_ms}ms."
-            f"{cost_info}\n"
-            f"Please read `.skeletongraph/context.md` for target code and constraints "
-            f"before taking further action."
-            f"{routing_hint}"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in pre-prompt hook: {e}")
-        return f"SkeletonGraph error: {e}"
+        sg_dir.mkdir(parents=True, exist_ok=True)
+        log_path = sg_dir / "last_hook.log"
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {event}: {message}\n")
+    except Exception:
+        pass
 
 
-def hook_post_tool_use(project_root: Path, tool_name: str, tool_args: str, tool_output: str) -> str:
-    """Run after Claude uses a tool (e.g., file modification).
-    
-    1. Extracts modified files and deletes their stale shadow files.
-    2. Runs session post-processing to extract decisions.
-    """
-    sg_dir = project_root / ".skeletongraph"
-    shadow_dir = sg_dir / "shadows"
-    
-    modified_files = []
-    
-    # Basic heuristic to detect modified files from tool args/output
-    # This would need to be customized based on exact Claude Code tool schemas
-    if "write" in tool_name.lower() or "edit" in tool_name.lower() or "replace" in tool_name.lower():
+def _extract_modified_files(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    tool_response: Dict[str, Any],
+) -> list[str]:
+    """Heuristically extract file paths from tool call data."""
+    files: list[str] = []
+
+    tool_lower = tool_name.lower()
+
+    # Edit / Write tools — file_path is an explicit field
+    if any(k in tool_lower for k in ("edit", "write", "create")):
+        for key in ("file_path", "path", "filename"):
+            val = tool_input.get(key, "")
+            if val and isinstance(val, str):
+                files.append(val)
+                break
+
+    # Bash tool — scan command for file-like arguments
+    if "bash" in tool_lower or "shell" in tool_lower or "run" in tool_lower:
         import re
-        # Try to find file paths in arguments
-        paths = re.findall(r'[\w./\\-]+\.(?:py|js|ts|tsx|jsx|java|go|rs|cpp|cs|rb|php)', tool_args)
-        modified_files.extend(paths)
-        
-    if not modified_files:
-        return ""
-        
-    # Delete stale shadows
-    deleted_shadows = []
-    if shadow_dir.exists():
-        for file_path in modified_files:
-            shadow_path = shadow_dir / file_path
-            if shadow_path.exists():
-                try:
-                    shadow_path.unlink()
-                    deleted_shadows.append(file_path)
-                except Exception:
-                    pass
-                    
-    # Update session memory
-    try:
-        mem = SessionMemory.load(sg_dir)
-        # We use a placeholder prompt here since we only have the tool context
-        mem.post_process(
-            prompt="[Tool Use Turn]", 
-            agent_response=tool_output,
-            files_modified=modified_files
+        cmd = str(tool_input.get("command", "") or tool_input.get("cmd", ""))
+        # Match common source file patterns
+        found = re.findall(
+            r"[\w./\\-]+\.(?:py|js|ts|tsx|jsx|java|go|rs|cpp|cs|rb|php|md|json|yaml|toml)",
+            cmd,
         )
-    except Exception as e:
-        logger.error(f"Failed to update session memory in post-tool hook: {e}")
-        
-    if deleted_shadows:
-        return f"SkeletonGraph: Deleted stale shadow files for {len(deleted_shadows)} modified files."
-    return ""
+        files.extend(found[:4])  # cap at 4
 
-
-def hook_session_end(project_root: Path) -> str:
-    """Run at session end.
-    
-    Compresses session memory (current → recent → project_log).
-    """
-    sg_dir = project_root / ".skeletongraph"
-    try:
-        mem = SessionMemory.load(sg_dir)
-        mem.compress()
-        return "SkeletonGraph: Session memory compressed."
-    except Exception as e:
-        return f"SkeletonGraph error compressing session: {e}"
-
-
-def _write_shadow_files(assembled, store, project_root: Path, shadow_dir: Path):
-    """Write pre-assembled file views as shadow files."""
-    files_seen = set()
-    for fqn in assembled.targets:
-        sk = store.skeleton_table.get(fqn)
-        if not sk:
-            continue
-        fp = sk.file_path
-        if fp in files_seen:
-            continue
-        files_seen.add(fp)
-
-        source = project_root / fp
-        if not source.exists():
-            continue
-
-        shadow_path = shadow_dir / fp
-        shadow_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            content = source.read_text(encoding="utf-8", errors="replace")
-            shadow_path.write_text(content, encoding="utf-8")
-        except Exception:
-            pass
+    return list(dict.fromkeys(files))  # deduplicate preserving order

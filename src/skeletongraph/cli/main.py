@@ -817,30 +817,86 @@ def serve(path: str, port: int):
 @app.command()
 @click.argument("platform", required=False, default=None)
 @click.option("--path", "-p", default=".", help="Project root directory")
-def install(platform: str, path: str):
-    """Auto-detect and configure IDE integrations.
+@click.option("--ide", default=None,
+              type=click.Choice([
+                  "claude-code", "cursor",
+                  "cline", "roo", "zed", "continue", "copilot", "windsurf",
+                  # legacy names still accepted
+                  "claude", "antigravity", "codex", "kiro", "opencode",
+              ], case_sensitive=False),
+              help="Target IDE (overrides auto-detection)")
+@click.option("--all-detected", is_flag=True,
+              help="Install for all detected IDEs automatically")
+def install(platform: str, path: str, ide: str, all_detected: bool):
+    """Configure IDE integrations: hooks + MCP server registration.
 
-    If PLATFORM is not specified, auto-detects all installed IDEs.
-    Supported: claude, cursor, antigravity, codex, windsurf, kiro, opencode
+    \b
+    sg install --ide claude-code    write Claude Code hooks + MCP
+    sg install --ide cursor         write Cursor hooks + MCP
+    sg install --ide cline          write MCP config + rules block
+    sg install --all-detected       auto-detect and configure all IDEs
+    sg install                      same as --all-detected
     """
     project_root = Path(path).resolve()
 
-    platforms = _detect_platforms(project_root) if platform is None else [platform]
+    # --ide takes priority; --all-detected or no args → auto-detect
+    if ide:
+        targets = [ide]
+    elif platform:
+        targets = [platform]
+    else:
+        from ..install.detect import detect_ides
+        targets = detect_ides(project_root) or ["claude-code"]
 
-    if not platforms:
-        console.print("[yellow]No supported AI coding tools detected.[/yellow]")
-        console.print("Supported: claude, cursor, antigravity, codex, windsurf, kiro, opencode")
+    if not targets:
+        console.print("[yellow]No supported IDEs detected.[/yellow]")
+        console.print("Run `sg install --ide claude-code` to install manually.")
         return
 
-    for p in platforms:
-        _install_platform(p, project_root)
+    for target in targets:
+        _run_installer(target, project_root)
 
-    # Also write the MCP config
-    _write_mcp_config(project_root, platforms=platforms)
     console.print(
-        f"\n[bold green][OK] Configuration complete.[/bold green] "
+        f"\n[bold green][OK] Installation complete.[/bold green] "
         f"Restart your editor to activate SkeletonGraph."
     )
+
+
+def _run_installer(ide_name: str, project_root: Path) -> None:
+    """Dispatch to the correct installer module."""
+    # Normalize legacy names
+    _aliases = {
+        "claude": "claude-code",
+        "antigravity": "copilot",
+        "codex": "copilot",
+        "kiro": "cline",
+        "opencode": "cline",
+    }
+    ide_name = _aliases.get(ide_name, ide_name)
+
+    console.print(f"\n[bold]Installing for:[/bold] {ide_name}")
+
+    try:
+        if ide_name == "claude-code":
+            from ..install.claude_code import install as cc_install
+            written = cc_install(project_root)
+        elif ide_name == "cursor":
+            from ..install.cursor import install as cur_install
+            written = cur_install(project_root)
+        elif ide_name in ("cline", "roo", "zed", "continue", "copilot", "windsurf"):
+            from ..install.mcp_only import install as mcp_install
+            written = mcp_install(ide_name, project_root)
+        else:
+            # Fallback: legacy platform-based rules file installer
+            _install_platform(ide_name, project_root)
+            _write_mcp_config(project_root, platforms=[ide_name])
+            return
+
+        for f in written:
+            console.print(f"  [green][OK][/green] {f}")
+
+    except Exception as e:
+        console.print(f"  [red][FAIL][/red] {e}")
 
 
 @app.command()
@@ -2663,10 +2719,10 @@ def constraint_cmd(action: str, value: str, path: str):
         if not value:
             console.print("[red]Error:[/red] provide constraint ID as argument")
             return
-        ok = cs.confirm_constraint(value)
+        ok = cs.confirm_constraint(value, project_root=project_root)
         if ok:
             cs.save_global(project_root)
-            console.print(f"[green]Confirmed[/green] id={value}")
+            console.print(f"[green]Confirmed[/green] id={value}  (promoted to decisions.md)")
         else:
             console.print(f"[yellow]Not found:[/yellow] {value}")
 
@@ -2780,29 +2836,66 @@ from .prepare import prepare as prepare_cmd
 from .init import init_command as init_cmd
 
 @app.command("hook")
-@click.argument("event_name")
-@click.option("--prompt", "-p", default="", help="Prompt text for pre-prompt event")
-@click.option("--tool-name", default="", help="Tool name for post-tool event")
-@click.option("--tool-args", default="", help="Tool arguments for post-tool event")
-@click.option("--tool-output", default="", help="Tool output for post-tool event")
+@click.argument("event_name",
+                type=click.Choice([
+                    "session_start", "user_prompt_submit",
+                    "post_tool_use", "file_changed",
+                    # legacy aliases kept for backward compat
+                    "pre_prompt", "post_tool", "session_end",
+                ]))
 @click.option("--path", default=".", help="Project root directory")
-def hook_cmd(event_name: str, prompt: str, tool_name: str, tool_args: str, tool_output: str, path: str):
-    """Internal hook execution for Claude Code."""
+def hook_cmd(event_name: str, path: str):
+    """Handle Claude Code / Cursor hook events.
+
+    Reads JSON event data from stdin, writes JSON response to stdout.
+    Always exits 0 — never blocks the agent.
+
+    \b
+    Events:
+      session_start       → inject "use SG" systemMessage
+      user_prompt_submit  → inject sg_overview as additionalContext
+      post_tool_use       → append to session log
+      file_changed        → background incremental re-index
+    """
+    import json as _json
+    import sys as _sys
+
     project_root = Path(path).resolve()
-    from ..hooks.claude_code import hook_session_start, hook_pre_prompt, hook_post_tool_use, hook_session_end
-    
-    result = ""
-    if event_name == "session_start":
-        result = hook_session_start(project_root)
-    elif event_name == "pre_prompt":
-        result = hook_pre_prompt(project_root, prompt)
-    elif event_name == "post_tool":
-        result = hook_post_tool_use(project_root, tool_name, tool_args, tool_output)
-    elif event_name == "session_end":
-        result = hook_session_end(project_root)
-        
+
+    # Read event data from stdin (Claude Code sends JSON)
+    event_data: dict = {}
+    try:
+        raw = _sys.stdin.read()
+        if raw.strip():
+            event_data = _json.loads(raw)
+    except Exception:
+        pass  # proceed with empty event_data
+
+    from ..hooks.claude_code import (
+        hook_session_start,
+        hook_user_prompt_submit,
+        hook_post_tool_use,
+        hook_file_changed,
+    )
+
+    try:
+        if event_name in ("session_start",):
+            result = hook_session_start(project_root, event_data)
+        elif event_name in ("user_prompt_submit", "pre_prompt"):
+            result = hook_user_prompt_submit(project_root, event_data)
+        elif event_name in ("post_tool_use", "post_tool"):
+            result = hook_post_tool_use(project_root, event_data)
+        elif event_name in ("file_changed",):
+            result = hook_file_changed(project_root, event_data)
+        elif event_name in ("session_end",):
+            result = {}
+        else:
+            result = {}
+    except Exception:
+        result = {}  # never block the agent
+
     if result:
-        click.echo(result)
+        click.echo(_json.dumps(result))
 
 app.add_command(prepare_cmd)
 app.add_command(init_cmd)
