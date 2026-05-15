@@ -143,30 +143,98 @@ complexity. Code-changing work keeps an MLM floor by default so cost savings do
 not come from making weak models edit code unsafely. Retrieval planning can use
 small models to propose targets over AST/summaries before the heavy model runs.
 
+## IDE Integration
+
+After `sg init` and `sg build`, register SG as an MCP server and write IDE hooks:
+
+```bash
+sg install --ide claude-code   # Claude Code: hooks + MCP server + CLAUDE.md rules
+sg install --ide cursor        # Cursor: MCP + .cursor/rules/skeletongraph.mdc + hooks
+sg install --ide cline         # Cline / Roo: MCP config + rules block
+sg install --ide copilot       # GitHub Copilot: MCP + copilot-instructions.md
+sg install --ide windsurf      # Windsurf: MCP + .windsurfrules
+sg install                     # auto-detect all installed IDEs
+```
+
+After install, restart your editor. SkeletonGraph runs as a background MCP server
+(`sg serve --path .`) that the IDE connects to automatically.
+
+## MCP Tools
+
+Six tools are exposed to the IDE agent. Use these **instead of** grep/glob/file reads:
+
+| Tool | When to call |
+| --- | --- |
+| `sg_overview` | Session start — constraints, top functions, recent turns |
+| `sg_search "query"` | Find relevant functions by name/keyword/graph context |
+| `sg_get "fqn"` | Inspect a specific function: signature, summary, callers |
+| `sg_expand "fqn"` | Read a function body or full file (token-capped) |
+| `sg_constraint list` | View project constraints before proposing changes |
+| `sg_log` | Show recent session entries |
+
 ## CLI Reference
+
+**Indexing & status**
+
+| Command | Purpose |
+| --- | --- |
+| `sg init [--agent cursor]` | Configure project, IDE preset, MCP, constraints |
+| `sg index` | Full index (alias for `sg build`) |
+| `sg index --incremental` | Only re-index changed files |
+| `sg build` | Full index with detailed output |
+| `sg update` | Incremental update |
+| `sg status` | Show index status |
+| `sg doctor` | Check index, routing, provider, Ollama readiness |
+| `sg overview` | Project skeleton: top functions, constraints, session |
+| `sg install [--ide <name>]` | Write IDE hooks + MCP config |
+
+**Retrieval**
+
+| Command | Purpose |
+| --- | --- |
+| `sg search "query"` | BM25 + graph search (no API key) |
+| `sg get "fqn"` | Get function signature, summary, callers |
+| `sg expand "target"` | Expand function body / file / line range |
+
+**Constraints & session**
+
+| Command | Purpose |
+| --- | --- |
+| `sg constraint list` | List all constraints |
+| `sg constraint propose "text"` | Add a proposal |
+| `sg constraint confirm <id>` | Promote proposal → decisions.md |
+| `sg constraint remove <id>` | Remove a constraint |
+| `sg constraint aggregate` | Import from IDE rule files |
+| `sg log [--last-n 10]` | Show recent session turns |
+
+**Summarization**
 
 | Command | Purpose | API key |
 | --- | --- | --- |
-| `sg init` | configure project, IDE, MCP, rules | no |
-| `sg build` | index source files and graph | no |
-| `sg doctor` | check index, routing, provider readiness | no |
-| `sg route "task"` | show task mode, tier, model route | no |
-| `sg prepare "task"` | create/copy context packet | no |
-| `sg run "task" --dry-run` | plan routed execution | no |
-| `sg run "task" --execute` | call configured provider/local model | provider or local |
-| `sg query "task"` | inspect assembled context | no |
-| `sg config` | configure IDE and CLI models | no |
-| `sg status` | show index status | no |
-| `sg metrics` | show logged metrics | no |
+| `sg summarize --tier local` | Ollama Tier-0.5 (free, on-device) | no |
+| `sg summarize --tier cloud` | Cloud LLM Tier-1 | provider key |
+| `sg summarize --tier cloud --force` | Re-summarize all functions | provider key |
 
-Provider output from `sg run --execute` is written under:
+**Model routing & execution**
 
-```text
-.skeletongraph/runs/
-```
+| Command | Purpose | API key |
+| --- | --- | --- |
+| `sg route "task"` | Show task mode, tier, recommended model | no |
+| `sg run "task" --dry-run` | Plan routed execution | no |
+| `sg run "task" --execute` | Call configured provider | provider or local |
+| `sg config [--agent cursor]` | Configure IDE and CLI models | no |
+| `sg config --cli-provider anthropic` | Set CLI execution provider | no |
 
-Automatic patch application is intentionally not enabled yet. The next release
-milestone is safe diff parsing, approval gates, `sg verify`, and `sg runs`.
+**Evaluation & metrics**
+
+| Command | Purpose |
+| --- | --- |
+| `sg metrics` | Show logged query metrics |
+| `sg baseline "task"` | Estimate naive agent token cost |
+| `sg eval-golden` | Run golden dataset evaluation |
+| `sg hotspots` | Top load-bearing files by PageRank |
+
+Provider output from `sg run --execute` is written to `.skeletongraph/runs/`.
 
 ## Python API
 
@@ -221,12 +289,13 @@ SkeletonGraph should be evaluated on both quality and cost:
 
 Cost savings are only meaningful when reported with pass rate.
 
-## Current Status
+## Install
 
-SG IDE is a context pipeline. SG CLI now has route, prepare, dry-run execution,
-provider/local configuration, and provider output logging. The remaining work
-before a stronger CLI release is safe patch apply, verification, run history,
-and benchmark-backed routing results.
+```bash
+pip install skeletongraph           # core: indexing, MCP server, CLI (no API key needed)
+pip install "skeletongraph[llm]"    # + litellm for sg run --execute / sg summarize --tier cloud
+pip install "skeletongraph[all]"    # everything
+```
 
 ## License
 

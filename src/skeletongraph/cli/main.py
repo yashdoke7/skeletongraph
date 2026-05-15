@@ -235,8 +235,42 @@ def doctor(path: str, json_output: bool):
         config.get_cli_api_base() or "provider default",
     )
 
+    # ── Ollama (Tier-0.5) ─────────────────────────────────────────────────
+    ollama_base = getattr(config, "ollama_base_url", "http://localhost:11434")
+    enable_local = getattr(config, "enable_local_summary", True)
+    ollama_ok = False
+    if enable_local:
+        try:
+            from ..summary.ollama import is_ollama_available, list_ollama_models
+            ollama_ok = is_ollama_available(ollama_base)
+        except Exception:
+            pass
+    add(
+        "ollama",
+        ollama_ok,
+        f"available at {ollama_base}" if ollama_ok else (
+            f"not reachable at {ollama_base} (optional — start with: ollama serve)"
+            if enable_local else "disabled (enable_local_summary=False)"
+        ),
+    )
+
+    # ── Summary coverage ──────────────────────────────────────────────────
+    if store is not None:
+        total_fn = store.meta.total_functions
+        summarized = store.summaries.count
+        pct = round(100 * summarized / total_fn, 1) if total_fn else 0
+        sg_dir = project_root / ".skeletongraph"
+        from ..summary.queue import queue_size
+        pending = queue_size(sg_dir)
+        add(
+            "summaries",
+            summarized > 0 or total_fn == 0,
+            f"{summarized}/{total_fn} ({pct}%) summarized"
+            + (f"; {pending} queued" if pending else ""),
+        )
+
     payload = {
-        "ok": all(c["ok"] for c in checks if c["name"] != "cli_api_key"),
+        "ok": all(c["ok"] for c in checks if c["name"] not in {"cli_api_key", "ollama"}),
         "execution_ready": all(c["ok"] for c in checks),
         "checks": checks,
         "ide": {
@@ -257,6 +291,11 @@ def doctor(path: str, json_output: bool):
             "api_key_env": key_envs,
             "api_base": config.get_cli_api_base(),
         },
+        "ollama": {
+            "available": ollama_ok,
+            "base_url": ollama_base,
+            "model": getattr(config, "ollama_summary_model", "qwen2.5-coder:1.5b"),
+        },
     }
 
     if json_output:
@@ -268,11 +307,8 @@ def doctor(path: str, json_output: bool):
     table.add_column("Status", style="green")
     table.add_column("Detail")
     for check in checks:
-        table.add_row(
-            check["name"],
-            "OK" if check["ok"] else "WARN",
-            check["detail"],
-        )
+        status_str = "OK" if check["ok"] else "WARN"
+        table.add_row(check["name"], status_str, check["detail"])
     console.print(table)
 
     model_table = Table(title="Configured Models")
@@ -283,6 +319,17 @@ def doctor(path: str, json_output: bool):
     model_table.add_row("IDE", config.slm_model, config.mlm_model, config.llm_model)
     model_table.add_row("CLI", config.cli_slm_model, config.cli_mlm_model, config.cli_llm_model)
     console.print(model_table)
+
+    if ollama_ok:
+        try:
+            models = list_ollama_models(ollama_base)
+            if models:
+                console.print(
+                    f"\n[dim]Ollama models available: {', '.join(models[:6])}"
+                    + (" ..." if len(models) > 6 else "") + "[/dim]"
+                )
+        except Exception:
+            pass
 
 
 @app.command()
