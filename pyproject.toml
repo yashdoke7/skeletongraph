@@ -53,6 +53,7 @@ all = ["skeletongraph[mcp,eval,daemon,embeddings,dev]"]
 
 [project.scripts]
 skeletongraph = "skeletongraph.cli.main:app"
+sg = "skeletongraph.cli.main:app"
 
 [project.urls]
 Homepage = "https://github.com/yashdoke7/skeletongraph"

@@ -228,6 +228,7 @@ class SGConfig:
     )
 
     # ── Context Assembly ───────────────────────────────────────────────
+    use_4zone: bool = True               # Use 4-zone assembler (canonical). False → legacy layered.
     model_context_limit: int = 128_000
     soft_target_ratio: float = 0.25        # % of context limit we AIM to use
     max_graph_depth: int = 2               # BFS depth for blast-radius/deps

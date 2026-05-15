@@ -362,9 +362,12 @@ def build_index(
     # Disabled by default for build speed; will be built on-demand in resolver
     store.bm25_model = None
 
-    # Load constraints
+    # Load constraints + aggregate from IDE rule files
     store.constraints = ConstraintStore()
     store.constraints.load(project_root)
+    added = store.constraints.aggregate_from_ide_rules(project_root)
+    if added > 0:
+        store.constraints.save_global(project_root)
 
     # Metadata
     store.meta = BuildMeta(
@@ -592,9 +595,12 @@ def update_index(
         compute_pagerank(edges_list, nodes=all_fqns) if edges_list else {}
     )
 
-    # Reload constraints
+    # Reload constraints + aggregate from IDE rule files
     store.constraints = ConstraintStore()
     store.constraints.load(project_root)
+    added = store.constraints.aggregate_from_ide_rules(project_root)
+    if added > 0:
+        store.constraints.save_global(project_root)
 
     # Update embeddings (incremental) if enabled
     if cfg.enable_embeddings and embeddings_available():

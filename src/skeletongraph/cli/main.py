@@ -43,11 +43,21 @@ def app():
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--agent", "-a", default=None, help="IDE agent preset name")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts and use defaults")
-def init_cmd(path: str, agent: str | None, non_interactive: bool):
+@click.option("--constraints", default="", help="Initial constraint text to seed constraints.md")
+def init_cmd(path: str, agent: str | None, non_interactive: bool, constraints: str):
     """Initialize project metadata and IDE integration files."""
     project_root = Path(path).resolve()
     from .init import run_init
     run_init(project_root, non_interactive=non_interactive, agent=agent)
+
+    # Seed initial constraints from --constraints flag (source 1 per plan)
+    if constraints.strip():
+        from ..assembly.constraint_store import ConstraintStore
+        cs = ConstraintStore()
+        cs.load(project_root)
+        cs.add_constraint(constraints.strip(), provenance="init-arg", confirmed=True)
+        cs.save_global(project_root)
+        console.print(f"[green]Constraint added:[/green] {constraints.strip()[:80]}")
 
 
 @app.command()
@@ -785,28 +795,23 @@ def summarize(path: str, model: str, force: bool, api_key: str):
 
 @app.command()
 @click.option("--path", "-p", default=".", help="Project root directory")
-@click.option("--port", default=3500, help="Server port")
+@click.option("--port", default=3500, help="Server port (unused in stdio mode)")
 def serve(path: str, port: int):
-    """Start the MCP server for IDE integration."""
+    """Start the MCP server for IDE integration (stdio transport)."""
     import sys as _sys
     from rich.console import Console as _Console
     stderr_console = _Console(stderr=True)
 
     project_root = Path(path).resolve()
 
-    from ..storage.local import load_index
+    stderr_console.print(f"[bold]> SkeletonGraph MCP server[/bold]  (stdio)")
+    stderr_console.print(f"  Project: {project_root}")
+    stderr_console.print(f"  Tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log")
 
-    store = load_index(project_root)
-    if store is None:
-        stderr_console.print("[yellow]No index found.[/yellow] Run `skeletongraph build` first.")
-        _sys.exit(1)
-
-    stderr_console.print(f"[bold]> Starting MCP server[/bold]")
-    stderr_console.print(f"  Index: {store.status_summary()}")
-    stderr_console.print(f"  Metrics: .skeletongraph/metrics/query_log.jsonl")
-
-    from ..server.mcp import start_server
-    start_server(store, project_root, port=port)
+    from ..server.mcp import serve as mcp_serve
+    from ..config import load_config
+    cfg = load_config(project_root)
+    mcp_serve(project_root, cfg)
 
 
 @app.command()
@@ -2352,6 +2357,418 @@ def _opencode_template() -> str:
 
 {_sg_rules_block()}
 """
+
+
+# ── New canonical commands (P1/P2) ──────────────────────────────────────
+
+
+@app.command(name="index")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--incremental", "-i", is_flag=True, help="Only re-index changed files")
+def index_cmd(path: str, incremental: bool):
+    """Index the project (alias for build / update)."""
+    project_root = Path(path).resolve()
+    if incremental:
+        from ..build import update_index
+        store = update_index(project_root)
+        console.print(f"[green][OK][/green] {store.meta.total_functions} functions, {store.meta.total_edges} edges")
+    else:
+        from ..build import build_index, discover_files
+        files = discover_files(project_root)
+        if not files:
+            console.print("[yellow]No supported files found.[/yellow]")
+            return
+        console.print(f"  Found [cyan]{len(files)}[/cyan] source files")
+        store = build_index(project_root)
+        console.print(f"[green][OK][/green] {store.meta.total_files} files, {store.meta.total_functions} functions, {store.meta.total_edges} edges")
+
+
+@app.command(name="overview")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--top-n", "-n", default=20, help="Number of top functions to show")
+@click.option("--json-output", is_flag=True, help="Machine-readable JSON")
+def overview_cmd(path: str, top_n: int, json_output: bool):
+    """Show project skeleton: top functions, constraints, session digest."""
+    project_root = Path(path).resolve()
+    sg_dir = project_root / ".skeletongraph"
+
+    from ..storage.local import load_index
+    from ..session.log import read_log, format_log_digest
+
+    store = load_index(project_root)
+    if store is None:
+        console.print("[yellow]No index found.[/yellow] Run `sg index` first.")
+        return
+
+    if json_output:
+        scores = store.pagerank_scores or {}
+        top_fqns = sorted(scores, key=lambda f: -scores[f])[:top_n]
+        if not top_fqns:
+            top_fqns = list(store.skeleton_table.keys())[:top_n]
+        payload = {
+            "files": store.meta.total_files,
+            "functions": store.meta.total_functions,
+            "edges": store.meta.total_edges,
+            "languages": list(store.meta.languages),
+            "top_functions": [
+                {"fqn": fqn, "pagerank": round(scores.get(fqn, 0), 4)}
+                for fqn in top_fqns
+            ],
+            "constraints": store.constraints.get_all_constraints() if store.constraints else "",
+        }
+        console.print(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title="Project Overview", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Files", str(store.meta.total_files))
+    table.add_row("Functions", str(store.meta.total_functions))
+    table.add_row("Edges", str(store.meta.total_edges))
+    table.add_row("Languages", ", ".join(store.meta.languages))
+    console.print(table)
+
+    if store.constraints and store.constraints.has_constraints:
+        console.print(Panel(store.constraints.get_all_constraints(), title="Constraints (Zone 1)", border_style="yellow"))
+
+    scores = store.pagerank_scores or {}
+    top_fqns = sorted(scores, key=lambda f: -scores[f])[:top_n]
+    if not top_fqns:
+        top_fqns = list(store.skeleton_table.keys())[:top_n]
+
+    fn_table = Table(title=f"Top {top_n} Functions by PageRank")
+    fn_table.add_column("FQN", style="cyan")
+    fn_table.add_column("Signature")
+    fn_table.add_column("PageRank", style="dim")
+    for fqn in top_fqns:
+        sk = store.skeleton_table.get(fqn)
+        if sk:
+            fn_table.add_row(fqn, sk.signature[:60], f"{scores.get(fqn, 0):.4f}")
+    console.print(fn_table)
+
+    entries = read_log(sg_dir, last_n=5)
+    digest = format_log_digest(entries, max_turns=5)
+    if digest:
+        console.print(Panel(digest, title="Recent turns", border_style="dim"))
+
+
+@app.command(name="search")
+@click.argument("query")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--top-n", "-n", default=15, help="Max results")
+@click.option("--file-filter", "-f", default="", help="Restrict to files matching this substring")
+@click.option("--json-output", is_flag=True, help="Machine-readable JSON")
+def search_cmd(query: str, path: str, top_n: int, file_filter: str, json_output: bool):
+    """Hybrid search: BM25 + graph centrality. PREFERRED over grep."""
+    project_root = Path(path).resolve()
+
+    from ..engine import SGEngine
+
+    engine = SGEngine(project_root=project_root)
+    try:
+        result = engine.heuristic_query(query, top_n=top_n, file_filter=file_filter or None)
+    except RuntimeError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        return
+
+    candidates = result.candidates
+    if not candidates:
+        console.print(f"No results for: [cyan]{query!r}[/cyan]")
+        return
+
+    if json_output:
+        payload = [
+            {
+                "fqn": c.skeleton.fqn,
+                "file": c.skeleton.file_path,
+                "line": c.skeleton.line_start,
+                "signature": c.skeleton.signature,
+                "score": round(c.score, 4),
+            }
+            for c in candidates
+        ]
+        console.print(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title=f"Search: {query!r}")
+    table.add_column("#", style="dim")
+    table.add_column("FQN", style="cyan")
+    table.add_column("Signature")
+    table.add_column("Score", style="dim")
+    for i, c in enumerate(candidates[:top_n], 1):
+        sk = c.skeleton
+        table.add_row(str(i), sk.fqn, sk.signature[:70], f"{c.score:.3f}")
+    console.print(table)
+
+
+@app.command(name="get")
+@click.argument("fqn")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--no-callers", is_flag=True, help="Skip caller listing")
+def get_cmd(fqn: str, path: str, no_callers: bool):
+    """Get a specific function by FQN: signature, summary, callers."""
+    project_root = Path(path).resolve()
+
+    from ..storage.local import load_index
+
+    store = load_index(project_root)
+    if store is None:
+        console.print("[yellow]No index found.[/yellow] Run `sg index` first.")
+        return
+
+    sk = store.skeleton_table.get(fqn)
+    if not sk:
+        for k, v in store.skeleton_table.items():
+            if k.endswith(fqn) or fqn in k:
+                sk, fqn = v, k
+                break
+    if not sk:
+        console.print(f"[red]Not found:[/red] {fqn}")
+        console.print("Tip: use `sg search <name>` to find the exact FQN.")
+        return
+
+    console.print(f"[bold]{fqn}[/bold]")
+    console.print(f"  File: {sk.file_path}:{sk.line_start}")
+    console.print(f"  Signature: {sk.signature}")
+    if sk.docstring:
+        console.print(f"  Docstring: {sk.docstring.strip()[:200]}")
+    summary = store.summaries.get(fqn) or ""
+    if summary:
+        console.print(f"  Summary: {summary[:200]}")
+
+    if not no_callers:
+        callers = [
+            k for k, v in store.skeleton_table.items()
+            if fqn in getattr(v, "callees", [])
+        ]
+        if callers:
+            console.print(f"\n  Callers ({len(callers)}):")
+            for c in callers[:6]:
+                csk = store.skeleton_table.get(c)
+                if csk:
+                    console.print(f"    {csk.signature}")
+
+    callees = list(getattr(sk, "callees", []))
+    if callees:
+        console.print(f"\n  Calls ({len(callees)}):")
+        for callee in callees[:6]:
+            csk = store.skeleton_table.get(callee)
+            if csk:
+                console.print(f"    {csk.signature}")
+            else:
+                console.print(f"    {callee}")
+
+
+@app.command(name="expand")
+@click.argument("target")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--max-tokens", default=4000, help="Token budget")
+@click.option("--out", "-o", default=None, help="Write output to file")
+def expand_cmd(target: str, path: str, max_tokens: int, out: str | None):
+    """Expand a function, file, or line range. PREFERRED over reading full files.
+
+    TARGET formats:
+      src/file.py::MyClass.my_method  (function body)
+      src/file.py                     (full file, token-capped)
+      src/file.py:42-80               (line range)
+    """
+    project_root = Path(path).resolve()
+
+    from ..engine import SGEngine
+
+    engine = SGEngine(project_root=project_root)
+
+    # Parse range syntax
+    start_line = end_line = None
+    expand_target = target
+    if ":" in target and "::" not in target:
+        parts = target.rsplit(":", 1)
+        range_part = parts[-1]
+        if "-" in range_part and all(p.strip().isdigit() for p in range_part.split("-", 1)):
+            start_line, end_line = (int(p.strip()) for p in range_part.split("-", 1))
+            expand_target = parts[0]
+
+    try:
+        text = engine.expand(
+            target=expand_target,
+            start_line=start_line,
+            end_line=end_line,
+            max_tokens=max_tokens,
+        )
+    except RuntimeError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        return
+
+    if out:
+        Path(out).write_text(text, encoding="utf-8")
+        console.print(f"[green][OK][/green] Written to {out}")
+    else:
+        console.print(text)
+
+
+@app.command(name="constraint")
+@click.argument("action", type=click.Choice(["list", "propose", "confirm", "remove", "aggregate"]))
+@click.argument("value", default="")
+@click.option("--path", "-p", default=".", help="Project root directory")
+def constraint_cmd(action: str, value: str, path: str):
+    """Manage project constraints.
+
+    \b
+    sg constraint list               — show all constraints
+    sg constraint propose "text"     — add a proposal
+    sg constraint confirm <id>       — promote a proposal to confirmed
+    sg constraint remove <id>        — remove a constraint
+    sg constraint aggregate          — import from IDE rule files
+    """
+    project_root = Path(path).resolve()
+    sg_dir = project_root / ".skeletongraph"
+
+    from ..assembly.constraint_store import ConstraintStore
+
+    cs = ConstraintStore()
+    cs.load(project_root)
+
+    if action == "list":
+        items = cs.list_constraints(include_proposed=True)
+        if not items:
+            raw = cs.get_all_constraints()
+            if raw:
+                console.print(Panel(raw, title="Constraints"))
+            else:
+                console.print("[dim]No constraints defined.[/dim]")
+            return
+        table = Table(title="Constraints")
+        table.add_column("ID", style="dim")
+        table.add_column("Status", style="cyan")
+        table.add_column("Provenance", style="dim")
+        table.add_column("Text")
+        for c in items:
+            table.add_row(
+                c.id,
+                "[green]confirmed[/green]" if c.confirmed else "[yellow]proposed[/yellow]",
+                c.provenance,
+                c.text.strip()[:80],
+            )
+        console.print(table)
+
+    elif action == "propose":
+        if not value:
+            console.print("[red]Error:[/red] provide constraint text as argument")
+            return
+        c = cs.propose_constraint(value)
+        cs.save_global(project_root)
+        console.print(f"[green]Proposed[/green] id={c.id}  Run `sg constraint confirm {c.id}` to promote.")
+
+    elif action == "confirm":
+        if not value:
+            console.print("[red]Error:[/red] provide constraint ID as argument")
+            return
+        ok = cs.confirm_constraint(value)
+        if ok:
+            cs.save_global(project_root)
+            console.print(f"[green]Confirmed[/green] id={value}")
+        else:
+            console.print(f"[yellow]Not found:[/yellow] {value}")
+
+    elif action == "remove":
+        if not value:
+            console.print("[red]Error:[/red] provide constraint ID as argument")
+            return
+        ok = cs.remove_constraint(value)
+        if ok:
+            cs.save_global(project_root)
+            console.print(f"[green]Removed[/green] id={value}")
+        else:
+            console.print(f"[yellow]Not found:[/yellow] {value}")
+
+    elif action == "aggregate":
+        n = cs.aggregate_from_ide_rules(project_root)
+        cs.save_global(project_root)
+        console.print(f"[green]Imported[/green] {n} constraints from IDE rule files.")
+
+
+@app.command(name="log")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--last-n", "-n", default=10, help="Number of entries to show")
+@click.option("--session-id", default="", help="Specific session ID")
+def log_cmd(path: str, last_n: int, session_id: str):
+    """Show recent session log entries."""
+    project_root = Path(path).resolve()
+    sg_dir = project_root / ".skeletongraph"
+
+    from ..session.log import read_log
+
+    entries = read_log(sg_dir, session_id=session_id or None, last_n=last_n)
+    if not entries:
+        console.print("[dim]No session log entries found.[/dim]")
+        return
+
+    table = Table(title="Session Log")
+    table.add_column("Turn", style="dim")
+    table.add_column("Prompt", style="cyan")
+    table.add_column("Files touched")
+    table.add_column("Summary")
+    for e in entries:
+        table.add_row(
+            str(e.turn_index),
+            e.user_prompt[:60],
+            ", ".join(e.files_touched[:3]) or "—",
+            e.summary[:60] or "—",
+        )
+    console.print(table)
+
+
+@app.command(name="config")
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--json-output", is_flag=True, help="Machine-readable JSON")
+def config_cmd(path: str, json_output: bool):
+    """Show the active SG configuration."""
+    project_root = Path(path).resolve()
+
+    from ..config import load_config
+
+    config = load_config(project_root)
+
+    if json_output:
+        payload = {
+            "agent": config.agent,
+            "ide": {
+                "slm": config.slm_model,
+                "mlm": config.mlm_model,
+                "llm": config.llm_model,
+            },
+            "cli": {
+                "provider": config.cli_provider,
+                "slm": config.cli_slm_model,
+                "mlm": config.cli_mlm_model,
+                "llm": config.cli_llm_model,
+            },
+            "features": {
+                "slm_fallback": config.enable_slm_fallback,
+                "bm25_fallback": config.enable_bm25_fallback,
+                "keyword_fallback": config.enable_keyword_fallback,
+                "dynamic_routing": config.enable_dynamic_model_routing,
+                "session": config.enable_session,
+            },
+        }
+        console.print(json.dumps(payload, indent=2))
+        return
+
+    table = Table(title="SG Config", show_header=False)
+    table.add_column("Key", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Agent preset", config.agent or "default")
+    table.add_row("IDE SLM", config.slm_model)
+    table.add_row("IDE MLM", config.mlm_model)
+    table.add_row("IDE LLM", config.llm_model)
+    table.add_row("CLI provider", config.cli_provider)
+    table.add_row("CLI SLM", config.cli_slm_model)
+    table.add_row("CLI MLM", config.cli_mlm_model)
+    table.add_row("CLI LLM", config.cli_llm_model)
+    table.add_row("SLM fallback", "on" if config.enable_slm_fallback else "off")
+    table.add_row("BM25 fallback", "on" if config.enable_bm25_fallback else "off")
+    table.add_row("Dynamic routing", "on" if config.enable_dynamic_model_routing else "off")
+    console.print(table)
 
 
 if __name__ == "__main__":

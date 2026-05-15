@@ -427,20 +427,39 @@ class SGEngine:
     ) -> str:
         """Phase 3: Build structured prompt for main LLM.
 
-        Delegates to prompt_builder with v4 mode-aware layer loading.
+        IDE delivery → 4-zone assembler (canonical).
+        CLI delivery → existing layered assembler (mode-aware).
         """
         try:
-            from .assembly.prompt_builder import assemble
-            assembled = assemble(
-                prompt=prompt,
-                resolver_result=resolver_result,
-                classification=classification,
-                store=store,
-                project_root=self._root,
-                sg_dir=self._sg_dir,
-                session=session,
-                config=self._config,
-            )
+            from .assembly.prompt_builder import assemble_4zone, assemble
+
+            if getattr(self._config, "use_4zone", True):
+                # Canonical 4-zone path
+                session_digest = ""
+                if session:
+                    from .session.log import format_log_digest, read_log
+                    entries = read_log(self._sg_dir, last_n=5)
+                    session_digest = format_log_digest(entries, max_turns=5)
+                assembled = assemble_4zone(
+                    prompt=prompt,
+                    resolver_result=resolver_result,
+                    store=store,
+                    project_root=self._root,
+                    sg_dir=self._sg_dir,
+                    session_digest=session_digest,
+                )
+            else:
+                assembled = assemble(
+                    prompt=prompt,
+                    resolver_result=resolver_result,
+                    classification=classification,
+                    store=store,
+                    project_root=self._root,
+                    sg_dir=self._sg_dir,
+                    session=session,
+                    config=self._config,
+                )
+
             context_text = assembled.text if hasattr(assembled, "text") else str(assembled)
             self._last_assembly_tokens = getattr(assembled, "token_count", 0) or len(context_text) // 4
             reduction_ratio = getattr(assembled, "reduction_ratio", 0.0) or 0.0
@@ -450,14 +469,14 @@ class SGEngine:
                 else 0
             )
         except Exception as e:
-            logger.warning("prompt_builder.assemble failed: %s, using minimal assembly", e)
+            logger.warning("prompt_builder assembly failed: %s, using minimal assembly", e)
             context_text = self._minimal_assemble(
                 prompt, resolver_result, slm_result
             )
             self._last_assembly_tokens = len(context_text) // 4
             self._last_assembly_native_estimate = 0
 
-        # Prepend SLM reasoning if available
+        # Prepend SLM reasoning if available (CLI path)
         if slm_result and slm_result.reasoning:
             context_text = (
                 f"## Retrieval Analysis\n{slm_result.reasoning}\n\n"
@@ -568,7 +587,7 @@ class SGEngine:
             for caller_fqn in list(callers.keys())[:5]:
                 caller_sk = store.skeleton_table.get(caller_fqn)
                 if caller_sk:
-                    summary = store.summaries.get(caller_fqn, "")
+                    summary = store.summaries.get(caller_fqn) or ""
                     parts.append(f"  {caller_sk.signature}  # {summary[:60]}")
 
         return "\n".join(parts)
@@ -625,6 +644,54 @@ class SGEngine:
     def get_session(self) -> Optional[Session]:
         """Access the current session (for post-turn processing)."""
         return self._session
+
+    def heuristic_query(
+        self,
+        query: str,
+        top_n: int = 15,
+        file_filter: Optional[str] = None,
+    ):
+        """IDE-mode retrieval: regex + BM25 + graph, zero LLM calls.
+
+        Used by sg_search MCP tool and sg search CLI command.
+        Returns a ResolverResult directly (not a full PipelineResult).
+        """
+        store = self._ensure_loaded()
+
+        known_files = set(store.file_skeletons.keys())
+        known_fqns = set(store.skeleton_table.keys())
+        intent = analyze_intent(query, known_files, known_fqns)
+
+        # Minimal classification for resolver
+        from .retrieval.classifier import classify_query, MODE_SPECS, QueryMode
+        classification = classify_query(
+            intent,
+            confidence=None,
+            target_fqns=set(),
+            n_files_involved=0,
+            slm_result=None,
+        )
+        mode_spec = classification.mode_spec or MODE_SPECS[classification.query_mode]
+
+        resolver_result = resolve_context(
+            prompt=query,
+            store=store,
+            max_depth=1,
+            session=None,
+            top_n=top_n,
+            mode_spec=mode_spec,
+            enable_keyword_fallback=self._config.enable_keyword_fallback,
+            enable_bm25_fallback=self._config.enable_bm25_fallback,
+        )
+
+        # Apply file filter post-hoc
+        if file_filter:
+            resolver_result.candidates = [
+                c for c in resolver_result.candidates
+                if file_filter in c.skeleton.file_path
+            ]
+
+        return resolver_result
 
     def get_config(self) -> SGConfig:
         """Access the current configuration."""

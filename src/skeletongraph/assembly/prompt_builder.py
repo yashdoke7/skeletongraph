@@ -368,6 +368,155 @@ def assemble(
     )
 
 
+# ── 4-zone assembler (P2 canonical) ─────────────────────────────────────
+
+
+@dataclass
+class Zone4Result:
+    """Output of the 4-zone assembler."""
+    text: str
+    token_count: int
+    zones: Dict[str, int]          # zone_name → token count
+    targets: List[str]
+    warning: str = ""
+
+
+def assemble_4zone(
+    prompt: str,
+    resolver_result: ResolverResult,
+    store: IndexStore,
+    project_root: Path,
+    sg_dir: Optional[Path] = None,
+    budget: int = 8000,
+    session_digest: str = "",
+) -> Zone4Result:
+    """4-zone context assembly per the canonical SG plan v3.
+
+    Zones (primacy → recency):
+      Zone 1 — Constraints: project rules, never trimmed
+      Zone 2 — Curated retrieval: Tier-1 target bodies + summaries
+      Zone 3 — Peripheral: Tier-2/3 signatures, neighbors
+      Zone 4 — Current request: the user's prompt
+
+    Trim order when over budget: Zone 3 first, then Zone 2 signatures,
+    then Zone 2 bodies → signatures. Zone 1 and Zone 4 never trimmed.
+    """
+    if sg_dir is None:
+        sg_dir = project_root / ".skeletongraph"
+
+    zones: Dict[str, int] = {}
+    targets: List[str] = []
+
+    # ── Zone 1: Constraints ───────────────────────────────────────────
+    z1_parts: List[str] = []
+    cs_file = sg_dir / "constraints.md"
+    if cs_file.exists():
+        cs_text = cs_file.read_text(encoding="utf-8", errors="replace").strip()
+        if cs_text:
+            z1_parts.append(f"## Constraints\n{cs_text}")
+    # Session digest (compact 5-turn) also goes in Zone 1 for visibility
+    if session_digest:
+        z1_parts.append(session_digest)
+
+    z1_text = "\n\n".join(z1_parts)
+    zones["z1_constraints"] = _est_tokens(z1_text)
+
+    # ── Zone 4: Current request (built early to reserve budget) ───────
+    z4_text = f"## Task\n{prompt}"
+    zones["z4_request"] = _est_tokens(z4_text)
+
+    # ── Remaining budget for Zones 2 + 3 ─────────────────────────────
+    reserved = zones["z1_constraints"] + zones["z4_request"] + 20
+    inner_budget = max(budget - reserved, 500)
+
+    # ── Zone 2: Curated retrieval (Tier-1 targets) ────────────────────
+    tier1 = [c for c in resolver_result.candidates if c.tier == Tier.TIER1]
+    tier2_3 = [c for c in resolver_result.candidates if c.tier != Tier.TIER1]
+
+    z2_parts: List[str] = []
+    for c in tier1:
+        sk = c.skeleton
+        targets.append(sk.fqn)
+        body = _read_function_body(sk, project_root)
+        if body:
+            header = f"# {sk.file_path}:{sk.line_start} — {_short_name(sk.fqn)}"
+            z2_parts.append(f"{header}\n{body}")
+        else:
+            summary = _pick_summary(sk, store)
+            entry = f"  {sk.signature}"
+            if summary:
+                entry += f"  # {summary[:80]}"
+            z2_parts.append(entry)
+
+    z2_text = "\n\n".join(z2_parts)
+    zones["z2_curated"] = _est_tokens(z2_text)
+
+    # ── Zone 3: Peripheral (Tier-2/3 signatures) ──────────────────────
+    z3_parts: List[str] = []
+    for c in sorted(tier2_3, key=lambda x: -x.score):
+        sk = c.skeleton
+        summary = _pick_summary(sk, store)
+        entry = f"  {sk.signature}"
+        if summary:
+            entry += f"  # {summary[:80]}"
+        z3_parts.append(entry)
+
+    z3_text = "\n".join(z3_parts)
+    zones["z3_peripheral"] = _est_tokens(z3_text)
+
+    # ── Budget enforcement: trim Zone 3, then Zone 2 ──────────────────
+    current = zones["z2_curated"] + zones["z3_peripheral"]
+    warning = ""
+
+    if current > inner_budget:
+        # 1. Drop peripheral from back
+        while _est_tokens("\n".join(z3_parts)) > (inner_budget - zones["z2_curated"]) and z3_parts:
+            z3_parts.pop()
+        z3_text = "\n".join(z3_parts)
+        zones["z3_peripheral"] = _est_tokens(z3_text)
+
+    current = zones["z2_curated"] + zones["z3_peripheral"]
+    if current > inner_budget and z2_parts:
+        # 2. Replace Zone 2 bodies with signatures
+        new_z2: List[str] = []
+        for c in tier1:
+            sk = c.skeleton
+            summary = _pick_summary(sk, store)
+            entry = f"  {sk.signature}"
+            if summary:
+                entry += f"  # {summary[:80]}"
+            new_z2.append(entry)
+        z2_parts = new_z2
+        z2_text = "\n".join(z2_parts)
+        zones["z2_curated"] = _est_tokens(z2_text)
+        warning = "Over budget: Zone 2 bodies replaced with signatures"
+
+    # ── Assemble in zone order ─────────────────────────────────────────
+    sections: List[str] = []
+
+    if z1_text:
+        sections.append(z1_text)
+
+    if z2_text:
+        sections.append(f"## Context\n{z2_text}")
+
+    if z3_text:
+        sections.append(f"## Related\n{z3_text}")
+
+    sections.append(z4_text)
+
+    assembled = "\n\n---\n\n".join(sections)
+    total = _est_tokens(assembled)
+
+    return Zone4Result(
+        text=assembled,
+        token_count=total,
+        zones=zones,
+        targets=targets,
+        warning=warning,
+    )
+
+
 # ── Pass-through (MISS confidence) ──────────────────────────────────────
 
 def _pass_through(
