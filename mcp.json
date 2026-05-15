@@ -1,9 +1,13 @@
 {
   "mcpServers": {
     "skeletongraph": {
-      "command": "python",
-      "args": ["-m", "skeletongraph.cli.main", "serve", "--path", "."],
-      "env": {}
+      "command": "C:\\Users\\ASUS\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+      "args": [
+        "-m",
+        "skeletongraph.server.mcp",
+        "--path",
+        "C:\\Users\\ASUS\\Desktop\\CS\\Projects\\skeletongraph"
+      ]
     }
   }
 }

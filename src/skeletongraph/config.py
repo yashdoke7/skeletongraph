@@ -243,6 +243,7 @@ class SGConfig:
     auto_summarize_on_build: bool = False   # Keep build LLM-free by default (docstring + BM25 path)
     auto_summarize_on_update: bool = False  # Keep update LLM-free by default (docstring + BM25 path)
     summary_use_docstrings: bool = True     # Seed summaries from docstrings/comments
+    summary_use_local_heuristics: bool = True  # Seed missing summaries without API calls
     summary_min_words: int = 6              # Minimum word count to accept a summary
     auto_rebuild_on_completion: bool = True # Rebuild index after task completion
     enable_embeddings: bool = True          # Use embeddings if available
@@ -371,6 +372,10 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
             "auto_summarize_on_update",
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
+        "SG_LOCAL_SUMMARIES": (
+            "summary_use_local_heuristics",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
         "SG_AUTO_REBUILD": (
             "auto_rebuild_on_completion",
             lambda v: v.lower() in ("1", "true", "yes"),
@@ -473,6 +478,7 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "auto_summarize_on_build": config.auto_summarize_on_build,
         "auto_summarize_on_update": config.auto_summarize_on_update,
         "summary_use_docstrings": config.summary_use_docstrings,
+        "summary_use_local_heuristics": config.summary_use_local_heuristics,
         "summary_min_words": config.summary_min_words,
         "auto_rebuild_on_completion": config.auto_rebuild_on_completion,
         "enable_embeddings": config.enable_embeddings,

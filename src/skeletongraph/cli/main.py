@@ -52,7 +52,8 @@ def init_cmd(path: str, agent: str | None, non_interactive: bool):
 
 @app.command()
 @click.option("--path", "-p", default=".", help="Project root directory")
-def build(path: str):
+@click.option("--auto-infer", is_flag=True, help="Auto-infer project metadata using LLM")
+def build(path: str, auto_infer: bool):
     """Build the full index for a project."""
     project_root = Path(path).resolve()
 
@@ -66,9 +67,12 @@ def build(path: str):
     sg_dir = project_root / ".skeletongraph"
     project_md = sg_dir / "project.md"
     if not project_md.exists():
-        console.print("[cyan]First build detected — running sg init...[/cyan]")
+        if auto_infer:
+            console.print("[cyan]First build detected — auto-inferring project metadata...[/cyan]")
+        else:
+            console.print("[cyan]First build detected — running sg init...[/cyan]")
         from .init import run_init
-        run_init(project_root)
+        run_init(project_root, auto_infer=auto_infer)
         console.print()
 
     from ..build import build_index, discover_files
@@ -412,7 +416,7 @@ def route(prompt: str, path: str, json_output: bool):
 @click.option("--response-out", default=None, help="Write provider output to this file")
 @click.option("--max-output-tokens", type=int, default=2000, help="Max provider output tokens")
 @click.option("--temperature", type=float, default=0.1, help="Provider sampling temperature")
-@click.option("--plan-first/--no-plan-first", default=True, help="Use SLM tool planning before execution")
+@click.option("--plan-first/--no-plan-first", default=False, help="Use SLM tool planning before execution")
 @click.option("--plan-max-tokens", type=int, default=800, help="Max tokens per planned expansion")
 @click.option("--error-followup/--no-error-followup", default=False, help="Use last error-only follow-up instead of full context")
 @click.option("--update-comments/--no-update-comments", default=True, help="Ask the model to update docstrings/comments if needed")
@@ -457,8 +461,11 @@ def run(
     )
 
     engine = SGEngine(project_root=project_root)
-    result = engine.query(prompt, delivery="cli", force_slm=plan_first)
     config = engine.get_config()
+    if dry_run and not plan_first:
+        config.enable_slm_fallback = False
+
+    result = engine.query(prompt, delivery="cli", force_slm=plan_first)
 
     if not result.success:
         console.print(f"[yellow]{result.error}[/yellow]")
@@ -467,6 +474,7 @@ def run(
     routing_mode = "manual" if tier else "auto"
     selected_tier = tier or result.model_tier.value
     selected_model = config.get_cli_model_for_tier(selected_tier)
+    error_followup_data = load_error_followup(project_root) if error_followup else None
     targets = [
         c.skeleton.fqn for c in result.candidates
         if c.tier == Tier.TIER1
@@ -541,6 +549,17 @@ def run(
 
     if extra_context:
         result.context_text = f"{result.context_text}\n\n---\n\n{extra_context}"
+        result.context_tokens = len(result.context_text) // 4
+
+    if error_followup_data:
+        followup_text = "\n".join(f"- {err}" for err in error_followup_data.errors[:10])
+        result.context_text = (
+            f"{result.context_text}\n\n---\n\n"
+            "## Previous Error Follow-up\n"
+            f"Source: {error_followup_data.source}\n"
+            f"Original prompt: {error_followup_data.prompt}\n"
+            f"{followup_text}"
+        )
         result.context_tokens = len(result.context_text) // 4
 
     if out:
@@ -1432,13 +1451,19 @@ def pack_context(prompt: str, path: str):
     from ..build import build_index
     from ..retrieval.resolver import resolve_context
     from ..assembly.zone_assembler import assemble_context
+    from ..config import load_config
     import pyperclip
 
     console.print(f"[bold cyan]> Assembling context for: \"{prompt}\"[/bold cyan]")
     
     with console.status("[dim]Building context map...[/dim]"):
+        cfg = load_config(project_root)
         store = build_index(project_root)
-        result = resolve_context(prompt, store, enable_keyword_fallback=False)
+        result = resolve_context(
+            prompt, store, 
+            enable_keyword_fallback=False,
+            enable_bm25_fallback=cfg.enable_bm25_fallback,
+        )
         assembled = assemble_context(result, store, project_root)
     
     # Payload for clipboard
