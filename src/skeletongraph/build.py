@@ -35,7 +35,7 @@ from .storage.local import (
     save_index,
     VERSION,
 )
-from .summary.summary_store import SummaryStore
+from .summary.local import build_local_summary
 from .assembly.constraint_store import ConstraintStore
 from .config import SGConfig, load_config
 from .graph.pagerank import compute_pagerank, get_hub_functions
@@ -260,7 +260,15 @@ def build_index(
                 body_kw = extract_body_keywords(body)
             except Exception:
                 pass
-        store.inverted_index.add(fqn, name, sk.signature, docstring=sk.docstring, body_keywords=body_kw)
+        summary = _seed_summary_from_source(sk, body_kw, store, cfg)
+        store.inverted_index.add(
+            fqn,
+            name,
+            sk.signature,
+            summary=summary,
+            docstring=sk.docstring,
+            body_keywords=body_kw,
+        )
 
     # Navigational indexing: Include constants and class attributes as beacons
     for file_path, file_sk in store.file_skeletons.items():
@@ -290,11 +298,7 @@ def build_index(
     else:
         store.pagerank_scores = {}
 
-    # ── Phase 3c: Seed summaries from docstrings/comments ────────────
-    if cfg.summary_use_docstrings:
-        seeded = _seed_summaries_from_docstrings(store, min_words=cfg.summary_min_words)
-        if seeded and on_progress:
-            on_progress(f"Seeded {seeded} summaries from docstrings", 0, 0)
+    # ── Phase 3c: Summaries are seeded while building the inverted index ──
 
     # ── Phase 3d: Auto-summarize top 20% hub functions (v4) ──────────
     if cfg.auto_summarize_on_build and (not cfg.summary_use_docstrings) and store.pagerank_scores:
@@ -345,7 +349,7 @@ def build_index(
                     body_kw = extract_body_keywords(body)
                 except Exception:
                     pass
-            emb_entries.append((fqn, sk.signature, sk.docstring or "", body_kw))
+            emb_entries.append((fqn, sk.signature, store.summaries.get(fqn) or sk.docstring or "", body_kw))
 
         store.embeddings = EmbeddingStore()
         if on_progress:
@@ -501,18 +505,20 @@ def update_index(
                 sk.fqn,
                 name,
                 sk.signature,
+                summary=_seed_summary_from_source(sk, body_kw, store, cfg),
                 docstring=sk.docstring,
                 body_keywords=body_kw,
             )
 
             if cfg.enable_embeddings and embeddings_available():
                 changed_entries.append(
-                    (sk.fqn, sk.signature, sk.docstring or "", body_kw)
+                    (
+                        sk.fqn,
+                        sk.signature,
+                        store.summaries.get(sk.fqn) or sk.docstring or "",
+                        body_kw,
+                    )
                 )
-
-            # Seed summary from docstring if enabled
-            if cfg.summary_use_docstrings:
-                _maybe_seed_summary_from_docstring(sk, store, cfg)
 
         store.dirty_tracker.update_file(
             file_path,
@@ -618,10 +624,6 @@ def update_index(
 
 def _summary_needs_refresh(fqn: str, store: IndexStore, cfg: SGConfig) -> bool:
     """Return True when summary is missing or too short to be useful."""
-    if cfg.summary_use_docstrings:
-        sk = store.skeleton_table.get(fqn)
-        if sk and sk.docstring:
-            return False
     summary = store.summaries.get(fqn)
     if not summary:
         return True
@@ -632,31 +634,36 @@ def _word_count(text: str) -> int:
     return len([w for w in text.strip().split() if w])
 
 
-def _maybe_seed_summary_from_docstring(sk, store: IndexStore, cfg: SGConfig) -> None:
-    """Seed summary from docstring if no usable summary exists."""
-    if not sk.docstring:
-        return
-    doc_line = sk.docstring.strip().splitlines()[0]
-    if _word_count(doc_line) < cfg.summary_min_words:
-        return
+def _seed_summary_from_source(
+    sk,
+    body_keywords: List[str],
+    store: IndexStore,
+    cfg: SGConfig,
+) -> str:
+    """Seed/update the sidecar summary from code-local signals.
+
+    Docstrings/comments are the highest-trust local source. When they are
+    absent, a deterministic heuristic summary keeps first-build retrieval
+    useful without requiring API keys or local model setup.
+    """
     existing = store.summaries.get(sk.fqn) or ""
-    if existing != doc_line:
-        store.summaries.set(sk.fqn, doc_line)
 
+    if cfg.summary_use_docstrings and sk.docstring:
+        summary = sk.docstring.strip().splitlines()[0]
+        if _word_count(summary) >= cfg.summary_min_words:
+            store.summaries.set(sk.fqn, summary)
+            return summary
 
-def _seed_summaries_from_docstrings(store: IndexStore, min_words: int) -> int:
-    """Seed summaries from docstrings when possible. Returns count seeded."""
-    seeded = 0
-    for sk in store.skeleton_table.values():
-        if store.summaries.get(sk.fqn):
-            continue
-        if not sk.docstring:
-            continue
-        doc_line = sk.docstring.strip().splitlines()[0]
-        if _word_count(doc_line) >= min_words:
-            store.summaries.set(sk.fqn, doc_line)
-            seeded += 1
-    return seeded
+    if existing and _word_count(existing) >= cfg.summary_min_words:
+        return existing
+
+    if cfg.summary_use_local_heuristics:
+        summary = build_local_summary(sk, body_keywords)
+        if _word_count(summary) >= cfg.summary_min_words:
+            store.summaries.set(sk.fqn, summary)
+            return summary
+
+    return existing
 
 
 def _summarize_changed_functions(
