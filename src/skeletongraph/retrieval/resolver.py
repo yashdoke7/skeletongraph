@@ -115,6 +115,11 @@ def resolve_context(
     # Track how targets were found (for confidence scoring)
     match_source = "none"
 
+    # Normalized [0,1] lexical relevance scores from BM25/keyword fallback.
+    # Preserved here so the ranker can inject them as a bonus instead of
+    # re-ordering purely by graph centrality (which discards lexical signal).
+    _lexical_scores: Dict[str, float] = {}
+
     # Step 3: Determine confidence
     if target_fqns:
         confidence = "HIGH"
@@ -130,6 +135,8 @@ def resolve_context(
             bm25_results = _bm25_fallback(prompt, store, top_k=15)
             if bm25_results:
                 target_fqns = {fqn for fqn, _ in bm25_results}
+                _lex_max = max(s for _, s in bm25_results) or 1.0
+                _lexical_scores = {fqn: s / _lex_max for fqn, s in bm25_results}
                 confidence = "MEDIUM" if len(bm25_results) > 3 else "LOW"
                 confidence_reason = (
                     f"Matched {len(bm25_results)} entities via BM25 fallback"
@@ -139,6 +146,8 @@ def resolve_context(
                 search_results = store.inverted_index.search(prompt, top_k=15)
                 if search_results:
                     target_fqns = {fqn for fqn, _ in search_results}
+                    _lex_max = max(s for _, s in search_results) or 1.0
+                    _lexical_scores = {fqn: s / _lex_max for fqn, s in search_results}
                     confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
                     confidence_reason = (
                         f"Matched {len(search_results)} entities via keyword search"
@@ -156,6 +165,8 @@ def resolve_context(
                 search_results = store.inverted_index.search(prompt, top_k=15)
                 if search_results:
                     target_fqns = {fqn for fqn, _ in search_results}
+                    _lex_max = max(s for _, s in search_results) or 1.0
+                    _lexical_scores = {fqn: s / _lex_max for fqn, s in search_results}
                     confidence = "MEDIUM" if len(search_results) > 3 else "LOW"
                     confidence_reason = (
                         f"Matched {len(search_results)} entities via keyword search"
@@ -183,6 +194,7 @@ def resolve_context(
     # Step 5: Expand via graph traversal
     candidates: Dict[str, RankedCandidate] = {}
     session_dedup_count = 0
+    _LEX_WEIGHT = 8.0  # lexical bonus scale; comparable to distance=1 (10/1) weight
 
     for fqn in target_fqns:
         sk = store.skeleton_table.get(fqn)
@@ -190,9 +202,11 @@ def resolve_context(
             is_cached = session.should_skip_body_hash(fqn, sk.sha256) if session else False
             if is_cached:
                 session_dedup_count += 1
+            base_score = ranker.score(fqn, sk, 0, "Direct target", target_file)
+            lex_bonus = _lexical_scores.get(fqn, 0.0) * _LEX_WEIGHT
             candidates[fqn] = RankedCandidate(
                 skeleton=sk, tier=Tier.TIER1, distance=0,
-                score=ranker.score(fqn, sk, 0, "Direct target", target_file),
+                score=base_score + lex_bonus,
                 reason="Direct target",
                 session_cached=is_cached,
             )
