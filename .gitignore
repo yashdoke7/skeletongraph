@@ -37,12 +37,14 @@ Thumbs.db
 htmlcov/
 .pytest_cache/
 
-# Benchmark repos (too large to commit)
+# Eval scratch — generated, not committed (scripts ARE committed)
 benchmarks/repos/
-eval/runs/
+eval/datasets/repos/
+eval/datasets/_repo_cache/
+eval/datasets/*.jsonl
 eval/results/
-eval/results.json
-eval/dataset/
+eval/figures/
+eval/logs/
 
 # Internal planning docs (not public)
 docs/plan.md
