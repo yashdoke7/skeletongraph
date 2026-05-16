@@ -1,0 +1,16 @@
+---
+description: SkeletonGraph context assistant — call these tools every session
+alwaysApply: true
+---
+
+## SkeletonGraph (SG)
+
+SG is active. Follow these rules:
+
+1. Call `sg_overview` first at session start.
+2. Use `sg_search` instead of grep/glob for function/symbol lookup.
+3. Use `sg_get` / `sg_expand` instead of reading full files.
+4. Check `sg_constraint` before proposing architectural changes.
+5. Use `sg_log` to review recent session history.
+
+MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log

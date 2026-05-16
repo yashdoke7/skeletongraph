@@ -163,14 +163,23 @@ After install, restart your editor. SkeletonGraph runs as a background MCP serve
 
 Six tools are exposed to the IDE agent. Use these **instead of** grep/glob/file reads:
 
-| Tool | When to call |
-| --- | --- |
-| `sg_overview` | Session start — constraints, top functions, recent turns |
-| `sg_search "query"` | Find relevant functions by name/keyword/graph context |
-| `sg_get "fqn"` | Inspect a specific function: signature, summary, callers |
-| `sg_expand "fqn"` | Read a function body or full file (token-capped) |
-| `sg_constraint list` | View project constraints before proposing changes |
-| `sg_log` | Show recent session entries |
+| Tool | When to call | Returns |
+| --- | --- | --- |
+| `sg_overview` | Session start — once per session | Constraints + top-N functions (by PageRank) + recent turns + index stats |
+| `sg_search "query"` | **Primary retrieval** — almost every prompt | Top-3 matches with body excerpts + summaries + 1-hop callers; top-4..N as signatures + summaries. One call usually enough — no need to chain. |
+| `sg_get "fqn"` | When the exact FQN is known | Signature + summary + 1-hop callers + callees |
+| `sg_expand "target"` | When more body is needed than `sg_search` returned | Full function body / file / line range (token-capped) |
+| `sg_constraint list` / `propose` | Before proposing changes | Confirmed + proposed project rules |
+| `sg_log` | Reviewing recent session turns | Last-N turn summaries with files touched |
+
+**Smart context routing.** On each `UserPromptSubmit`, SG classifies the prompt
+(architecture / explain / decision / debug / test / review / general) and
+includes the matching MD file from `.skeletongraph/` — e.g. `architecture.md`
+only for design/refactor queries, `project.md` only for "what is this codebase"
+queries. Constraints + session digest + relevant functions are always injected.
+
+**Cold start.** If no `.skeletongraph/` index exists when an MCP tool is called,
+SG auto-builds on first invocation (see `auto_build_on_query` in config).
 
 ## CLI Reference
 
@@ -225,16 +234,14 @@ Six tools are exposed to the IDE agent. Use these **instead of** grep/glob/file 
 | `sg config [--agent cursor]` | Configure IDE and CLI models | no |
 | `sg config --cli-provider anthropic` | Set CLI execution provider | no |
 
-**Evaluation & metrics**
+**Background indexing**
 
 | Command | Purpose |
 | --- | --- |
-| `sg metrics` | Show logged query metrics |
-| `sg baseline "task"` | Estimate naive agent token cost |
-| `sg eval-golden` | Run golden dataset evaluation |
-| `sg hotspots` | Top load-bearing files by PageRank |
+| `sg watch` | Daemon: auto-reindex files on save |
 
 Provider output from `sg run --execute` is written to `.skeletongraph/runs/`.
+Evaluation is currently done externally via SWE-bench harness — see `docs/swe_bench_runbook.md`.
 
 ## Python API
 

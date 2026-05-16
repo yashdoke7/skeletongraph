@@ -82,30 +82,51 @@ def hook_user_prompt_submit(project_root: Path, event_data: Dict[str, Any]) -> D
         # Build overview text: constraints + top PageRank + query-specific hits
         parts: list[str] = [_USE_SG_SYSTEM_MSG, ""]
 
-        # Constraints (Zone 1)
+        # Constraints (Zone 1) — always included, compact
         cs_file = sg_dir / "constraints.md"
         if cs_file.exists():
             cs_text = cs_file.read_text(encoding="utf-8", errors="replace").strip()
             if cs_text:
+                # Cap constraints to ~600 tokens to leave room for other context
+                if len(cs_text) > 2400:
+                    cs_text = cs_text[:2400].rstrip() + "\n... (truncated)"
                 parts.append(f"## Constraints\n{cs_text}")
 
-        # Session digest
+        # Smart-routed MD sections (architecture / project / decisions)
+        # — only included when prompt classification suggests they help
+        try:
+            from ..assembly.context_routing import route_context_sections, format_routed_sections
+            routed = route_context_sections(prompt, sg_dir)
+            routed_text = format_routed_sections(routed)
+            if routed_text:
+                parts.append(routed_text)
+        except Exception:
+            pass
+
+        # Session digest — always included, short
         from ..session.log import read_log, format_log_digest
         entries = read_log(sg_dir, last_n=5)
         digest = format_log_digest(entries, max_turns=5)
         if digest:
             parts.append(digest)
 
-        # Query-relevant functions (if prompt given)
+        # Query-relevant functions with summaries (if prompt given)
         if prompt.strip():
             try:
                 result = engine.heuristic_query(prompt.strip(), top_n=8)
                 candidates = result.candidates if hasattr(result, "candidates") else []
                 if candidates:
-                    lines = ["## Relevant functions"]
+                    store = engine.get_store()
+                    lines = [f"## Relevant functions (confidence={getattr(result, 'confidence', 'MEDIUM')})"]
                     for c in candidates[:8]:
                         sk = c.skeleton
-                        lines.append(f"  {sk.signature}  # {sk.fqn}")
+                        summary = store.summaries.get(sk.fqn) or ""
+                        if not summary and sk.docstring:
+                            summary = sk.docstring.splitlines()[0].strip()
+                        entry = f"  {sk.signature}  # {sk.fqn}"
+                        if summary:
+                            entry += f"  — {summary[:80]}"
+                        lines.append(entry)
                     parts.append("\n".join(lines))
             except Exception:
                 pass

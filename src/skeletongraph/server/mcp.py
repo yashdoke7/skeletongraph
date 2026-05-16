@@ -83,11 +83,15 @@ _TOOL_SCHEMAS = [
     _make_tool(
         "sg_search",
         (
-            "PREFERRED over native grep/glob. Hybrid search: BM25 keyword + "
-            "call-graph centrality signal. Returns ranked function list with "
-            "signatures and one-line summaries.\n\n"
-            "Use this instead of grep or file search when looking for functions, "
-            "classes, or code related to a concept."
+            "PRIMARY retrieval tool — use this AS THE FINAL STEP for most retrievals.\n\n"
+            "Returns expanded context for the query:\n"
+            "  • Top 3 matches: signature + summary + body excerpt + 1-hop callers\n"
+            "  • Top 4..N: signature + summary (no body)\n"
+            "  • Retrieval confidence (HIGH/MEDIUM/LOW) so you know if results are trustworthy\n\n"
+            "PREFERRED over native grep/glob. Hybrid BM25 + graph centrality.\n"
+            "No need to chain sg_get/sg_expand for typical retrieval flows — this tool "
+            "already returns what you need. Only call sg_expand if you need MORE body lines "
+            "than the excerpt, or sg_get for a different FQN."
         ),
         {
             "query": {
@@ -96,13 +100,23 @@ _TOOL_SCHEMAS = [
             },
             "top_n": {
                 "type": "integer",
-                "description": "Max results to return (default: 15)",
-                "default": 15,
+                "description": "Total candidates returned (default: 10)",
+                "default": 10,
+            },
+            "expand_top": {
+                "type": "integer",
+                "description": "How many top results get full body excerpt + callers (default: 3)",
+                "default": 3,
             },
             "file_filter": {
                 "type": "string",
                 "description": "Optional: restrict to files matching this substring",
                 "default": "",
+            },
+            "max_tokens": {
+                "type": "integer",
+                "description": "Token budget for the whole response (default: 4000)",
+                "default": 4000,
             },
         },
         ["query"],
@@ -330,7 +344,10 @@ class MCPServer:
                 sk = store.skeleton_table.get(fqn)
                 if not sk:
                     continue
-                summary = store.summaries.get(fqn) or "" or (sk.docstring or "").splitlines()[0] if sk.docstring else ""
+                # Prefer SummaryStore (Tier-0/0.5/1), fall back to first docstring line
+                summary = store.summaries.get(fqn) or ""
+                if not summary and sk.docstring:
+                    summary = sk.docstring.splitlines()[0].strip()
                 entry = f"  {sk.signature}"
                 if summary:
                     entry += f"  # {summary[:80]}"
@@ -351,42 +368,134 @@ class MCPServer:
     # ── Tool: sg_search ──────────────────────────────────────────────────
 
     def _tool_search(self, args: Dict) -> str:
+        """Primary retrieval — returns expanded context (bodies for top-N, sigs for rest)."""
         query = str(args.get("query", "")).strip()
-        top_n = int(args.get("top_n", 15))
+        top_n = int(args.get("top_n", 10))
+        expand_top = int(args.get("expand_top", 3))
         file_filter = str(args.get("file_filter", "")).strip()
+        max_tokens = int(args.get("max_tokens", 4000))
 
         if not query:
             return "Error: query is required"
 
         try:
-            result = self._engine.heuristic_query(query, top_n=top_n, file_filter=file_filter or None)
-        except AttributeError:
-            # Fallback if heuristic_query not yet present
-            result = self._engine.query(query, delivery="ide")
+            store = self._engine.get_store()
+            result = self._engine.heuristic_query(
+                query, top_n=top_n, file_filter=file_filter or None,
+            )
+        except RuntimeError as e:
+            return str(e)
 
-        if hasattr(result, "candidates"):
-            candidates = result.candidates
-        elif hasattr(result, "context_text"):
-            return result.context_text
-        else:
-            return str(result)
+        candidates = result.candidates
+        confidence = getattr(result, "confidence", "MEDIUM")
 
         if not candidates:
-            return f"No results for: {query!r}"
+            return (
+                f"No results for: {query!r}\n"
+                f"Confidence: MISS. Try different keywords, or use sg_overview "
+                f"to see what's indexed."
+            )
 
-        lines = [f"Results for: {query!r}  ({len(candidates)} matches)\n"]
-        for i, c in enumerate(candidates[:top_n], 1):
+        # Soft token budget — stop including bodies once we hit ~70% of the budget
+        char_budget = max_tokens * 4
+        used_chars = 0
+
+        lines = [
+            f"# Search: {query!r}",
+            f"Confidence: {confidence}  |  Matches: {len(candidates)}  |  Showing top {min(top_n, len(candidates))}",
+            "",
+        ]
+
+        # ── Top expand_top: full expansion ───────────────────────────────
+        bodies_included = 0
+        for i, c in enumerate(candidates[:expand_top], 1):
             sk = c.skeleton
-            if file_filter and file_filter not in sk.file_path:
-                continue
-            summary = (sk.docstring or "").splitlines()[0] if sk.docstring else ""
-            lines.append(f"{i}. {sk.fqn}")
+
+            # Prefer SummaryStore (Tier-0/0.5/1)
+            summary = store.summaries.get(sk.fqn) or ""
+            if not summary and sk.docstring:
+                summary = sk.docstring.splitlines()[0].strip()
+
+            lines.append(f"## {i}. {sk.fqn}")
+            lines.append(f"   File: {sk.file_path}:{sk.line_start}")
             lines.append(f"   {sk.signature}")
             if summary:
-                lines.append(f"   # {summary[:100]}")
+                lines.append(f"   Summary: {summary[:160]}")
+
+            # Body excerpt (capped to ~40 lines)
+            if used_chars < char_budget * 0.7:
+                body = self._read_body_excerpt(sk, max_lines=40)
+                if body:
+                    lines.append("")
+                    lines.append("```")
+                    lines.append(body)
+                    lines.append("```")
+                    used_chars += len(body)
+                    bodies_included += 1
+
+            # 1-hop callers (brief)
+            callers = []
+            for other_fqn, other_sk in store.skeleton_table.items():
+                if sk.fqn in getattr(other_sk, "callees", []):
+                    callers.append(other_fqn)
+                    if len(callers) >= 3:
+                        break
+            if callers:
+                lines.append(f"   Called by: {', '.join(callers)}")
+
             lines.append("")
+            used_chars = sum(len(l) for l in lines)
+            if used_chars >= char_budget:
+                lines.append("   _[token budget reached]_")
+                break
+
+        # ── Top expand_top..N: signature + summary only ──────────────────
+        remaining = candidates[expand_top:top_n]
+        if remaining and used_chars < char_budget:
+            lines.append("## Other matches (signatures only)")
+            lines.append("")
+            for c in remaining:
+                sk = c.skeleton
+                summary = store.summaries.get(sk.fqn) or ""
+                if not summary and sk.docstring:
+                    summary = sk.docstring.splitlines()[0].strip()
+                entry = f"- `{sk.fqn}`  →  {sk.signature[:80]}"
+                if summary:
+                    entry += f"  # {summary[:60]}"
+                lines.append(entry)
+
+        # Footer
+        lines.append("")
+        if bodies_included < expand_top:
+            lines.append(
+                f"_Bodies shown for top {bodies_included}; call sg_expand('<fqn>') "
+                f"for more._"
+            )
+        if confidence == "LOW":
+            lines.append(
+                "_⚠ LOW confidence — these matches may not be the right targets. "
+                "Consider refining your query._"
+            )
 
         return "\n".join(lines)
+
+    def _read_body_excerpt(self, sk, max_lines: int = 40) -> str:
+        """Read a function body from disk, capped to max_lines."""
+        try:
+            file_path = self._root / sk.file_path
+            if not file_path.exists():
+                return ""
+            all_lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            start = max(0, sk.line_start - 1)
+            end = min(len(all_lines), sk.line_end)
+            body_lines = all_lines[start:end]
+            if len(body_lines) > max_lines:
+                head = body_lines[:max_lines]
+                trimmed = len(body_lines) - max_lines
+                return "\n".join(head) + f"\n    # ... ({trimmed} more lines, use sg_expand)"
+            return "\n".join(body_lines)
+        except Exception:
+            return ""
 
     # ── Tool: sg_get ─────────────────────────────────────────────────────
 
@@ -427,12 +536,12 @@ class MCPServer:
         parts.append(f"File: {sk.file_path}:{sk.line_start}")
         parts.append(f"\n{sk.signature}")
 
-        if sk.docstring:
-            parts.append(f"\nDocstring:\n{sk.docstring.strip()}")
-
+        # Prefer SummaryStore (Tier-0/0.5/1) — it includes our generated summaries
         summary = store.summaries.get(resolved_fqn) or ""
         if summary:
             parts.append(f"\nSummary: {summary}")
+        elif sk.docstring:
+            parts.append(f"\nDocstring:\n{sk.docstring.strip()}")
 
         if include_callers:
             callers = []

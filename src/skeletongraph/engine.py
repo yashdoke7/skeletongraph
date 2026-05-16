@@ -136,18 +136,25 @@ class SGEngine:
         self._last_assembly_native_estimate: int = 0
 
     def _ensure_loaded(self) -> IndexStore:
-        """Lazy-load the index store."""
+        """Lazy-load the index store. Auto-builds on cold start if config allows."""
         if self._store is None:
-            if not self._sg_dir.exists():
+            auto_build = getattr(self._config, "auto_build_on_query", True)
+
+            if not self._sg_dir.exists() or load_index(self._root) is None:
+                if auto_build:
+                    logger.info(
+                        "No SkeletonGraph index at %s — building now (first run)...",
+                        self._sg_dir,
+                    )
+                    from .build import build_index
+                    self._store = build_index(self._root)
+                    return self._store
                 raise RuntimeError(
-                    "No SkeletonGraph index found. Run `sg build` first."
+                    "No SkeletonGraph index found. Run `sg build` first "
+                    "(or enable auto_build_on_query in config)."
                 )
-            store = load_index(self._root)
-            if store is None:
-                raise RuntimeError(
-                    "No SkeletonGraph index metadata found. Run `sg build` first."
-                )
-            self._store = store
+
+            self._store = load_index(self._root)
         return self._store
 
     def _ensure_session(self) -> Session:
@@ -539,14 +546,23 @@ class SGEngine:
 
         # Auto-detect type
         if expand_type == "auto":
+            _src_exts = (".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go",
+                         ".rs", ".cpp", ".c", ".h", ".hpp", ".cs", ".rb", ".php")
             if "::" in target:
                 expand_type = "function"
             elif start_line is not None and end_line is not None:
                 expand_type = "range"
-            elif target.endswith("/") or not "." in target.split("/")[-1]:
+            elif target.endswith(_src_exts):
+                expand_type = "file"
+            elif target.endswith("/") or "/" in target:
                 expand_type = "directory"
             else:
-                expand_type = "file"
+                # Bare name — could be class or directory. Look in store first.
+                if any(f"::{target}" in k or k.endswith(f"::{target}")
+                       for k in store.skeleton_table.keys()):
+                    expand_type = "class"
+                else:
+                    expand_type = "directory"
 
         if expand_type == "function":
             return self._expand_function(target, store, include_neighbors)

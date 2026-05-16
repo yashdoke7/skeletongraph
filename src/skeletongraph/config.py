@@ -250,6 +250,7 @@ class SGConfig:
     # ── Build & Indexing ───────────────────────────────────────────────
     ignore_patterns: List[str] = field(default_factory=list)  # Extra ignore patterns
     parallel_parse: bool = False            # Reserved for future concurrent parsing
+    auto_build_on_query: bool = True        # Build index on first query if missing (no "run sg build" wall)
     auto_summarize: bool = False            # Summarize on build?
     auto_summarize_on_build: bool = False   # Keep build LLM-free by default (docstring + BM25 path)
     auto_summarize_on_update: bool = False  # Keep update LLM-free by default (docstring + BM25 path)
