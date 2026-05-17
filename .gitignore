@@ -59,3 +59,11 @@ test_mcp_tools.py
 scratch_*.py
 scratch_select.py
 eval/scripts/patch_setup.py
+
+architecture.md
+decisions.md
+project.md
+constraints
+
+# Scratch eval runbooks — working docs, not part of the package
+temp/
