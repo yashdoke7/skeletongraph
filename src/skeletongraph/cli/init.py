@@ -23,7 +23,7 @@ console = Console()
 
 
 def run_init(project_root: Path, store=None, non_interactive: bool = False,
-             agent: str | None = None, auto_infer: bool = False) -> bool:
+             auto_infer: bool = False) -> bool:
     """Run init logic. Called from sg build on first run.
 
     Args:
@@ -54,11 +54,10 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
         # Use LLM to infer metadata from codebase
         if not non_interactive:
             console.print("[cyan]Inferring project metadata from codebase...[/cyan]")
-        goal, constraints, phase, decisions = _infer_metadata_with_llm(project_root, store)
+        goal, constraints, _phase, decisions = _infer_metadata_with_llm(project_root, store)
     elif non_interactive:
         goal = f"{project_name} project"
         constraints = "[Add constraints here]"
-        phase = _detect_phase(project_root, store)
         decisions = "[Add key architectural decisions here]"
     else:
         console.print()
@@ -83,16 +82,7 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
         if not constraints.strip():
             constraints = "[Add constraints here]"
 
-        # Prompt 3: With default
-        phase = _detect_phase(project_root, store)
-        phase_input = Prompt.ask(
-            f"[bold]Project phase?[/bold] [start/active/maintenance/refactor]",
-            default=phase,
-        )
-        if phase_input.strip():
-            phase = phase_input.strip()
-
-        # Prompt 4: Optional
+        # Prompt 3: Optional
         decisions = Prompt.ask(
             "[bold]Any key architectural decisions to preserve?[/bold]\n"
             "  Press Enter to skip",
@@ -102,39 +92,7 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
             decisions = "[Add key architectural decisions here]"
 
     # ── Agent Selection ───────────────────────────────────────────────
-    from ..config import AGENT_PRESETS, save_config, SGConfig
-
-    selected_agent = agent  # from --agent flag
-
-    if not selected_agent and not non_interactive:
-        console.print()
-        agent_names = list(AGENT_PRESETS.keys())
-        console.print("[bold cyan]Which IDE are you using?[/bold cyan]")
-        for i, name in enumerate(agent_names, 1):
-            console.print(f"  [cyan]{i}[/cyan]. {name}")
-        choice = Prompt.ask(
-            "\n[bold]Select agent[/bold] (number or name)",
-            default="1",
-        )
-        # Accept number or name
-        if choice.isdigit() and 1 <= int(choice) <= len(agent_names):
-            selected_agent = agent_names[int(choice) - 1]
-        elif choice in agent_names:
-            selected_agent = choice
-        else:
-            console.print(f"[yellow]Unknown agent '{choice}', defaulting to cursor[/yellow]")
-            selected_agent = "cursor"
-
-    if not selected_agent:
-        selected_agent = "cursor"  # default for non-interactive
-
-    preset = AGENT_PRESETS[selected_agent]
-    config = SGConfig.from_agent_preset(selected_agent)
-    config.agent = selected_agent
-
-    if not non_interactive:
-        console.print(f"\n[green]✓[/green] Agent: [bold]{selected_agent}[/bold]")
-        console.print("  [dim]Configured integration and defaults for this IDE.[/dim]")
+    from ..config import save_config, SGConfig
 
     # Detect stack
     stack = _detect_stack(project_root)
@@ -146,7 +104,6 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
         f"**Type:** {project_type}\n"
         f"**Goal:** {goal}\n"
         f"**Stack:** {stack}\n"
-        f"**Phase:** {phase}\n"
         f"\n"
         f"## Fundamental Constraints\n"
         f"- {constraints}\n"
@@ -163,20 +120,15 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
     arch_md = _generate_architecture(project_root, store)
     arch_path.write_text(arch_md, encoding="utf-8")
 
-    # ── Save agent config ────────────────────────────────────────────
-    save_config(config, project_root)
+    # ── Save a default config ─────────────────────────────────────────
+    # IDE/agent wiring (MCP, hooks) is `sg install`'s job — not init's.
+    if not (sg_dir / "config.json").exists():
+        save_config(SGConfig(), project_root)
 
     if not non_interactive:
         console.print(f"\n[green]✓[/green] Created {project_path.relative_to(project_root)}")
         console.print(f"[green]✓[/green] Created {arch_path.relative_to(project_root)}")
-        console.print(f"[green]✓[/green] Saved config to .skeletongraph/config.json")
-
-        # Auto-run sg install for the selected agent
-        console.print(f"\n[cyan]Auto-configuring {selected_agent} integration...[/cyan]")
-        from .main import _install_platform, _write_mcp_config
-        _install_platform(selected_agent if selected_agent != "copilot" else "copilot",
-                          project_root)
-        _write_mcp_config(project_root, platforms=[selected_agent])
+        console.print("\n[dim]Next: run `sg install` to wire up your IDE.[/dim]")
 
     return True
 
@@ -447,16 +399,15 @@ def _generate_architecture(project_root: Path, store=None) -> str:
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--non-interactive", is_flag=True, help="Skip prompts, use defaults")
 @click.option("--auto-infer", is_flag=True, help="Use LLM to infer metadata from codebase")
-@click.option("--agent", "-a", type=click.Choice(
-    ["cursor", "copilot", "codex", "claude_code", "antigravity"],
-    case_sensitive=False,
-), default=None, help="IDE agent preset")
-def init_command(path: str, non_interactive: bool, auto_infer: bool, agent: str):
-    """Initialize project.md and architecture.md for SkeletonGraph."""
+def init_command(path: str, non_interactive: bool, auto_infer: bool):
+    """Initialize project.md and architecture.md for SkeletonGraph.
+
+    Writes project DNA + architecture only. Run `sg install` to wire up an IDE.
+    """
     project_root = Path(path).resolve()
 
     if not project_root.is_dir():
         console.print(f"[red]Error:[/red] {project_root} is not a directory")
         sys.exit(1)
 
-    run_init(project_root, non_interactive=non_interactive, auto_infer=auto_infer, agent=agent)
+    run_init(project_root, non_interactive=non_interactive, auto_infer=auto_infer)

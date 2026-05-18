@@ -60,11 +60,84 @@ def init_cmd(path: str, agent: str | None, non_interactive: bool, constraints: s
         console.print(f"[green]Constraint added:[/green] {constraints.strip()[:80]}")
 
 
+def _import_artifact(dest: Path, label: str) -> None:
+    """Open an editor so the user can paste an existing doc into `dest`.
+
+    Only ever called when the matching --project-summary / --constraints flag
+    is passed to `sg build`. Bare `sg build` never reaches this.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    existing = dest.read_text(encoding="utf-8") if dest.exists() else ""
+    seed = existing or f"# Paste your existing {label} here, then save and close.\n"
+    pasted = click.edit(seed)
+    if pasted is None or not pasted.strip() or pasted.strip().startswith("# Paste your"):
+        console.print(f"  [yellow]Skipped {label} import (nothing pasted).[/yellow]")
+        return
+    dest.write_text(pasted, encoding="utf-8")
+    console.print(f"  [green]Imported {label}[/green] -> {dest}")
+
+
+def _seed_project_md_from_readme(project_root: Path) -> bool:
+    """Derive a minimal project.md from the README when none exists.
+
+    Heuristic only — no prompt, no LLM: first heading + first paragraph. SG's
+    job here is compression — hand the agent a short project DNA so it does not
+    spend a turn reading the whole README. The agent can refine it later.
+    Returns True if a file was written.
+    """
+    sg_dir = project_root / ".skeletongraph"
+    project_md = sg_dir / "project.md"
+    if project_md.exists():
+        return False
+    readme = next((project_root / n for n in
+                   ("README.md", "README.rst", "README.txt", "readme.md")
+                   if (project_root / n).exists()), None)
+    if readme is None:
+        return False
+    try:
+        lines = [l.rstrip() for l in
+                 readme.read_text(encoding="utf-8", errors="replace").splitlines()]
+    except Exception:
+        return False
+    title, para = "", []
+    for l in lines:
+        s = l.strip().lstrip("#").strip()
+        if s and not title:
+            title = s
+        elif title and s:
+            para.append(s)
+        elif title and para:
+            break
+    summary = " ".join(para)[:600] or "[Derived from README — refine as needed.]"
+    sg_dir.mkdir(parents=True, exist_ok=True)
+    project_md.write_text(
+        f"# {project_root.name}\n"
+        f"**Goal:** {title or project_root.name}\n\n"
+        f"## Summary\n{summary}\n\n"
+        f"<!-- Auto-derived from README. The agent may refine this. -->\n",
+        encoding="utf-8",
+    )
+    return True
+
+
 @app.command()
 @click.option("--path", "-p", default=".", help="Project root directory")
-@click.option("--auto-infer", is_flag=True, help="Auto-infer project metadata using LLM")
-def build(path: str, auto_infer: bool):
-    """Build the full index for a project."""
+@click.option("--project-summary", "import_summary", is_flag=True,
+              help="After indexing, open an editor to paste an existing "
+                   "project summary into .skeletongraph/project.md")
+@click.option("--constraints", "import_constraints", is_flag=True,
+              help="After indexing, open an editor to paste existing "
+                   "constraints into .skeletongraph/constraints.md")
+def build(path: str, import_summary: bool, import_constraints: bool):
+    """Build the code index for a project.
+
+    Bare `sg build` indexes source files only — it never prompts and never
+    creates project.md (a first build with no project.md is fully supported;
+    SkeletonGraph derives a fallback, and the agent can refine it later).
+
+    Pass --project-summary or --constraints ONLY if you already have those
+    docs and want to import them; an editor opens for you to paste them.
+    """
     project_root = Path(path).resolve()
 
     if not project_root.is_dir():
@@ -72,18 +145,6 @@ def build(path: str, auto_infer: bool):
         sys.exit(1)
 
     console.print(f"[bold]> Building index for[/bold] {project_root.name}")
-
-    # Auto-trigger sg init on first build if project.md doesn't exist
-    sg_dir = project_root / ".skeletongraph"
-    project_md = sg_dir / "project.md"
-    if not project_md.exists():
-        if auto_infer:
-            console.print("[cyan]First build detected — auto-inferring project metadata...[/cyan]")
-        else:
-            console.print("[cyan]First build detected — running sg init...[/cyan]")
-        from .init import run_init
-        run_init(project_root, auto_infer=auto_infer)
-        console.print()
 
     from ..build import build_index, discover_files
 
@@ -136,6 +197,17 @@ def build(path: str, auto_infer: bool):
         arch_md = _generate_architecture(project_root, store)
         arch_path.write_text(arch_md, encoding="utf-8")
         console.print(f"  [dim]Updated {arch_path.relative_to(project_root)}[/dim]")
+
+    # Fallback project DNA: derive a minimal project.md from the README if none
+    # exists (heuristic, no prompt, no LLM — the agent refines it later).
+    if _seed_project_md_from_readme(project_root):
+        console.print("  [dim]Derived project.md from README[/dim]")
+
+    # Opt-in artifact import (only when the flag was explicitly passed)
+    if import_summary:
+        _import_artifact(sg_dir / "project.md", "project summary")
+    if import_constraints:
+        _import_artifact(sg_dir / "constraints.md", "constraints")
 
 
 @app.command()
