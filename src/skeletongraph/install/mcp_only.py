@@ -24,10 +24,17 @@ _SG_RULES_BLOCK = """\
 
 SG MCP tools are available. Use them every session:
 
-- `sg_overview`   — project skeleton + constraints + session digest (call FIRST)
-- `sg_search`     — hybrid search (BM25 + graph). Use INSTEAD OF grep/glob.
-- `sg_get`        — function body + callers by FQN
-- `sg_expand`     — full file / line range view (token-capped)
+- `sg_overview`   — project briefing: project purpose, structure, constraints,
+                    recent turns/decisions, and index status (call FIRST).
+- `sg_search`     — task-context assembler, not grep. Ask for the whole task or
+                    symptom once; for coding/debug tasks it returns likely edit
+                    targets, imports/prelude, helper bodies, graph neighbors,
+                    and likely tests. Do not split one task into many symbol
+                    searches unless confidence is LOW/MISS or the target is absent.
+- `sg_get`        — exact FQN metadata when you already know the target.
+- `sg_expand`     — exact follow-up only. Expand a specific FQN when you are
+                    about to edit it and the body was not already returned.
+                    Do not read MCP `content.txt` result files.
 - `sg_constraint` — view/propose project constraints
 - `sg_log`        — recent session log entries
 """

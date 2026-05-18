@@ -32,8 +32,10 @@ logger = logging.getLogger(__name__)
 
 _USE_SG_SYSTEM_MSG = (
     "SkeletonGraph (SG) is active for this project. "
-    "ALWAYS call sg_overview at session start. "
-    "Use sg_search instead of grep/glob, sg_get/sg_expand instead of reading full files, "
+    "ALWAYS call sg_overview at session start for the project briefing. "
+    "Use sg_search as a task-context assembler, not grep: ask for the whole task once; "
+    "it returns likely edit targets, helpers, graph neighbors, and likely tests. "
+    "Use sg_get/sg_expand only for exact follow-up FQNs, and do not read MCP content.txt result files. "
     "sg_constraint to view project rules before proposing changes. "
     "MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log."
 )

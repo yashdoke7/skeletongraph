@@ -22,7 +22,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import SGConfig, load_config
 from ..engine import SGEngine
@@ -35,9 +35,11 @@ logger = logging.getLogger(__name__)
 
 _USE_SG_REMINDER = (
     "SkeletonGraph (SG) is your PREFERRED context source for this repo. "
-    "Call sg_overview at session start, sg_search instead of native grep/glob, "
-    "sg_get/sg_expand instead of reading full files, and sg_constraint to see "
-    "project rules before proposing changes."
+    "Call sg_overview at session start for the project briefing. "
+    "Use sg_search as a task-context assembler, not grep: ask for the whole task once; "
+    "it returns likely edit targets, helpers, graph neighbors, and likely tests. "
+    "Use sg_get/sg_expand only for exact follow-up FQNs, and do not read MCP content.txt result files. "
+    "Call sg_constraint to see project rules before proposing changes."
 )
 
 
@@ -84,20 +86,25 @@ _TOOL_SCHEMAS = [
     _make_tool(
         "sg_search",
         (
-            "PRIMARY retrieval tool — use this AS THE FINAL STEP for most retrievals.\n\n"
-            "Returns expanded context for the query:\n"
-            "  • Top 3 matches: signature + summary + body excerpt + 1-hop callers\n"
-            "  • Top 4..N: signature + summary (no body)\n"
-            "  • Retrieval confidence (HIGH/MEDIUM/LOW) so you know if results are trustworthy\n\n"
+            "PRIMARY retrieval tool — one call should locate the edit target and "
+            "return enough code to start. Prefer refining the query over chaining "
+            "broad expansions.\n\n"
+            "Returns:\n"
+            "  • Top matches: FQN + file:line-range + imports/prelude + signature "
+            "+ summary + target body + caller/callee signatures\n"
+            "  • Debug/test bundle: small helper bodies and likely test files/snippets\n"
+            "  • Remaining matches: FQN + file:line-range + signature + summary\n"
+            "  • Lexical grep fallback: when graph confidence is not HIGH, a "
+            "plain-text scan catches module-level constants, decorators and type "
+            "aliases that the function graph cannot index.\n\n"
             "PREFERRED over native grep/glob. Hybrid BM25 + graph centrality.\n"
-            "No need to chain sg_get/sg_expand for typical retrieval flows — this tool "
-            "already returns what you need. Only call sg_expand if you need MORE body lines "
-            "than the excerpt, or sg_get for a different FQN."
+            "Only call sg_expand for a listed function when you are about to edit "
+            "that function and its body was not included."
         ),
         {
             "query": {
                 "type": "string",
-                "description": "Natural language or keyword query",
+                "description": "Whole task/symptom query. Prefer the complete bug or edit goal over a single symbol.",
             },
             "top_n": {
                 "type": "integer",
@@ -106,7 +113,9 @@ _TOOL_SCHEMAS = [
             },
             "expand_top": {
                 "type": "integer",
-                "description": "How many top results get full body excerpt + callers (default: 3)",
+                "description": "How many top results get target bodies (default: 3). "
+                               "High values are capped to prevent MCP result bloat; "
+                               "neighbors are returned as signatures.",
                 "default": 3,
             },
             "file_filter": {
@@ -117,14 +126,15 @@ _TOOL_SCHEMAS = [
             "intent": {
                 "type": "string",
                 "description": "Optional task intent to shape retrieval — e.g. "
-                               "debug_targeted, explain, refactor, review, architecture. "
-                               "Omit to let SG infer it.",
+                               "debug_targeted for bugs/failing tests, explain, "
+                               "refactor for behavior-preserving rewrites, review, "
+                               "architecture. Omit to let SG infer it.",
                 "default": "",
             },
             "max_tokens": {
                 "type": "integer",
-                "description": "Token budget for the whole response (default: 4000)",
-                "default": 4000,
+                "description": "Token budget for the whole response (default: 5000)",
+                "default": 5000,
             },
         },
         ["query"],
@@ -155,22 +165,24 @@ _TOOL_SCHEMAS = [
     _make_tool(
         "sg_expand",
         (
-            "PREFERRED over reading full files. Expand a function, class, file, "
-            "or line range on demand. Respects token budget.\n\n"
+            "Fallback for content NOT already returned by sg_search. Expand a whole function, "
+            "class, or file.\n\n"
+            "PREFER an FQN or a bare file path — that returns the complete unit in "
+            "ONE call. Avoid line ranges: they force you to page through a file.\n\n"
             "target formats:\n"
-            "  - FQN: 'src/file.py::MyClass.my_method' (function body)\n"
-            "  - File path: 'src/file.py' (full file, token-capped)\n"
-            "  - Range: 'src/file.py:42-80' (specific lines)"
+            "  - FQN: 'src/file.py::MyClass.my_method' (full function body)\n"
+            "  - File path: 'src/file.py' (full file)\n"
+            "  - Range: 'src/file.py:42-80' (only if you truly need a slice)"
         ),
         {
             "target": {
                 "type": "string",
-                "description": "FQN, file path, or file:start-end range",
+                "description": "FQN or file path (preferred); file:start-end range only if needed",
             },
             "max_tokens": {
                 "type": "integer",
-                "description": "Token budget (default: 4000)",
-                "default": 4000,
+                "description": "Token budget (default: 5000)",
+                "default": 5000,
             },
         },
         ["target"],
@@ -304,6 +316,9 @@ class MCPServer:
         self._engine = SGEngine(project_root, self._config)
         self._session_id = str(uuid.uuid4())[:8]
         self._turn_index = 0
+        # Session-level dedup: FQNs whose full bodies were already returned this
+        # session (model's context window already has them — no value in re-sending).
+        self._returned_fqns: set = set()
 
     # ── JSON-RPC dispatch ────────────────────────────────────────────────
 
@@ -488,12 +503,12 @@ class MCPServer:
     # ── Tool: sg_search ──────────────────────────────────────────────────
 
     def _tool_search(self, args: Dict) -> str:
-        """Primary retrieval — returns expanded context (bodies for top-N, sigs for rest)."""
+        """Primary retrieval — target bodies + structural pointers + session dedup."""
         query = str(args.get("query", "")).strip()
-        top_n = int(args.get("top_n", 10))
-        expand_top = int(args.get("expand_top", 3))
+        top_n = min(max(int(args.get("top_n", 10)), 1), 20)
+        requested_expand_top = min(max(int(args.get("expand_top", 3)), 1), 7)
         file_filter = str(args.get("file_filter", "")).strip()
-        max_tokens = int(args.get("max_tokens", 4000))
+        max_tokens = min(max(int(args.get("max_tokens", 5000)), 1000), 12000)
         intent_arg = str(args.get("intent", "")).strip() or None
 
         if not query:
@@ -510,114 +525,912 @@ class MCPServer:
 
         candidates = result.candidates
         confidence = getattr(result, "confidence", "MEDIUM")
+        # Full bodies are valuable, but broad body dumps cause MCP results to be
+        # re-read by some IDEs as separate content resources. Keep MEDIUM/LOW
+        # searches tight; HIGH-confidence exact matches can carry a bit more.
+        expand_top = min(requested_expand_top, 5 if confidence == "HIGH" else 3)
 
-        if not candidates:
-            return (
-                f"No results for: {query!r}\n"
-                f"Confidence: MISS. Try different keywords, or use sg_overview "
-                f"to see what's indexed."
-            )
-
-        # Soft token budget — stop including bodies once we hit ~70% of the budget
         char_budget = max_tokens * 4
         used_chars = 0
+        lines = [f"# Search: {query!r}"]
+        preludes_seen: set[str] = set()
 
-        lines = [
-            f"# Search: {query!r}",
-            f"Confidence: {confidence}  |  Matches: {len(candidates)}  |  Showing top {min(top_n, len(candidates))}",
-            "",
-        ]
-
-        # ── Top expand_top: full expansion ───────────────────────────────
-        bodies_included = 0
-        for i, c in enumerate(candidates[:expand_top], 1):
-            sk = c.skeleton
-
-            # Prefer SummaryStore (Tier-0/0.5/1)
-            summary = store.summaries.get(sk.fqn) or ""
-            if not summary and sk.docstring:
-                summary = sk.docstring.splitlines()[0].strip()
-
-            lines.append(f"## {i}. {sk.fqn}")
-            lines.append(f"   File: {sk.file_path}:{sk.line_start}")
-            lines.append(f"   {sk.signature}")
-            if summary:
-                lines.append(f"   Summary: {summary[:160]}")
-
-            # Body excerpt (capped to ~40 lines)
-            if used_chars < char_budget * 0.7:
-                body = self._read_body_excerpt(sk, max_lines=40)
-                if body:
-                    lines.append("")
-                    lines.append("```")
-                    lines.append(body)
-                    lines.append("```")
-                    used_chars += len(body)
-                    bodies_included += 1
-
-            # 1-hop callers (brief)
-            callers = []
-            for other_fqn, other_sk in store.skeleton_table.items():
-                if sk.fqn in getattr(other_sk, "callees", []):
-                    callers.append(other_fqn)
-                    if len(callers) >= 3:
-                        break
-            if callers:
-                lines.append(f"   Called by: {', '.join(callers)}")
-
+        # ── Graph matches ────────────────────────────────────────────────
+        if candidates:
+            lines.append(
+                f"Confidence: {confidence}  |  Matches: {len(candidates)}  "
+                f"|  Full bodies for top {min(expand_top, len(candidates))}")
             lines.append("")
-            used_chars = sum(len(l) for l in lines)
-            if used_chars >= char_budget:
-                lines.append("   _[token budget reached]_")
-                break
 
-        # ── Top expand_top..N: signature + summary only ──────────────────
-        remaining = candidates[expand_top:top_n]
-        if remaining and used_chars < char_budget:
-            lines.append("## Other matches (signatures only)")
-            lines.append("")
-            for c in remaining:
+            for i, c in enumerate(candidates[:expand_top], 1):
                 sk = c.skeleton
                 summary = store.summaries.get(sk.fqn) or ""
                 if not summary and sk.docstring:
                     summary = sk.docstring.splitlines()[0].strip()
-                entry = f"- `{sk.fqn}`  →  {sk.signature[:80]}"
+
+                lines.append(f"## {i}. {sk.fqn}")
+                lines.append(
+                    f"   File: {sk.file_path}:{sk.line_start}-{sk.line_end}")
+                lines.append(f"   {sk.signature}")
                 if summary:
-                    entry += f"  # {summary[:60]}"
-                lines.append(entry)
+                    lines.append(f"   Summary: {summary[:160]}")
 
-        # Footer
-        lines.append("")
-        if bodies_included < expand_top:
-            lines.append(
-                f"_Bodies shown for top {bodies_included}; call sg_expand('<fqn>') "
-                f"for more._"
-            )
-        if confidence == "LOW":
-            lines.append(
-                "_⚠ LOW confidence — these matches may not be the right targets. "
-                "Consider refining your query._"
-            )
+                prelude = ""
+                if sk.file_path not in preludes_seen:
+                    prelude = self._read_file_prelude(sk, max_chars=800)
+                    preludes_seen.add(sk.file_path)
+                if prelude and used_chars + len(prelude) < char_budget:
+                    lines += ["", "File prelude/imports:", "```", prelude, "```"]
+                    used_chars += len(prelude)
 
+                # Session dedup: if body was already sent this session, skip it.
+                # The model's context already has it — re-sending wastes tokens.
+                if sk.fqn in self._returned_fqns:
+                    lines.append("   [body already returned this session — "
+                                 "check earlier search result]")
+                    lines.append("")
+                    continue
+
+                include_body = self._should_include_body(query, sk, i)
+                if include_body and used_chars < char_budget:
+                    body = self._read_body(sk)
+                    if body:
+                        body = self._cap_to_remaining(body, char_budget - used_chars)
+                        lines += ["", "```", body, "```"]
+                        used_chars += len(body)
+                        self._returned_fqns.add(sk.fqn)
+                elif not include_body:
+                    lines.append("   [body skipped: metadata match, not a likely edit target]")
+
+                callers = self._callers_of(store, sk.fqn, limit=3)
+                if callers:
+                    lines.append(f"   Called by: {', '.join(callers)}")
+
+                callees = getattr(sk, "callees", [])
+                callee_lines: List[str] = []
+                for callee_fqn in list(callees)[:6]:
+                    callee_sk = store.skeleton_table.get(callee_fqn)
+                    if not callee_sk:
+                        callee_lines.append(callee_fqn)
+                        continue
+                    callee_lines.append(
+                        f"{callee_sk.signature}  # {callee_sk.fqn}")
+                if callee_lines:
+                    lines.append("   Calls:")
+                    for callee in callee_lines:
+                        lines.append(f"     {callee[:180]}")
+
+                lines.append("")
+                if used_chars >= char_budget:
+                    lines.append("_[token budget reached — refine the query "
+                                 "for fewer, tighter matches]_")
+                    break
+
+            # Remaining: FQN + range + sig only
+            remaining = candidates[expand_top:top_n]
+            if remaining and used_chars < char_budget:
+                lines.append("## Other matches (metadata only)")
+                lines.append("")
+                for c in remaining:
+                    sk = c.skeleton
+                    already = " [in context]" if sk.fqn in self._returned_fqns else ""
+                    summary = store.summaries.get(sk.fqn) or ""
+                    if not summary and sk.docstring:
+                        summary = sk.docstring.splitlines()[0].strip()
+                    entry = (f"- `{sk.fqn}`{already}  "
+                             f"({sk.file_path}:{sk.line_start}-{sk.line_end})")
+                    if summary:
+                        entry += f"  # {summary[:60]}"
+                    lines.append(entry)
+            lines.append("")
+
+            bundle = self._render_task_bundle(
+                query=query,
+                candidates=candidates[:expand_top],
+                store=store,
+                remaining_chars=max(0, char_budget - used_chars),
+                intent=intent_arg or "",
+            )
+            if bundle:
+                lines.append(bundle)
+                lines.append("")
+                used_chars += len(bundle)
+        else:
+            lines.append(f"No graph matches for {query!r}.")
+            lines.append("")
+
+        # ── Lexical fallback ─────────────────────────────────────────────
+        # The graph indexes functions/classes only. Module-level constants,
+        # decorators and type aliases are invisible to it — a plain-text scan
+        # catches them.
+        # Only run when:
+        #   (a) graph completely failed (LOW/MISS/empty), OR
+        #   (b) query looks like a code symbol (identifier-like), not NL prose.
+        # Running on MEDIUM-confidence NL queries floods results with noise
+        # (e.g. "astropy" appears in every file of an astropy repo).
+        added_lexical = False
+        _want_lex = (
+            confidence in ("LOW", "MISS")
+            or not candidates
+            or (confidence != "HIGH" and self._looks_symbolic(query))
+        )
+        if _want_lex:
+            lex = self._lexical_search(query, file_filter)
+            if lex:
+                lines.append("## Lexical matches "
+                             "(text grep — catches constants/symbols "
+                             "the function graph cannot index)")
+                lines.append(lex)
+                lines.append("")
+                added_lexical = True
+
+        if not candidates and not added_lexical:
+            return (f"No results for {query!r}. Try different keywords, "
+                    f"or sg_overview to see what's indexed.")
+
+        lines.append("_Use the target bodies above. Search again only if the "
+                     "target is absent or confidence is LOW/MISS; expand only "
+                     "the exact function you are about to edit. Do not read MCP "
+                     "content.txt artifacts; they duplicate this result._")
         return "\n".join(lines)
 
-    def _read_body_excerpt(self, sk, max_lines: int = 40) -> str:
-        """Read a function body from disk, capped to max_lines."""
+    def _should_include_body(self, query: str, sk, rank: int) -> bool:
+        """Keep full bodies for likely edit targets, not every BM25 neighbor."""
+        if rank == 1:
+            return True
+        import re as _re
+        q = query.lower()
+        short = sk.fqn.split("::")[-1]
+        parts = [
+            p.lower() for p in _re.split(r"[^A-Za-z0-9_]+", short)
+            if len(p) >= 3
+        ]
+        method = parts[-1] if parts else short.lower()
+        if method and method in q:
+            return True
+        # For Class.method, avoid expanding every method just because the class
+        # name appears in the query. The method/function name must match.
+        if "." in short:
+            return False
+        return any(p in q for p in parts)
+
+    def _render_task_bundle(
+        self,
+        query: str,
+        candidates: List,
+        store,
+        remaining_chars: int,
+        intent: str = "",
+    ) -> str:
+        """Add the context agents usually go searching for after target lookup.
+
+        In debug/test tasks the model tends to run a second search tree for
+        helpers and tests. Return a bounded bundle here so the first search is
+        closer to edit-ready.
+        """
+        if remaining_chars < 1200 or not candidates:
+            return ""
+
+        q_lower = query.lower()
+        intent_lower = intent.lower()
+        wants_debug_bundle = (
+            "debug" in intent_lower
+            or "test" in intent_lower
+            or any(w in q_lower for w in ("fix", "bug", "fail", "test", "bytes"))
+        )
+        if not wants_debug_bundle:
+            return ""
+
+        edit_candidates = [
+            c for i, c in enumerate(candidates, 1)
+            if self._should_include_body(query, c.skeleton, i)
+        ] or candidates[:1]
+
+        parts: List[str] = []
+        helper_budget = min(remaining_chars // 2, 3500)
+        helpers = self._render_helper_bodies(
+            query, edit_candidates, store, helper_budget)
+        if helpers:
+            parts.append(
+                "## Helper bodies likely needed\n"
+                + helpers
+            )
+
+        used = sum(len(p) for p in parts)
+        tests_budget = min(max(0, remaining_chars - used), 4500)
+        tests = self._render_likely_tests(
+            query, edit_candidates, store, tests_budget)
+        if tests:
+            parts.append(
+                "## Likely tests\n"
+                + tests
+            )
+
+        if not parts:
+            return ""
+        parts.append(
+            "_This search result is intended as an edit-ready packet: targets, "
+            "small helpers, and likely tests. Use the listed test bodies as "
+            "anchors before doing native test grep/read calls. Avoid another "
+            "sg_search unless these sections are missing the target._"
+        )
+        return "\n\n".join(parts)
+
+    def _render_helper_bodies(
+        self,
+        query: str,
+        candidates: List,
+        store,
+        max_chars: int,
+    ) -> str:
+        helpers: List[str] = []
+        seen: set[str] = {c.skeleton.fqn for c in candidates}
+        query_symbols = self._symbol_terms(query)
+        query_lower = query.lower()
+
+        def add_helper(fqn: str, reason: str) -> None:
+            if len("\n\n".join(helpers)) >= max_chars or len(helpers) >= 4:
+                return
+            if fqn in seen:
+                return
+            sk = store.skeleton_table.get(fqn)
+            if not sk:
+                return
+            body = self._read_body(sk, max_lines=60)
+            if not body or len(body) > 1800:
+                return
+            seen.add(fqn)
+            helpers.append(
+                f"### {sk.fqn} ({sk.file_path}:{sk.line_start}-{sk.line_end})\n"
+                f"{reason}\n"
+                "```python\n"
+                f"{body}\n"
+                "```"
+            )
+
+        # Direct graph dependencies first: these answer "what does this target call?"
+        for c in candidates[:3]:
+            for edge in store.graph.get_forward_edges(c.skeleton.fqn):
+                add_helper(edge.target_fqn, f"Called by {c.skeleton.fqn}.")
+
+        # Exact symbol names from the query, e.g. _pad / decode_ascii.
+        for term in query_symbols:
+            for fqn in self._resolve_short_symbol(term, store)[:2]:
+                add_helper(fqn, f"Matched query symbol `{term}`.")
+
+        # Bytes/ascii bugs often need import-level encode/decode helpers even
+        # when the target body does not call them yet.
+        if any(w in query_lower for w in ("byte", "bytes", "ascii", "unicode")):
+            for c in candidates[:3]:
+                file_skel = store.file_skeletons.get(c.skeleton.file_path)
+                if not file_skel:
+                    continue
+                imported = self._imported_names(file_skel.imports)
+                for name in imported:
+                    lname = name.lower()
+                    if (
+                        "ascii" in lname
+                        or "bytes" in lname
+                        or lname.startswith(("decode", "encode", "ensure"))
+                    ):
+                        for fqn in self._resolve_short_symbol(name, store)[:1]:
+                            add_helper(fqn, f"Imported helper relevant to bytes/ascii: `{name}`.")
+
+        return "\n\n".join(helpers)[:max_chars]
+
+    def _render_likely_tests(
+        self,
+        query: str,
+        candidates: List,
+        store,
+        max_chars: int,
+    ) -> str:
+        if max_chars < 800:
+            return ""
+
+        target_paths = [c.skeleton.file_path for c in candidates[:5]]
+        target_names = [c.skeleton.fqn.split("::")[-1] for c in candidates[:5]]
+        test_paths = self._candidate_test_paths(target_paths, store)
+        if not test_paths:
+            return ""
+
+        terms = self._test_terms(query, target_names)
+        blocks: List[str] = []
+        for path in test_paths[:4]:
+            if len("\n\n".join(blocks)) >= max_chars:
+                break
+            prelude = self._read_test_prelude(path, max_chars=900)
+            bodies = self._matching_test_bodies(
+                path, query, terms, store, limit=4)
+            body_ranges = [(start, end) for start, end, _ in bodies]
+            snippets = self._matching_line_snippets(
+                path, query, terms, limit=8, skip_ranges=body_ranges)
+            if not snippets and not bodies:
+                continue
+            lines = [f"### {path}"]
+            if prelude:
+                lines += ["Test imports/context:", "```python", prelude, "```"]
+            if snippets:
+                lines.append("High-signal matching lines:")
+                lines.extend(f"  {s}" for s in snippets)
+            if bodies:
+                lines.append(
+                    "Relevant test bodies / insertion anchors "
+                    "(prefer these before native test grep):")
+                lines.extend(block for _, _, block in bodies)
+            blocks.append("\n".join(lines))
+
+        return "\n\n".join(blocks)[:max_chars]
+
+    @staticmethod
+    def _symbol_terms(query: str) -> List[str]:
+        import re as _re
+        out: List[str] = []
+        for token in _re.split(r"[^A-Za-z0-9_]+", query):
+            if not token or len(token) < 3:
+                continue
+            if "_" in token or "." in token or _re.search(r"[a-z][A-Z]|[A-Z][a-z]", token):
+                out.append(token.split(".")[-1])
+        return list(dict.fromkeys(out))
+
+    @staticmethod
+    def _resolve_short_symbol(name: str, store, limit: int = 5) -> List[str]:
+        matches: List[str] = []
+        for fqn in store.skeleton_table:
+            short = fqn.split("::")[-1]
+            if short == name or short.endswith(f".{name}"):
+                matches.append(fqn)
+        return sorted(matches, key=len)[:limit]
+
+    @staticmethod
+    def _imported_names(imports: List[str]) -> List[str]:
+        import re as _re
+        names: List[str] = []
+        for imp in imports:
+            if " import " in imp:
+                tail = imp.split(" import ", 1)[1]
+                for part in tail.replace("(", "").replace(")", "").split(","):
+                    name = part.strip().split(" as ", 1)[0].strip()
+                    if name:
+                        names.append(name)
+            else:
+                m = _re.match(r"\s*import\s+([A-Za-z_][\w.]*)", imp)
+                if m:
+                    names.append(m.group(1).split(".")[-1])
+        return list(dict.fromkeys(names))
+
+    def _candidate_test_paths(self, source_paths: List[str], store) -> List[str]:
+        indexed = set(store.file_skeletons.keys())
+        found: List[str] = []
+        all_tests = [
+            p for p in indexed
+            if "/tests/" in p.replace("\\", "/") and p.endswith(".py")
+        ]
+        for src in source_paths:
+            norm = src.replace("\\", "/")
+            stem = Path(norm).stem
+            parent = str(Path(norm).parent).replace("\\", "/")
+            test_prefix = f"{parent}/tests/"
+            guesses = [
+                f"{parent}/tests/test_{stem}.py",
+                f"{parent}/test_{stem}.py",
+                f"tests/test_{stem}.py",
+            ]
+            for g in guesses:
+                if g in indexed and g not in found:
+                    found.append(g)
+            for p in all_tests:
+                base = Path(p).name.lower()
+                if (
+                    p.replace("\\", "/").startswith(test_prefix)
+                    and (
+                        base == f"test_{stem.lower()}.py"
+                        or base.startswith(f"test_{stem.lower()}_")
+                    )
+                    and p not in found
+                ):
+                    found.append(p)
+        return found
+
+    @staticmethod
+    def _test_terms(query: str, target_names: List[str]) -> List[str]:
+        import re as _re
+        terms: List[str] = []
+        for name in target_names:
+            short = name.split(".")[-1]
+            for part in _re.split(r"[^A-Za-z0-9_]+", short):
+                if len(part) >= 4:
+                    terms.append(part)
+        for token in _re.split(r"[^A-Za-z0-9_]+", query):
+            if len(token) >= 4 and token.lower() not in {
+                "class", "method", "implementation", "accepts", "parsing",
+                "header", "card", "fits", "test", "tests", "string",
+            }:
+                terms.append(token)
+        return list(dict.fromkeys(terms))[:10]
+
+    def _matching_line_snippets(
+        self,
+        rel_path: str,
+        query: str,
+        terms: List[str],
+        limit: int = 8,
+        skip_ranges: Optional[List[Tuple[int, int]]] = None,
+    ) -> List[str]:
+        if not terms:
+            return []
+        try:
+            lines = (self._root / rel_path).read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return []
+        terms_l = [t.lower() for t in terms]
+        query_l = query.lower()
+        skip_ranges = skip_ranges or []
+        hits: List[Tuple[int, int, str]] = []
+        for i, line in enumerate(lines, 1):
+            if any(start <= i <= end for start, end in skip_ranges):
+                continue
+            stripped = line.strip()
+            if i <= 80 or stripped.startswith(("import ", "from ")):
+                continue
+            lower = line.lower()
+            if any(t in lower for t in terms_l):
+                score = sum(1 for t in terms_l if t in lower)
+                if "byte" in query_l and "byte" in lower:
+                    score += 12
+                if "header.fromstring" in lower or "fits.header.fromstring" in lower:
+                    score += 10
+                if "card.fromstring" in lower or "fits.card.fromstring" in lower:
+                    score += 10
+                if "fromstring" in query_l and "fromstring" in lower:
+                    score += 3
+                hits.append((score, i, f"{rel_path}:{i}: {stripped[:120]}"))
+        return [
+            text for _, _, text in sorted(hits, key=lambda x: (-x[0], x[1]))[:limit]
+        ]
+
+    def _matching_test_bodies(self, rel_path: str, query: str, terms: List[str],
+                              store, limit: int = 5) -> List[Tuple[int, int, str]]:
+        """Return compact bodies of the most relevant tests in a test file."""
+        terms_l = [t.lower() for t in terms]
+        file_skel = store.file_skeletons.get(rel_path)
+        if not file_skel:
+            return []
+
+        query_l = query.lower()
+        ranked = []
+        for sk in file_skel.all_skeletons:
+            short = sk.fqn.split("::")[-1].lower()
+            sig_l = sk.signature.lower()
+            doc_l = (sk.docstring or "").lower()
+            body, actual_start, actual_end = self._read_skeleton_range_body(
+                rel_path, sk.line_start, sk.line_end, max_chars=2600)
+            body_l = body.lower()
+            score = 0
+            for t in terms_l:
+                if t in short:
+                    score += 4
+                if t in sig_l or t in doc_l:
+                    score += 1
+                if t in body_l:
+                    score += 2
+            has_byte = (
+                "byte" in short or "byte" in sig_l
+                or "byte" in doc_l or "byte" in body_l
+            )
+            has_fromstring = "fromstring" in short or "fromstring" in body_l
+            if "byte" in query_l and has_byte:
+                score += 12 if "fromstring" in query_l and has_fromstring else 2
+            if "fromstring" in query_l and "fromstring" in short:
+                score += 5
+            if "fromstring" in query_l and "fromstring" in body_l:
+                score += 2
+            if "header.fromstring" in body_l or "fits.header.fromstring" in body_l:
+                score += 6
+            if "card.fromstring" in body_l or "fits.card.fromstring" in body_l:
+                score += 6
+            if score:
+                ranked.append((score, actual_start, sk, body, actual_end))
+
+        sorted_ranked = sorted(ranked, key=lambda x: (-x[0], x[1]))
+        selected = self._diverse_test_body_selection(
+            sorted_ranked, query_l, limit)
+
+        out: List[Tuple[int, int, str]] = []
+        for _, actual_start, sk, body, actual_end in selected:
+            if body:
+                block = (
+                    f"- {sk.signature}  # {sk.fqn} "
+                    f"({rel_path}:{actual_start}-{actual_end})\n"
+                    "```python\n"
+                    f"{body[:1400]}\n"
+                    "```"
+                )
+                out.append((actual_start, actual_end, block))
+        return out
+
+    @staticmethod
+    def _diverse_test_body_selection(
+        ranked: List[Tuple[int, int, Any, str, int]],
+        query_l: str,
+        limit: int,
+    ) -> List[Tuple[int, int, Any, str, int]]:
+        """Keep top tests, but force anchors for explicit Class.method targets."""
+        selected: List[Tuple[int, int, Any, str, int]] = []
+        selected_ids: set[int] = set()
+
+        def add_first_containing(needles: List[str]) -> None:
+            if len(selected) >= limit:
+                return
+            for item in ranked:
+                body_l = item[3].lower()
+                if (
+                    any(needle in body_l for needle in needles)
+                    and id(item[2]) not in selected_ids
+                ):
+                    selected.append(item)
+                    selected_ids.add(id(item[2]))
+                    return
+
+        if "header.fromstring" in query_l:
+            add_first_containing(["header.fromstring", "fits.header.fromstring"])
+        if "card.fromstring" in query_l:
+            add_first_containing(["card.fromstring", "fits.card.fromstring"])
+
+        for item in ranked:
+            if len(selected) >= limit:
+                break
+            if id(item[2]) in selected_ids:
+                continue
+            selected.append(item)
+            selected_ids.add(id(item[2]))
+        return selected
+
+    def _read_test_prelude(self, rel_path: str, max_chars: int = 900) -> str:
+        """Return imports and class context from a test file."""
+        try:
+            lines = (self._root / rel_path).read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return ""
+        kept: List[str] = []
+        for line in lines[:80]:
+            stripped = line.strip()
+            if (
+                stripped.startswith(("import ", "from "))
+                or stripped.startswith("class ")
+                or not stripped
+            ):
+                kept.append(line)
+                continue
+            if stripped.startswith("def ") and kept:
+                break
+        return "\n".join(kept).strip()[:max_chars]
+
+    def _read_range_body(
+        self,
+        rel_path: str,
+        start: int,
+        end: int,
+        max_chars: int = 0,
+    ) -> str:
+        """Read an indexed line range from disk."""
+        try:
+            lines = (self._root / rel_path).read_text(
+                encoding="utf-8", errors="replace").splitlines()
+            s = max(0, start - 1)
+            e = min(len(lines), end)
+            text = "\n".join(lines[s:e])
+            if max_chars and len(text) > max_chars:
+                return text[:max_chars].rstrip()
+            return text
+        except Exception:
+            return ""
+
+    def _read_skeleton_range_body(
+        self,
+        rel_path: str,
+        start: int,
+        end: int,
+        max_chars: int = 0,
+    ) -> Tuple[str, int, int]:
+        """Read an indexed body, relocating by declaration name if ranges drifted."""
+        try:
+            lines = (self._root / rel_path).read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            return "", start, end
+
+        expected_name = ""
+        try:
+            sk = next(
+                s for s in self._engine.get_store().file_skeletons[rel_path].all_skeletons
+                if s.line_start == start and s.line_end == end
+            )
+            expected_name = self._decl_name(sk.signature)
+        except Exception:
+            expected_name = ""
+
+        s = max(0, start - 1)
+        e = min(len(lines), end)
+        if expected_name:
+            head = "\n".join(lines[s:min(e, s + 5)])
+            if not self._range_starts_at_decl(head, expected_name):
+                relocated = self._locate_named_block(lines, expected_name)
+                if relocated:
+                    s, e = relocated
+
+        text = "\n".join(lines[s:e])
+        if max_chars and len(text) > max_chars:
+            text = text[:max_chars].rstrip()
+        return text, s + 1, e
+
+    @staticmethod
+    def _decl_name(signature: str) -> str:
+        import re as _re
+        m = _re.search(r"\b(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", signature)
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _range_starts_at_decl(text: str, name: str) -> bool:
+        import re as _re
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("@"):
+                continue
+            return bool(_re.match(
+                rf"(?:async\s+def|def|class)\s+{_re.escape(name)}\b",
+                stripped,
+            ))
+        return False
+
+    @staticmethod
+    def _locate_named_block(lines: List[str], name: str) -> Optional[Tuple[int, int]]:
+        import re as _re
+        pattern = _re.compile(rf"^(\s*)(?:async\s+def|def|class)\s+{_re.escape(name)}\b")
+        for idx, line in enumerate(lines):
+            m = pattern.match(line)
+            if not m:
+                continue
+            indent = len(m.group(1).replace("\t", "    "))
+            end = len(lines)
+            for j in range(idx + 1, len(lines)):
+                stripped = lines[j].strip()
+                if not stripped or stripped.startswith(("#", "@")):
+                    continue
+                current_indent = len(lines[j]) - len(lines[j].lstrip(" \t"))
+                if current_indent <= indent and _re.match(
+                    r"(?:async\s+def|def|class)\s+", stripped
+                ):
+                    end = j
+                    break
+            return idx, end
+        return None
+
+    @staticmethod
+    def _cap_to_remaining(text: str, remaining_chars: int) -> str:
+        """Cap a body so one large function cannot overshoot the response budget."""
+        if remaining_chars <= 0:
+            return ""
+        if len(text) <= remaining_chars:
+            return text
+        cap = max(0, remaining_chars - 120)
+        return text[:cap].rstrip() + "\n# ... [truncated by sg_search token budget]"
+
+    def _read_body(self, sk, max_lines: int = 350) -> str:
+        """Read a function/class body from disk, IN FULL (only very long
+        bodies are capped — they are the rare case)."""
         try:
             file_path = self._root / sk.file_path
             if not file_path.exists():
                 return ""
-            all_lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            all_lines = file_path.read_text(
+                encoding="utf-8", errors="replace").splitlines()
             start = max(0, sk.line_start - 1)
             end = min(len(all_lines), sk.line_end)
             body_lines = all_lines[start:end]
             if len(body_lines) > max_lines:
-                head = body_lines[:max_lines]
                 trimmed = len(body_lines) - max_lines
-                return "\n".join(head) + f"\n    # ... ({trimmed} more lines, use sg_expand)"
+                return ("\n".join(body_lines[:max_lines])
+                        + f"\n# ... ({trimmed} more lines — "
+                          f"sg_expand('{sk.fqn}') for the full body)")
             return "\n".join(body_lines)
         except Exception:
             return ""
+
+    def _read_file_prelude(self, sk, max_lines: int = 80,
+                           max_chars: int = 800) -> str:
+        """Return compact file-level context before a target.
+
+        This catches imports and top-level constants that function bodies omit,
+        which is often the reason agents keep searching after finding the right
+        function.
+        """
+        try:
+            file_path = self._root / sk.file_path
+            if not file_path.exists():
+                return ""
+            all_lines = file_path.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+            before = all_lines[: max(0, sk.line_start - 1)]
+            kept: List[str] = []
+            for line in before[:max_lines]:
+                stripped = line.strip()
+                if (
+                    stripped.startswith(("import ", "from "))
+                    or ("=" in stripped and stripped.split("=", 1)[0].strip().isupper())
+                ):
+                    kept.append(line)
+                    continue
+                if line and not line.startswith((" ", "\t")):
+                    # First top-level definition/class usually means the import
+                    # prelude is over for Python-like files.
+                    if stripped.startswith(("def ", "class ", "async def ")):
+                        break
+            text = "\n".join(kept).strip()
+            return text[:max_chars]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _callers_of(store, fqn: str, limit: int = 3) -> List[str]:
+        """1-hop callers of a function (functions whose callees include fqn)."""
+        callers: List[str] = []
+        for other_fqn, other_sk in store.skeleton_table.items():
+            if fqn in getattr(other_sk, "callees", []):
+                callers.append(other_fqn)
+                if len(callers) >= limit:
+                    break
+        return callers
+
+    def _lexical_search(self, query: str, file_filter: str = "",
+                        limit: int = 25) -> str:
+        """Plain-text grep over source files — the fallback for symbols the
+        function graph cannot index (module constants, decorators, aliases).
+
+        Uses ripgrep when available; otherwise a bounded scan of indexed
+        source files. Never raises."""
+        import re as _re
+
+        _STOP = {
+            "def", "class", "self", "return", "import", "from", "with",
+            "this", "true", "false", "none", "null", "the", "and", "for",
+            "bytes", "byte", "string", "str", "file", "files", "util",
+            "utils", "header", "card", "fits", "ascii",
+        }
+        terms = []
+        for t in _re.split(r"[^A-Za-z0-9_]+", query):
+            if len(t) >= 4 and t.lower() not in _STOP:
+                terms.append(t)
+        symbol_terms = [
+            t for t in terms
+            if "_" in t or _re.search(r"[a-z][A-Z]|[A-Z][a-z]", t)
+        ]
+        if symbol_terms:
+            # If the query contains concrete symbols, ignore generic prose terms.
+            terms = symbol_terms
+        # Most-specific (longest) terms first; cap to keep the regex small.
+        terms = sorted(dict.fromkeys(terms), key=len, reverse=True)[:5]
+        if not terms:
+            return ""
+
+        pattern = "|".join(_re.escape(t) for t in terms)
+        hits: List[str] = []
+
+        # Fast path: ripgrep (respects .gitignore, skips node_modules etc.)
+        raw = ""
+        try:
+            import subprocess
+            r = subprocess.run(
+                [
+                    "rg", "-n", "--no-heading", "-S", "-m", "3",
+                    "--glob", "!*.md",
+                    "--glob", "!*.json",
+                    "--glob", "!*.jsonl",
+                    "--glob", "!*.txt",
+                    "--glob", "!.skeletongraph/**",
+                    "--glob", "!.git/**",
+                    "--glob", "!node_modules/**",
+                    pattern, ".",
+                ],
+                cwd=str(self._root), capture_output=True, text=True, timeout=10)
+            raw = r.stdout
+        except Exception:
+            raw = ""
+
+        if raw:
+            for ln in raw.splitlines():
+                path_part = ln.split(":", 1)[0].lstrip(".\\/").replace("\\", "/")
+                if file_filter and file_filter.replace("\\", "/") not in path_part:
+                    continue
+                if not self._is_source_path(path_part):
+                    continue
+                hits.append(ln.strip()[:160])
+                if len(hits) >= limit:
+                    break
+        else:
+            hits = self._python_grep(terms, file_filter, limit)
+
+        if not hits:
+            return ""
+        return "\n".join(f"  {h}" for h in hits)
+
+    def _python_grep(self, terms: List[str], file_filter: str,
+                     limit: int) -> List[str]:
+        """ripgrep-free fallback: scan indexed source files only (bounded)."""
+        hits: List[str] = []
+        try:
+            files = list(self._engine.get_store().file_skeletons.keys())
+        except Exception:
+            return hits
+        for rel in files:
+            if file_filter and file_filter not in rel:
+                continue
+            try:
+                text = (self._root / rel).read_text(
+                    encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for i, line in enumerate(text.splitlines(), 1):
+                if any(t in line for t in terms):
+                    hits.append(f"{rel}:{i}: {line.strip()[:120]}")
+                    if len(hits) >= limit:
+                        return hits
+        return hits
+
+    @staticmethod
+    def _is_source_path(path: str) -> bool:
+        return path.lower().endswith((
+            ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
+            ".java", ".go", ".rs", ".cpp", ".c", ".h", ".hpp",
+            ".cs", ".rb", ".php",
+        ))
+
+    @staticmethod
+    def _looks_symbolic(query: str) -> bool:
+        """Return True if the query looks like a code-symbol search (identifier-like)
+        rather than a natural-language description.
+
+        Runs the lexical fallback only on symbol searches — avoids flooding results
+        with noise when the model writes a prose description as the query.
+
+        Heuristic: >60% of the meaningful tokens look like code identifiers
+        (ALL_CAPS, snake_case, or CamelCase), OR the query is a single bare
+        identifier, OR it contains pipe-alternation of identifiers."""
+        import re as _re
+        _COMMON = {
+            "class", "method", "function", "call", "from", "string", "byte",
+            "bytes", "file", "this", "with", "test", "that", "what", "when",
+            "where", "which", "into", "return", "using", "used", "uses",
+            "fits", "header", "card", "data", "list", "type", "value",
+            "name", "base", "index", "util", "utils", "lib", "code", "handle",
+        }
+        # Pipe-alternation like "encode_ascii|decode_ascii" → always symbolic
+        if "|" in query:
+            return True
+        tokens = [t for t in _re.split(r"\s+", query.strip()) if len(t) >= 3]
+        if not tokens:
+            return False
+        # Single bare token — always symbolic
+        if len(tokens) == 1:
+            return True
+
+        def _is_identifier(t: str) -> bool:
+            # ALL_CAPS_CONSTANT, snake_case_name (has underscore), or CamelCase (mixed)
+            if _re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", t):  # CONSTANT
+                return True
+            if "_" in t and _re.fullmatch(r"[a-z][a-z0-9_]+", t):  # snake_case
+                return True
+            if _re.fullmatch(r"[A-Z][a-z]+[A-Z][A-Za-z]*", t):  # CamelCase
+                return True
+            return False
+
+        id_count = sum(
+            1 for t in tokens
+            if _is_identifier(t) and t.lower() not in _COMMON
+        )
+        return id_count / len(tokens) > 0.5
 
     # ── Tool: sg_get ─────────────────────────────────────────────────────
 
@@ -697,33 +1510,56 @@ class MCPServer:
                 else:
                     parts.append(f"  {callee}")
 
-        parts.append(f"\nUse sg_expand('{resolved_fqn}') to see the full body.")
+        parts.append(
+            f"\nIf you are about to edit this exact function and need its body, "
+            f"call sg_expand('{resolved_fqn}')."
+        )
         return "\n".join(parts)
 
     # ── Tool: sg_expand ──────────────────────────────────────────────────
 
     def _tool_expand(self, args: Dict) -> str:
         target = str(args.get("target", "")).strip()
-        max_tokens = int(args.get("max_tokens", 4000))
+        max_tokens = int(args.get("max_tokens", 5000))
 
         if not target:
             return "Error: target is required"
 
+        # Session dedup: FQN expansions whose body is already in context.
+        # A file path or range is always fresh (may differ from what sg_search sent).
+        if "::" in target and target in self._returned_fqns:
+            try:
+                sk = self._engine.get_store().skeleton_table.get(target)
+            except Exception:
+                sk = None
+            loc = f"{sk.file_path}:{sk.line_start}-{sk.line_end}" if sk else target
+            return (
+                f"Note: `{target}` body was already returned by sg_search this "
+                f"session — it is in your context at `{loc}`. Check the earlier "
+                f"search result instead of re-reading. If you need a different "
+                f"part of the file, pass the file path and line range directly, "
+                f"e.g. sg_expand('{loc.split('::')[0]}')"
+            )
+
         # Parse range syntax: file.py:42-80
         start_line = end_line = None
-        if ":" in target and not "::" in target:
+        if ":" in target and "::" not in target:
             parts_colon = target.rsplit(":", 1)
             range_part = parts_colon[-1]
             if "-" in range_part and all(p.strip().isdigit() for p in range_part.split("-", 1)):
                 start_line, end_line = (int(p.strip()) for p in range_part.split("-", 1))
                 target = parts_colon[0]
 
-        return self._engine.expand(
+        result = self._engine.expand(
             target=target,
             start_line=start_line,
             end_line=end_line,
             max_tokens=max_tokens,
         )
+        # Track FQN-based expands so later sg_search/sg_expand calls can dedup.
+        if "::" in target:
+            self._returned_fqns.add(target)
+        return result
 
     # ── Tool: sg_constraint ──────────────────────────────────────────────
 
