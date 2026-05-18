@@ -338,6 +338,7 @@ def classify_query(
     target_fqns: Optional[Set[str]] = None,
     n_files_involved: int = 0,
     slm_result: Optional["SLMResult"] = None,
+    intent_override: Optional[str] = None,
 ) -> ClassificationResult:
     """Classify a query into QueryMode + spec + modifiers.
 
@@ -360,14 +361,17 @@ def classify_query(
     has_entities = bool(intent.entities)
     conf_level = confidence.level() if confidence else "MEDIUM"
 
+    # ── Step 0: explicit intent override ─────────────────────────────
+    # Pull-model: the caller (the main model in an IDE, or the SLM in CLI
+    # mode) declares intent as a tool argument. An explicit, valid override
+    # wins over all inference — no extra classification call needed.
+    query_mode = _parse_slm_mode(intent_override) if intent_override else None
+
     # ── Step 1: Hard signal detection ────────────────────────────────
-    query_mode = _detect_hard_signal(prompt, has_entities)
+    if query_mode is None:
+        query_mode = _detect_hard_signal(prompt, has_entities)
 
-    # ── Step 2: SLM override (if available and no hard signal) ───────
-    if query_mode is None and slm_result and slm_result.success and slm_result.mode:
-        query_mode = _parse_slm_mode(slm_result.mode)
-
-    # ── Step 3: TaskType-based fallback ──────────────────────────────
+    # ── Step 2: TaskType-based fallback ──────────────────────────────
     if query_mode is None:
         query_mode = _map_from_task_type(intent, has_entities, conf_level)
 
