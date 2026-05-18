@@ -19,11 +19,13 @@ Assembly order (optimized for LLM attention — "Lost in the Middle"):
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from ..retrieval.classifier import ClassificationResult, ContextMode, QueryType, QueryMode, MODE_SPECS
+from ..retrieval.classifier import (ClassificationResult, ContextMode, QueryType,
+                                    QueryMode, MODE_SPECS, ModeSpec)
 from ..retrieval.resolver import RankedCandidate, ResolverResult, Tier
 from ..retrieval.session import Session
 from ..assembly.modifier import render_modifiers, estimate_modifier_tokens
@@ -381,6 +383,37 @@ class Zone4Result:
     warning: str = ""
 
 
+def _read_capped(path: Path, max_chars: int) -> str:
+    """Read a file, stripped and capped to max_chars. '' if missing/empty."""
+    try:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    return text[:max_chars]
+
+
+_SG_CONSTRAINT_RE = re.compile(r"<!--\s*sg:constraint.*?-->", re.DOTALL)
+
+
+def _strip_constraint_markers(text: str) -> str:
+    """Remove the machine <!-- sg:constraint ... --> markers from constraints.md
+    before it is shown to the model — they are storage metadata, not content."""
+    cleaned = _SG_CONSTRAINT_RE.sub("", text)
+    out: List[str] = []
+    blank = 0
+    for ln in cleaned.splitlines():
+        if ln.strip():
+            blank = 0
+            out.append(ln)
+        else:
+            blank += 1
+            if blank <= 1:
+                out.append(ln)
+    return "\n".join(out).strip()
+
+
 def assemble_4zone(
     prompt: str,
     resolver_result: ResolverResult,
@@ -389,6 +422,7 @@ def assemble_4zone(
     sg_dir: Optional[Path] = None,
     budget: int = 8000,
     session_digest: str = "",
+    mode_spec: Optional[ModeSpec] = None,
 ) -> Zone4Result:
     """4-zone context assembly per the canonical SG plan v3.
 
@@ -407,14 +441,34 @@ def assemble_4zone(
     zones: Dict[str, int] = {}
     targets: List[str] = []
 
-    # ── Zone 1: Constraints ───────────────────────────────────────────
+    # ── Zone 1: Constraints + mode-gated memory layers ────────────────
     z1_parts: List[str] = []
-    cs_file = sg_dir / "constraints.md"
-    if cs_file.exists():
-        cs_text = cs_file.read_text(encoding="utf-8", errors="replace").strip()
-        if cs_text:
-            z1_parts.append(f"## Constraints\n{cs_text}")
-    # Session digest (compact 5-turn) also goes in Zone 1 for visibility
+
+    # Project DNA (L0) — one short paragraph that frames retrieval. Loaded
+    # unless the mode explicitly opts out.
+    if mode_spec is None or mode_spec.load_project:
+        proj = _read_capped(sg_dir / "project.md", 1000)
+        if proj:
+            z1_parts.append(f"## Project\n{proj}")
+
+    # Architecture map (L1) — only modes that ask for it.
+    if mode_spec is not None and mode_spec.load_architecture:
+        arch = _read_capped(sg_dir / "architecture.md", 1800)
+        if arch:
+            z1_parts.append(f"## Architecture\n{arch}")
+
+    # Constraints — always; strip the machine <!-- sg:constraint --> markers.
+    cs_text = _read_capped(sg_dir / "constraints.md", 2400)
+    if cs_text:
+        z1_parts.append(f"## Constraints\n{_strip_constraint_markers(cs_text)}")
+
+    # Prior decisions — planning-class modes only (load_project_log proxy).
+    if mode_spec is not None and mode_spec.load_project_log:
+        dec = _read_capped(sg_dir / "decisions.md", 1200)
+        if dec:
+            z1_parts.append(f"## Prior decisions\n{dec}")
+
+    # Session digest (compact 5-turn) also goes in Zone 1 for visibility.
     if session_digest:
         z1_parts.append(session_digest)
 

@@ -458,6 +458,7 @@ class SGEngine:
                     project_root=self._root,
                     sg_dir=self._sg_dir,
                     session_digest=session_digest,
+                    mode_spec=classification.mode_spec,
                 )
             else:
                 assembled = assemble(
@@ -670,6 +671,7 @@ class SGEngine:
         query: str,
         top_n: int = 15,
         file_filter: Optional[str] = None,
+        mode_hint: Optional[str] = None,
     ):
         """IDE-mode retrieval: regex + BM25 + graph, zero LLM calls.
 
@@ -690,6 +692,7 @@ class SGEngine:
             target_fqns=set(),
             n_files_involved=0,
             slm_result=None,
+            intent_override=mode_hint,
         )
         mode_spec = classification.mode_spec or MODE_SPECS[classification.query_mode]
 
@@ -710,6 +713,15 @@ class SGEngine:
                 c for c in resolver_result.candidates
                 if file_filter in c.skeleton.file_path
             ]
+
+        # Populate the summary queue on the MCP/IDE path too (engine.query
+        # already does this; heuristic_query is the pull-path entry point).
+        if (getattr(self._config, "summary_queue_enabled", False)
+                and resolver_result.candidates):
+            try:
+                self._enqueue_stale_summaries(store, resolver_result)
+            except Exception:
+                pass
 
         return resolver_result
 
