@@ -207,15 +207,32 @@ _TOOL_SCHEMAS = [
     _make_tool(
         "sg_log",
         (
-            "Read project memory without re-reading full context.\n"
-            "  kind=turns    — recent tool-use turns (what was changed)\n"
-            "  kind=decision — recorded design decisions, optionally by topic"
+            "Read or append project memory without re-reading full context.\n"
+            "  action=read (default):\n"
+            "    kind=turns    — recent turn notes (what was done)\n"
+            "    kind=decision — recorded design decisions, optionally by topic\n"
+            "  action=append — record a one-line note of what you did this turn.\n"
+            "    Call once at the END of a turn; it is cheap and keeps memory\n"
+            "    current for later turns/sessions."
         ),
         {
+            "action": {
+                "type": "string",
+                "enum": ["read", "append"],
+                "description": "read: return memory. append: record a turn note.",
+                "default": "read",
+            },
+            "note": {
+                "type": "string",
+                "description": "action=append only — a one-line conceptual summary "
+                               "of what you changed or decided this turn.",
+                "default": "",
+            },
             "kind": {
                 "type": "string",
                 "enum": ["turns", "decision"],
-                "description": "turns: recent tool-use turns. decision: recorded decisions.",
+                "description": "action=read: turns = recent turn notes; "
+                               "decision = recorded decisions.",
                 "default": "turns",
             },
             "topic": {
@@ -754,6 +771,24 @@ class MCPServer:
     # ── Tool: sg_log ─────────────────────────────────────────────────────
 
     def _tool_log(self, args: Dict) -> str:
+        action = str(args.get("action", "read")).strip().lower()
+
+        # action=append — the model records its own conceptual turn note.
+        # The model authors the text, so there is no "unknown output" problem;
+        # it is one cheap tool call. Reuses the existing session-log writer.
+        if action == "append":
+            note = str(args.get("note", "")).strip()
+            if not note:
+                return "Error: note is required when action=append"
+            from ..session.log import append_log
+            self._turn_index += 1
+            append_log(
+                self._sg_dir, self._session_id,
+                user_prompt="", summary=note,
+                agent_action="model-note", turn_index=self._turn_index,
+            )
+            return "Turn note recorded."
+
         kind = str(args.get("kind", "turns")).strip().lower()
         last_n = int(args.get("last_n", 10))
 
