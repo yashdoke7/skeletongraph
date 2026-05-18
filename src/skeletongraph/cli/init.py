@@ -1,11 +1,11 @@
 """
 CLI init command: generates project.md (L0) and architecture.md (L1).
 
-Auto-triggered by `sg build` on first run if project.md doesn't exist.
-Can also be run standalone: `sg init`
+Run standalone: `sg init`. Not auto-triggered by `sg build` — build derives a
+README fallback for project.md and never prompts.
 
-- project.md: User answers 4 prompts (goal, constraints, phase, decisions)
-- architecture.md: Auto-generated from directory structure + IndexStore
+- project.md: goal, constraints, decisions (prompts, --non-interactive, or --auto-infer)
+- architecture.md: auto-generated from directory structure + IndexStore
 """
 
 from __future__ import annotations
@@ -30,8 +30,7 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
         project_root: Project root directory.
         store: Optional IndexStore (if build already ran).
         non_interactive: If True, skip prompts and use defaults.
-        auto_infer: If True, use LLM to infer metadata (no prompts).
-        agent: IDE agent preset name (cursor, copilot, codex, claude_code, antigravity).
+        auto_infer: If True, use an LLM to infer metadata (no prompts).
 
     Returns:
         True if project.md was created/updated.
@@ -54,7 +53,7 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
         # Use LLM to infer metadata from codebase
         if not non_interactive:
             console.print("[cyan]Inferring project metadata from codebase...[/cyan]")
-        goal, constraints, _phase, decisions = _infer_metadata_with_llm(project_root, store)
+        goal, constraints, decisions = _infer_metadata_with_llm(project_root, store)
     elif non_interactive:
         goal = f"{project_name} project"
         constraints = "[Add constraints here]"
@@ -133,45 +132,10 @@ def run_init(project_root: Path, store=None, non_interactive: bool = False,
     return True
 
 
-def _detect_phase(project_root: Path, store=None) -> str:
-    """Detect project phase from git/README/files."""
-    # Check git for recent activity
-    git_dir = project_root / ".git"
-    if git_dir.exists():
-        try:
-            from datetime import datetime, timedelta
-            mtime = git_dir.stat().st_mtime
-            last_updated = datetime.fromtimestamp(mtime)
-            if (datetime.now() - last_updated).days < 30:
-                return "active"
-            elif (datetime.now() - last_updated).days < 180:
-                return "maintenance"
-            else:
-                return "inactive"
-        except Exception:
-            pass
-
-    # Check README for lifecycle hints
-    readme_files = [
-        project_root / "README.md",
-        project_root / "README.rst",
-        project_root / "README.txt",
-    ]
-    for readme in readme_files:
-        if readme.exists():
-            content = readme.read_text(errors="ignore").lower()
-            if "deprecated" in content or "no longer" in content:
-                return "deprecated"
-            if "in development" in content or "work in progress" in content:
-                return "active"
-
-    return "active"
-
-
 def _infer_metadata_with_llm(project_root: Path, store=None) -> tuple:
-    """Use LLM to infer project metadata from codebase.
-    
-    Returns: (goal, constraints, phase, decisions)
+    """Use an LLM to infer project metadata from the codebase.
+
+    Returns: (goal, constraints, decisions)
     """
     try:
         import litellm
@@ -180,7 +144,6 @@ def _infer_metadata_with_llm(project_root: Path, store=None) -> tuple:
         return (
             f"{project_root.name} project",
             "[Add constraints here]",
-            _detect_phase(project_root, store),
             "[Add key architectural decisions here]",
         )
 
@@ -212,7 +175,7 @@ def _infer_metadata_with_llm(project_root: Path, store=None) -> tuple:
     # Build inference prompt
     codebase_context = "\n\n".join([readme_text] + top_files)[:1000]
     
-    prompt = f"""Analyze this codebase and infer 4 key metadata fields. Be concise.
+    prompt = f"""Analyze this codebase and infer 3 key metadata fields. Be concise.
 
 ## Codebase Context:
 {codebase_context}
@@ -222,16 +185,7 @@ Return ONLY a JSON object (no markdown, no explanation) with:
 {{
   "goal": "1-2 sentence description of what this project does",
   "constraints": "2-3 key constraints that must never be violated (comma-separated)",
-  "phase": "active|maintenance|deprecated|experimental",
   "decisions": "2-3 key architectural decisions (comma-separated)"
-}}
-
-## Example:
-{{
-  "goal": "Python package for AST-based code retrieval using tree-sitter",
-  "constraints": "No SQL database required, BM25 fallback always available",
-  "phase": "active",
-  "decisions": "Wrapper-first architecture, docstring-first summaries, tree-sitter for polyglot support"
 }}
 """
 
@@ -257,32 +211,15 @@ Return ONLY a JSON object (no markdown, no explanation) with:
         return (
             data.get("goal", f"{project_root.name} project"),
             data.get("constraints", "[Add constraints here]"),
-            data.get("phase", "active"),
             data.get("decisions", "[Add key architectural decisions here]"),
         )
-    except Exception as e:
+    except Exception:
         # Fallback on any LLM error
         return (
             f"{project_root.name} project",
             "[Add constraints here]",
-            _detect_phase(project_root, store),
             "[Add key architectural decisions here]",
         )
-
-
-def _detect_phase(project_root: Path, store=None) -> str:
-    """Infer project phase from index size."""
-    if store and hasattr(store, 'meta'):
-        if store.meta.total_functions > 50:
-            return "active"
-        return "start"
-    # Check if there are many source files
-    py_count = len(list(project_root.rglob("*.py")))
-    js_count = len(list(project_root.rglob("*.js"))) + len(list(project_root.rglob("*.ts")))
-    total = py_count + js_count
-    if total > 20:
-        return "active"
-    return "start"
 
 
 def _detect_stack(project_root: Path) -> str:
