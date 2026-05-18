@@ -1,13 +1,14 @@
 """
-MCP server: exactly 6 canonical tools for IDE agent integration.
+MCP server: 7 canonical tools for IDE agent integration.
 
 Tools (in order of typical use):
-  sg_overview   — project skeleton + constraints + session digest (call first each session)
+  sg_overview   — project DNA + architecture + constraints + digest (call first)
   sg_search     — hybrid search: BM25 + graph centrality (PREFERRED over native grep)
-  sg_get        — get a specific function by FQN (signature + summary)
+  sg_get        — get a function (or several) by FQN (signature + summary)
   sg_expand     — full function body / file view on demand
   sg_constraint — view or propose project constraints
-  sg_log        — read recent session log entries
+  sg_log        — read project memory: recent turns, or recorded decisions
+  sg_decision   — record a design/implementation decision for later recall
 
 Protocol: JSON-RPC over stdio per MCP spec.
 No module-level state — all state lives in MCPServer instance.
@@ -113,6 +114,13 @@ _TOOL_SCHEMAS = [
                 "description": "Optional: restrict to files matching this substring",
                 "default": "",
             },
+            "intent": {
+                "type": "string",
+                "description": "Optional task intent to shape retrieval — e.g. "
+                               "debug_targeted, explain, refactor, review, architecture. "
+                               "Omit to let SG infer it.",
+                "default": "",
+            },
             "max_tokens": {
                 "type": "integer",
                 "description": "Token budget for the whole response (default: 4000)",
@@ -124,15 +132,17 @@ _TOOL_SCHEMAS = [
     _make_tool(
         "sg_get",
         (
-            "Get a specific function or class by fully-qualified name (FQN). "
+            "Get one or more functions/classes by fully-qualified name (FQN). "
             "Returns signature, docstring, summary, callers, and callees.\n\n"
             "FQN format: 'path/to/file.py::ClassName.method_name'\n"
+            "Batch: pass several FQNs comma-separated to fetch them in one call.\n"
             "Use sg_search first if you don't know the exact FQN."
         ),
         {
             "fqn": {
                 "type": "string",
-                "description": "Fully-qualified name of the function/class",
+                "description": "FQN of the function/class. Pass several "
+                               "comma-separated for a batch fetch in one call.",
             },
             "include_callers": {
                 "type": "boolean",
@@ -197,22 +207,66 @@ _TOOL_SCHEMAS = [
     _make_tool(
         "sg_log",
         (
-            "Read recent session log entries. Shows what was changed in past turns "
-            "without re-reading the full session context."
+            "Read project memory without re-reading full context.\n"
+            "  kind=turns    — recent tool-use turns (what was changed)\n"
+            "  kind=decision — recorded design decisions, optionally by topic"
         ),
         {
+            "kind": {
+                "type": "string",
+                "enum": ["turns", "decision"],
+                "description": "turns: recent tool-use turns. decision: recorded decisions.",
+                "default": "turns",
+            },
+            "topic": {
+                "type": "string",
+                "description": "When kind=decision, filter decisions by topic/keyword.",
+                "default": "",
+            },
             "last_n": {
                 "type": "integer",
-                "description": "Number of recent entries to return (default: 10)",
+                "description": "Number of entries to return (default: 10)",
                 "default": 10,
             },
             "session_id": {
                 "type": "string",
-                "description": "Specific session ID (default: most recent session)",
+                "description": "kind=turns only: specific session ID (default: most recent)",
                 "default": "",
             },
         },
         [],
+    ),
+    _make_tool(
+        "sg_decision",
+        (
+            "Record a notable design or implementation decision so it survives "
+            "once it scrolls out of recent context — an approach picked or "
+            "rejected, and WHY. Recall later with sg_log(kind='decision')."
+        ),
+        {
+            "summary": {
+                "type": "string",
+                "description": "One line: what was decided.",
+            },
+            "rationale": {
+                "type": "string",
+                "description": "Why — the reasoning that should outlive this turn.",
+                "default": "",
+            },
+            "files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Files this decision concerns.",
+                "default": [],
+            },
+            "topics": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Short tags for later topic-filtered retrieval.",
+                "default": [],
+            },
+        },
+        ["summary"],
     ),
 ]
 
@@ -279,6 +333,7 @@ class MCPServer:
             "sg_expand": self._tool_expand,
             "sg_constraint": self._tool_constraint,
             "sg_log": self._tool_log,
+            "sg_decision": self._tool_decision,
         }
         handler = handlers.get(name)
         if not handler:
@@ -293,6 +348,9 @@ class MCPServer:
             logger.exception("Tool %s failed", name)
             return {"content": [{"type": "text", "text": f"Tool error: {e}"}], "isError": True}
 
+        # IDE parity: drain the summary queue after a tool call (background).
+        self._maybe_drain()
+
         return {"content": [{"type": "text", "text": text}]}
 
     @staticmethod
@@ -303,6 +361,28 @@ class MCPServer:
             "error": {"code": code, "message": message},
         }
 
+    def _read_sg_file(self, name: str, max_chars: int) -> str:
+        """Read a capped `.skeletongraph/<name>` file. '' if missing/empty."""
+        try:
+            p = self._sg_dir / name
+            if not p.exists():
+                return ""
+            return p.read_text(encoding="utf-8", errors="replace").strip()[:max_chars]
+        except Exception:
+            return ""
+
+    def _maybe_drain(self) -> None:
+        """Drain the summary queue in the background — IDE parity. The engine's
+        query path drains via the Claude Code hook; the MCP/pull path needs its
+        own trigger. Best-effort; lock-guarded inside drain_queue_background."""
+        if not getattr(self._config, "summary_queue_enabled", False):
+            return
+        try:
+            from ..summary.queue import drain_queue_background
+            drain_queue_background(self._root, self._config)
+        except Exception:
+            pass
+
     # ── Tool: sg_overview ────────────────────────────────────────────────
 
     def _tool_overview(self, args: Dict) -> str:
@@ -310,6 +390,12 @@ class MCPServer:
         include_session = bool(args.get("include_session", True))
 
         parts = [_USE_SG_REMINDER, ""]
+
+        # Project DNA — the glimpse: what this project is, so the model frames
+        # its retrieval well before searching.
+        proj = self._read_sg_file("project.md", 1000)
+        if proj:
+            parts.append(f"## Project\n{proj}")
 
         # Index stats
         try:
@@ -330,6 +416,11 @@ class MCPServer:
             constraint_text = cs.get_all_for_overview() if hasattr(cs, "get_all_for_overview") else cs.get_all_constraints()
             if constraint_text:
                 parts.append(f"## Constraints (Zone 1)\n{constraint_text}")
+
+        # Architecture outline (module map) — reference for navigation.
+        arch = self._read_sg_file("architecture.md", 1600)
+        if arch:
+            parts.append(f"## Architecture\n{arch}")
 
         # Project skeleton: top-N by PageRank
         if store:
@@ -363,6 +454,18 @@ class MCPServer:
             if digest:
                 parts.append(digest)
 
+        # Prior decisions — pointer only; pulled on demand to stay cheap.
+        try:
+            from ..session.decision_log import decision_count
+            n_dec = decision_count(self._sg_dir)
+            if n_dec:
+                parts.append(
+                    f"## Memory\n  {n_dec} prior decision(s) on record — call "
+                    f"sg_log(kind='decision', topic='...') to recall relevant ones."
+                )
+        except Exception:
+            pass
+
         return "\n\n".join(parts)
 
     # ── Tool: sg_search ──────────────────────────────────────────────────
@@ -374,6 +477,7 @@ class MCPServer:
         expand_top = int(args.get("expand_top", 3))
         file_filter = str(args.get("file_filter", "")).strip()
         max_tokens = int(args.get("max_tokens", 4000))
+        intent_arg = str(args.get("intent", "")).strip() or None
 
         if not query:
             return "Error: query is required"
@@ -382,6 +486,7 @@ class MCPServer:
             store = self._engine.get_store()
             result = self._engine.heuristic_query(
                 query, top_n=top_n, file_filter=file_filter or None,
+                mode_hint=intent_arg,
             )
         except RuntimeError as e:
             return str(e)
@@ -500,10 +605,15 @@ class MCPServer:
     # ── Tool: sg_get ─────────────────────────────────────────────────────
 
     def _tool_get(self, args: Dict) -> str:
-        fqn = str(args.get("fqn", "")).strip()
+        raw = args.get("fqn", "")
+        if isinstance(raw, list):
+            fqns = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            fqns = [s.strip() for s in str(raw).replace("\n", ",").split(",")
+                    if s.strip()]
         include_callers = bool(args.get("include_callers", True))
 
-        if not fqn:
+        if not fqns:
             return "Error: fqn is required"
 
         try:
@@ -511,6 +621,11 @@ class MCPServer:
         except RuntimeError as e:
             return str(e)
 
+        results = [self._get_one(store, f, include_callers) for f in fqns]
+        return "\n\n---\n\n".join(results)
+
+    def _get_one(self, store, fqn: str, include_callers: bool) -> str:
+        """Render one function/class by FQN (fuzzy-resolved)."""
         # Fuzzy resolve
         sk = store.skeleton_table.get(fqn)
         resolved_fqn = fqn
@@ -639,9 +754,20 @@ class MCPServer:
     # ── Tool: sg_log ─────────────────────────────────────────────────────
 
     def _tool_log(self, args: Dict) -> str:
+        kind = str(args.get("kind", "turns")).strip().lower()
         last_n = int(args.get("last_n", 10))
-        session_id = str(args.get("session_id", "")).strip() or None
 
+        if kind == "decision":
+            from ..session.decision_log import query_decisions, format_decisions
+            topic = str(args.get("topic", "")).strip() or None
+            decisions = query_decisions(self._sg_dir, topic=topic, limit=last_n)
+            if not decisions:
+                suffix = f" for topic {topic!r}" if topic else ""
+                return f"No recorded decisions{suffix}."
+            return format_decisions(decisions)
+
+        # kind=turns (default): recent tool-use turns
+        session_id = str(args.get("session_id", "")).strip() or None
         entries = read_log(self._sg_dir, session_id=session_id, last_n=last_n)
         if not entries:
             return "No session log entries found."
@@ -655,6 +781,24 @@ class MCPServer:
                 lines.append(f"  {e.summary[:120]}")
             lines.append("")
         return "\n".join(lines)
+
+    # ── Tool: sg_decision ────────────────────────────────────────────────
+
+    def _tool_decision(self, args: Dict) -> str:
+        from ..session.decision_log import record_decision
+        summary = str(args.get("summary", "")).strip()
+        if not summary:
+            return "Error: summary is required"
+        files = args.get("files", []) or []
+        topics = args.get("topics", []) or []
+        ok = record_decision(
+            self._sg_dir,
+            summary,
+            rationale=str(args.get("rationale", "")),
+            files=list(files) if isinstance(files, list) else [str(files)],
+            topics=list(topics) if isinstance(topics, list) else [str(topics)],
+        )
+        return "Decision recorded." if ok else "Error: could not record decision."
 
 
 # ── stdio serve loop ─────────────────────────────────────────────────────
