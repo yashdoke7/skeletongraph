@@ -102,6 +102,12 @@ class ToolExecutor:
         self.first_search_hits: List[str] = []   # file paths, for Axis 2
         self._search_calls = 0
         self.submitted = False
+        # None = not applicable (non-SG arm). For SG arms: True iff the
+        # semantic embedding index was actually built — a False here means the
+        # run silently degraded to BM25-only and its numbers are NOT real SG.
+        self.embeddings_used = None
+        self.edits_made = 0                      # successful edit_file calls
+        self._empty_submit_warned = False        # block one empty submit only
 
     # ── dispatch ───────────────────────────────────────────────────────────
 
@@ -117,6 +123,15 @@ class ToolExecutor:
             if name == "edit_file":
                 return self._edit(args["path"], args["old_str"], args["new_str"])
             if name == "submit":
+                # Reject the first empty submit: an agent that submits without
+                # editing anything yields an empty patch (guaranteed fail). Give
+                # it exactly one nudge, then allow submit so a genuine "nothing
+                # to change" decision is still possible.
+                if self.edits_made == 0 and not self._empty_submit_warned:
+                    self._empty_submit_warned = True
+                    return ("ERROR: cannot submit — you have not edited any "
+                            "file yet. The task is to FIX the bug: use "
+                            "edit_file to apply the fix, then call submit.")
                 self.submitted = True
                 return "Submitted."
             return f"ERROR: unknown tool '{name}'"
@@ -128,13 +143,19 @@ class ToolExecutor:
     def _search(self, query: str, k: int) -> str:
         hits = _retrieve(self.backend, query, self.repo, k)
         if self._search_calls == 0:
-            # record first call's file ranking for retrieval recall (Axis 2)
+            # record first (successful) call's file ranking for recall (Axis 2)
             seen: List[str] = []
             for fqn in hits:
                 f = fqn.split("::")[0]
                 if f not in seen:
                     seen.append(f)
             self.first_search_hits = seen
+            # SG arms only: did the semantic embedding index actually build?
+            # If embeddings.npz is absent the run is SG-minus-embeddings — flag
+            # it so aggregate.py never reports a degraded run as real SG.
+            if self.backend.startswith("sg"):
+                self.embeddings_used = (
+                    self.repo / ".skeletongraph" / "embeddings.npz").exists()
         self._search_calls += 1
         if not hits:
             return "No results."
@@ -177,6 +198,7 @@ class ToolExecutor:
         if n > 1:
             return f"ERROR: old_str matches {n} times — make it unique"
         f.write_text(text.replace(old, new, 1), encoding="utf-8")
+        self.edits_made += 1
         return f"Edited {path}."
 
 
