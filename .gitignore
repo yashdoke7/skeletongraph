@@ -41,6 +41,7 @@ htmlcov/
 benchmarks/repos/
 eval/datasets/repos/
 eval/datasets/_repo_cache/
+eval/datasets/_agent_work/
 eval/datasets/*.jsonl
 eval/results/
 eval/figures/

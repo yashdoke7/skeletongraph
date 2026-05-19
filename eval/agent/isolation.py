@@ -47,9 +47,11 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
     work.mkdir(parents=True, exist_ok=True)
 
     src = Path(task["repo_path"])
-    # copytree, skipping the heavy shared .git internals we don't need; we keep
-    # a real git repo by re-initialising below so `git diff` still works.
-    shutil.copytree(src, repo, ignore=shutil.ignore_patterns(*_SG_ARTIFACTS))
+    # Exclude .git: the source repos are git WORKTREES, so their .git is a
+    # FILE pointing into a shared cache — copying it leaves a broken pointer.
+    # We re-init a clean git repo below so `git diff` still works.
+    shutil.copytree(src, repo,
+                    ignore=shutil.ignore_patterns(*_SG_ARTIFACTS, ".git"))
 
     _strip_sg_state(repo)
     _init_clean_git(repo)
@@ -72,9 +74,11 @@ def _init_clean_git(repo: Path) -> None:
     The agent edits files; `git diff` against this baseline is the patch we
     submit for verification.
     """
-    git_dir = repo / ".git"
-    if git_dir.exists():
-        shutil.rmtree(git_dir, ignore_errors=True)
+    git_path = repo / ".git"
+    if git_path.is_dir():
+        shutil.rmtree(git_path, ignore_errors=True)
+    elif git_path.exists():          # git worktree: .git is a FILE, not a dir
+        git_path.unlink()
     env = {"GIT_AUTHOR_NAME": "sg-eval", "GIT_AUTHOR_EMAIL": "eval@local",
            "GIT_COMMITTER_NAME": "sg-eval", "GIT_COMMITTER_EMAIL": "eval@local"}
     for cmd in (
