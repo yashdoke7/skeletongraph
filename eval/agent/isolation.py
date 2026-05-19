@@ -10,7 +10,9 @@ under WORKSPACE_ROOT/<run_id>/repo. Nothing is shared between run workspaces.
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -24,6 +26,24 @@ _SG_ARTIFACTS = [
     "summary_queue.jsonl",
     "summary_drain.lock",
 ]
+
+
+def _rmtree_safe(path: Path) -> None:
+    """shutil.rmtree that survives Windows read-only files (git pack objects etc.).
+
+    git marks objects in .git/objects as read-only on Windows.
+    shutil.rmtree(ignore_errors=True) silently skips those files, leaving the
+    directory alive. The onerror handler clears the flag and retries — so the
+    tree is always fully gone after this call (or raises if it genuinely cannot).
+    """
+    def _on_error(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass   # truly unreachable files: accept and move on
+    if path.exists():
+        shutil.rmtree(str(path), onerror=_on_error)
 
 
 def run_id(task_id: str, arm: str, repeat: int = 0, model: str = "qwen-32b") -> str:
@@ -42,8 +62,7 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
     work = WORKSPACE_ROOT / rid
     repo = work / "repo"
 
-    if work.exists():
-        shutil.rmtree(work, ignore_errors=True)
+    _rmtree_safe(work)
     work.mkdir(parents=True, exist_ok=True)
 
     src = Path(task["repo_path"])
@@ -63,7 +82,7 @@ def _strip_sg_state(repo: Path) -> None:
     for name in _SG_ARTIFACTS:
         p = repo / name
         if p.is_dir():
-            shutil.rmtree(p, ignore_errors=True)
+            _rmtree_safe(p)
         elif p.exists():
             p.unlink()
 
@@ -76,7 +95,7 @@ def _init_clean_git(repo: Path) -> None:
     """
     git_path = repo / ".git"
     if git_path.is_dir():
-        shutil.rmtree(git_path, ignore_errors=True)
+        _rmtree_safe(git_path)
     elif git_path.exists():          # git worktree: .git is a FILE, not a dir
         git_path.unlink()
     env = {"GIT_AUTHOR_NAME": "sg-eval", "GIT_AUTHOR_EMAIL": "eval@local",
@@ -100,7 +119,7 @@ def diff_patch(repo: Path) -> str:
 def cleanup_workspace(repo: Path) -> None:
     """Remove a finished run's workspace (call after the trajectory is saved)."""
     work = repo.parent
-    shutil.rmtree(work, ignore_errors=True)
+    _rmtree_safe(work)
 
 
 def assert_isolation(repo_a: Path, repo_b: Path) -> bool:
