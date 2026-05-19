@@ -38,21 +38,55 @@ def run_one(task: dict, arm: str, repeat: int = 0, model: str = "qwen-32b",
         if not keep_workspace:
             cleanup_workspace(repo)
 
+    gold = task.get("gold_files", [])
+    hits = traj.first_search_hits
+    rmetrics = _retrieval_metrics(gold, hits)
+
     record = traj.to_dict()
     record.update({
         "run_id": rid,
         "repeat": repeat,
         "repo": task.get("repo", ""),
         "base_commit": task.get("base_commit", ""),
-        "gold_files": task.get("gold_files", []),
+        "gold_files": gold,
         "model_patch": patch,
-        # Axis 2 — did the first search surface a gold file?
-        "retrieval_hit": bool(set(task.get("gold_files", []))
-                              & set(traj.first_search_hits)),
-        "edited_gold_file": _edited_gold(patch, task.get("gold_files", [])),
+        # Axis 2 — retrieval quality of the FIRST search.
+        # retrieval_hit (recall): was any gold file anywhere in the results.
+        #   Gameable — a backend that dumps 50 noisy files "hits" by luck.
+        # retrieval_precision: gold files / total files returned. Punishes the
+        #   noise dump; this is the discriminating metric for the paper.
+        # retrieval_rank: 1-indexed rank of the first gold file (0 = absent).
+        "retrieval_hit": rmetrics["hit"],
+        "retrieval_precision": rmetrics["precision"],
+        "retrieval_rank": rmetrics["rank"],
+        "edited_gold_file": _edited_gold(patch, gold),
+        # SG arms: True iff the semantic embedding index actually built.
+        # False = the run silently degraded to BM25-only — NOT real SG.
+        "embeddings_used": executor.embeddings_used,
     })
     out_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return record
+
+
+def _retrieval_metrics(gold_files: list, hits: list) -> dict:
+    """Recall (hit), precision, and rank-of-first-gold for one search ranking.
+
+    `hits` is the ordered list of distinct files from the first search.
+    A binary hit alone rewards backends that return a huge unranked list;
+    precision and rank expose that. rank is 1-indexed; 0 means "not found".
+    """
+    gold = set(gold_files)
+    found = [f for f in hits if f in gold]
+    rank = 0
+    for i, f in enumerate(hits):
+        if f in gold:
+            rank = i + 1
+            break
+    return {
+        "hit": bool(found),
+        "precision": round(len(found) / len(hits), 4) if hits else 0.0,
+        "rank": rank,
+    }
 
 
 def _edited_gold(patch: str, gold_files: list) -> bool:
@@ -78,7 +112,9 @@ def main() -> None:
     rec = run_one(tasks[args.task_id], args.arm, args.repeat, args.model,
                   args.keep_workspace)
     print(f"{rec['run_id']}: stopped={rec['stopped']} turns={rec['n_turns']} "
-          f"retrieval_hit={rec['retrieval_hit']} edited_gold={rec['edited_gold_file']} "
+          f"hit={rec['retrieval_hit']} prec={rec['retrieval_precision']} "
+          f"rank={rec['retrieval_rank']} edited_gold={rec['edited_gold_file']} "
+          f"emb={rec['embeddings_used']} "
           f"in={rec['billed_input']} out={rec['billed_output']} "
           f"cost=${rec['imputed_cost']}")
 
