@@ -542,6 +542,13 @@ class MCPServer:
                 f"|  Full bodies for top {min(expand_top, len(candidates))}")
             lines.append("")
 
+            quick_map = self._render_quick_map(
+                query, candidates[:expand_top], store)
+            if quick_map:
+                lines.append(quick_map)
+                lines.append("")
+                used_chars += len(quick_map)
+
             for i, c in enumerate(candidates[:expand_top], 1):
                 sk = c.skeleton
                 summary = store.summaries.get(sk.fqn) or ""
@@ -674,6 +681,37 @@ class MCPServer:
                      "content.txt artifacts; they duplicate this result._")
         return "\n".join(lines)
 
+    def _render_quick_map(self, query: str, candidates: List, store) -> str:
+        """Front-load the few routing facts agents need before reading bodies."""
+        if not candidates:
+            return ""
+
+        edit_candidates = [
+            c for i, c in enumerate(candidates, 1)
+            if self._should_include_body(query, c.skeleton, i)
+        ] or candidates[:1]
+
+        lines = [
+            "## SG quick map",
+            "Use these anchors before native grep/read calls; the full bodies follow below.",
+        ]
+        for c in edit_candidates[:3]:
+            sk = c.skeleton
+            lines.append(f"- Edit target: {sk.file_path}:{sk.line_start}-{sk.line_end}  # {sk.fqn}")
+
+        target_paths = [c.skeleton.file_path for c in edit_candidates[:5]]
+        target_names = [c.skeleton.fqn.split("::")[-1] for c in edit_candidates[:5]]
+        terms = self._test_terms(query, target_names)
+        for path in self._candidate_test_paths(target_paths, store)[:2]:
+            snippets = self._matching_line_snippets(path, query, terms, limit=6)
+            if not snippets:
+                continue
+            lines.append(f"- Likely test file: {path}")
+            for snippet in snippets[:6]:
+                lines.append(f"  - {snippet}")
+
+        return "\n".join(lines)[:1800]
+
     def _should_include_body(self, query: str, sk, rank: int) -> bool:
         """Keep full bodies for likely edit targets, not every BM25 neighbor."""
         if rank == 1:
@@ -686,6 +724,12 @@ class MCPServer:
             if len(p) >= 3
         ]
         method = parts[-1] if parts else short.lower()
+        action_verbs = {
+            "add", "allow", "change", "fix", "handle", "make", "modify",
+            "refactor", "support", "update",
+        }
+        if method in action_verbs and short.lower() not in q:
+            return False
         if method and method in q:
             return True
         # For Class.method, avoid expanding every method just because the class
