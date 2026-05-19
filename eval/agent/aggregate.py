@@ -93,9 +93,12 @@ def aggregate(stage: str | None) -> None:
         lines.append(f"Stage: **{stage}**  ·  {config.STAGES[stage].note}")
     lines += [f"Runs: {len(recs)}  ·  arms: {sorted(by_arm)}", "",
               "## Axes 1/2/3/5 by arm", "",
-              "| Arm | n | pass@1 | retrieval-hit | edited-gold | "
-              "avg turns | avg in-tok | avg out-tok | avg cost$ |",
-              "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+              "retrieval-hit = recall (gameable by noise dumps) · "
+              "precision = gold/returned · rank = median rank of first gold file",
+              "",
+              "| Arm | n | pass@1 | retrieval-hit | precision | rank | "
+              "edited-gold | avg turns | avg in-tok | avg out-tok | avg cost$ |",
+              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
 
     arm_pass: dict = {}
     for arm in sorted(by_arm):
@@ -104,17 +107,37 @@ def aggregate(stage: str | None) -> None:
                     if "resolved" in r]
         arm_pass[arm] = {r["task_id"]: bool(r.get("resolved")) for r in rs}
         p1 = _mean(resolved) if resolved else None
+        ranks = [r.get("retrieval_rank") for r in rs
+                 if r.get("retrieval_rank")]          # nonzero = found
+        med_rank = round(statistics.median(ranks), 1) if ranks else "n/a"
         lines.append(
             f"| {config.ARMS.get(arm, arm).label if arm in config.ARMS else arm} "
             f"| {len(rs)} "
             f"| {p1 if p1 is not None else 'n/a (run verify.py)'} "
             f"| {_mean([1 if r.get('retrieval_hit') else 0 for r in rs])} "
+            f"| {_mean([r.get('retrieval_precision') for r in rs])} "
+            f"| {med_rank} "
             f"| {_mean([1 if r.get('edited_gold_file') else 0 for r in rs])} "
             f"| {_mean([r.get('n_turns') for r in rs])} "
             f"| {round(_mean([r.get('billed_input') for r in rs]))} "
             f"| {round(_mean([r.get('billed_output') for r in rs]))} "
             f"| {_mean([r.get('imputed_cost') for r in rs])} |"
         )
+
+    # ── data integrity — SG runs that silently lost their embedding index ───
+    lines += ["", "## Data integrity", ""]
+    sg_runs = [r for r in recs if str(r.get("arm", "")).startswith("sg")]
+    degraded = [r for r in sg_runs if r.get("embeddings_used") is False]
+    if degraded:
+        lines.append(f"**WARNING — {len(degraded)}/{len(sg_runs)} SG run(s) ran "
+                      f"WITHOUT embeddings (BM25-only fallback). Their numbers "
+                      f"are NOT real SG — exclude or re-run:**")
+        for r in degraded:
+            lines.append(f"- `{r.get('run_id')}`")
+    elif sg_runs:
+        lines.append(f"All {len(sg_runs)} SG run(s) used the embedding index. OK")
+    else:
+        lines.append("_No SG runs in this selection._")
 
     # significance: SG vs each baseline, paired on task_id
     lines += ["", "## Significance — SG vs each baseline (McNemar, paired)", ""]
@@ -161,7 +184,7 @@ def aggregate(stage: str | None) -> None:
     out = config.RUNS_DIR / "SUMMARY.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote {out}")
-    print("\n".join(lines[:14]))
+    print("\n".join(lines[:18]))
 
 
 def main() -> None:
