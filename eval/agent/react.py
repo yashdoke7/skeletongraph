@@ -11,12 +11,16 @@ vLLM serving note: start vLLM with `--enable-auto-tool-choice` and the matching
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import List
 
 from . import config
 from .tools import TOOL_SCHEMAS, ToolExecutor
+
+# Valid tool names — used to validate text-parsed tool calls (below).
+_VALID_TOOLS = {s["function"]["name"] for s in TOOL_SCHEMAS}
 
 SYSTEM_PROMPT = """You are an autonomous software engineer fixing a bug in a \
 repository. You can only see the code through your tools.
@@ -126,6 +130,58 @@ def _usage(resp) -> dict:
     }
 
 
+def _parse_text_tool_calls(content: str) -> List[dict]:
+    """Fallback parser for tool calls emitted as plain-text JSON.
+
+    Not every endpoint returns structured `tool_calls`: Ollama, and vLLM when
+    its --tool-call-parser misfires, can leave the call as JSON in the message
+    *content* instead. Without this, the ReAct loop sees "no tool call" and
+    bails after 2 turns — silently corrupting the whole run.
+
+    Extracts {"name", "arguments"} objects whose name is a real tool. Tolerates
+    Hermes <tool_call> wrappers, markdown ```json fences, and embedded objects.
+    """
+    if not content:
+        return []
+    text = content.replace("<tool_call>", " ").replace("</tool_call>", " ")
+
+    blobs: List[str] = []
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        blobs.append(stripped)
+    blobs += re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    # embedded objects (one level of nesting — enough for {name, arguments:{...}})
+    blobs += re.findall(r"\{(?:[^{}]|\{[^{}]*\})*\}", text)
+
+    calls: List[dict] = []
+    seen: set = set()
+    for blob in blobs:
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        name = obj.get("name") or obj.get("tool") or obj.get("function")
+        if isinstance(name, dict):                 # {"function": {"name": ...}}
+            name = name.get("name")
+        args = obj.get("arguments")
+        if args is None:
+            args = obj.get("parameters")
+        if args is None:
+            args = obj.get("args")
+        if not isinstance(name, str) or name not in _VALID_TOOLS:
+            continue
+        if not isinstance(args, dict):
+            args = {}
+        key = name + json.dumps(args, sort_keys=True)
+        if key in seen:                            # dedup: same call matched twice
+            continue
+        seen.add(key)
+        calls.append({"name": name, "arguments": args})
+    return calls
+
+
 def run_react(task: dict, arm: str, executor: ToolExecutor,
               model: str = "qwen-32b") -> Trajectory:
     """Run one task with one arm to completion. Returns the trajectory."""
@@ -158,8 +214,12 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
         turn = Turn(index=step, usage=_usage(resp),
                     text=msg.content or "", latency_s=time.time() - ts)
 
-        tool_calls = msg.tool_calls or []
-        if not tool_calls:
+        native_calls = msg.tool_calls or []
+        # Fallback: model emitted the call as text JSON, not structured tool_calls.
+        text_calls = ([] if native_calls
+                      else _parse_text_tool_calls(msg.content or ""))
+
+        if not native_calls and not text_calls:
             # model answered without acting — nudge once, else stop
             turn.tool_calls = []
             traj.turns.append(turn)
@@ -171,28 +231,41 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
                               "content": "Use a tool, or call submit if done."})
             continue
 
-        # record + execute each tool call
-        messages.append({
-            "role": "assistant",
-            "content": msg.content or "",
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name,
-                              "arguments": tc.function.arguments}}
-                for tc in tool_calls
-            ],
-        })
-        for tc in tool_calls:
-            name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            result = executor.run(name, args)
-            turn.tool_calls.append({"name": name, "args": args,
-                                    "result": result[:1500]})
-            messages.append({"role": "tool", "tool_call_id": tc.id,
-                             "content": result})
+        if native_calls:
+            # ── structured tool_calls path ──────────────────────────────────
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name,
+                                  "arguments": tc.function.arguments}}
+                    for tc in native_calls
+                ],
+            })
+            for tc in native_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                result = executor.run(name, args)
+                turn.tool_calls.append({"name": name, "args": args,
+                                        "result": result[:1500]})
+                messages.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": result})
+        else:
+            # ── text-form tool calls (fallback) ─────────────────────────────
+            # Feed results back as user messages — robust across endpoints that
+            # reject synthetic tool_calls / tool-role pairing.
+            messages.append({"role": "assistant", "content": msg.content or ""})
+            for call in text_calls:
+                name, args = call["name"], call["arguments"]
+                result = executor.run(name, args)
+                turn.tool_calls.append({"name": name, "args": args,
+                                        "result": result[:1500]})
+                messages.append({"role": "user",
+                                 "content": f"[tool result: {name}]\n{result}"})
 
         traj.turns.append(turn)
         if executor.submitted:

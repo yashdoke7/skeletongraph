@@ -14,6 +14,7 @@ run concurrently — see isolation.py. vLLM batches their requests server-side.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -37,8 +38,20 @@ def _stage_jobs(stage: config.Stage, probe: bool) -> list:
 
 
 def _already_done(task: dict, arm: str, model: str, repeat: int) -> bool:
+    """A run counts as done only if it FINISHED cleanly — the agent called
+    submit or exhausted MAX_TURNS. `error` (endpoint/exception) and `no_tool`
+    (the model never produced a usable tool call) are incomplete: a re-run
+    should retry them rather than skip. This makes the harness self-healing
+    after a fix — no manual results purge needed."""
     rid = run_id(task["task_id"], arm, repeat, model)
-    return (config.RUNS_DIR / f"{rid}.json").exists()
+    p = config.RUNS_DIR / f"{rid}.json"
+    if not p.exists():
+        return False
+    try:
+        rec = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False                      # corrupt/partial — re-run it
+    return rec.get("stopped") in ("submit", "max_turns")
 
 
 def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
