@@ -293,7 +293,11 @@ class EmbeddingStore:
 
         import json
         path = sg_dir / "embeddings.npz"
-        tmp_path = path.with_suffix(".tmp")
+        # np.savez_compressed APPENDS ".npz" to any path that does not already
+        # end in it — so the temp file MUST end in ".npz", otherwise numpy
+        # writes "embeddings.tmp.npz" and the rename of "embeddings.tmp" below
+        # fails with FileNotFoundError. (This silently disabled SG embeddings.)
+        tmp_path = sg_dir / "embeddings.tmp.npz"
 
         np.savez_compressed(
             tmp_path,
