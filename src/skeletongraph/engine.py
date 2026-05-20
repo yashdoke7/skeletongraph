@@ -41,6 +41,24 @@ from .retrieval.slm_extractor import (
 logger = logging.getLogger(__name__)
 
 
+class _NullSummaryStore:
+    """Drop-in replacement for SummaryStore that always returns None.
+
+    Used by the sg-nosummary ablation arm to suppress summary text from
+    the assembled context. Delegates writes and all other attributes to the
+    real store so the engine doesn't crash on set/mark_pending calls.
+    """
+
+    def __init__(self, real_store) -> None:
+        self._real = real_store
+
+    def get(self, fqn: str):  # noqa: ANN001
+        return None  # summary suppressed
+
+    def __getattr__(self, attr: str):
+        return getattr(self._real, attr)
+
+
 # ── Pipeline Result ─────────────────────────────────────────────────────
 
 
@@ -414,6 +432,8 @@ class SGEngine:
             mode_spec=mode_spec,
             enable_keyword_fallback=self._config.enable_keyword_fallback,
             enable_bm25_fallback=self._config.enable_bm25_fallback,
+            enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
+            enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -441,6 +461,13 @@ class SGEngine:
         IDE delivery → 4-zone assembler (canonical).
         CLI delivery → existing layered assembler (mode-aware).
         """
+        # sg-nosummary ablation: replace the summary store with a null proxy so
+        # the assembler sees no Tier-2 summary text. Restore after assembly.
+        _original_summaries = None
+        if not getattr(self._config, "enable_summaries", True):
+            _original_summaries = store.summaries
+            store.summaries = _NullSummaryStore(_original_summaries)
+
         try:
             from .assembly.prompt_builder import assemble_4zone, assemble
 
@@ -487,6 +514,10 @@ class SGEngine:
             )
             self._last_assembly_tokens = len(context_text) // 4
             self._last_assembly_native_estimate = 0
+
+        # Restore the real summary store if we swapped it for the ablation.
+        if _original_summaries is not None:
+            store.summaries = _original_summaries
 
         # Prepend SLM reasoning if available (CLI path)
         if slm_result and slm_result.reasoning:
@@ -705,6 +736,8 @@ class SGEngine:
             mode_spec=mode_spec,
             enable_keyword_fallback=self._config.enable_keyword_fallback,
             enable_bm25_fallback=self._config.enable_bm25_fallback,
+            enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
+            enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
         )
 
         # Apply file filter post-hoc

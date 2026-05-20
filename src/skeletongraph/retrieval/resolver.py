@@ -76,6 +76,8 @@ def resolve_context(
     mode_spec: Optional["ModeSpec"] = None,
     enable_keyword_fallback: bool = False,
     enable_bm25_fallback: bool = False,
+    enable_graph_expansion: bool = True,
+    enable_centrality_rerank: bool = True,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
@@ -89,6 +91,11 @@ def resolve_context(
         mode_spec: Optional ModeSpec from classifier — drives graph expansion.
             When provided, graph_direction/blast_depth/dep_depth/load_tests
             are read from this spec instead of switching on TaskType.
+        enable_graph_expansion: When False (sg-nograph ablation), skip all
+            graph traversal — blast_radius and dependency_chain. Only direct
+            entity matches are returned (Tier 1 only).
+        enable_centrality_rerank: When False (sg-norerank ablation), disable
+            the hub/PageRank connectivity signal in the Ranker.
 
     Returns:
         ResolverResult with ranked candidates and confidence.
@@ -180,7 +187,7 @@ def resolve_context(
                 confidence_reason = "No entity matches; keyword fallback disabled"
 
     # Step 4: Build ranker with hub scores
-    ranker = Ranker(store.graph)
+    ranker = Ranker(store.graph, centrality_enabled=enable_centrality_rerank)
     ranker.compute_hub_scores(known_fqns)
 
     # Determine target file for same-file bonus
@@ -212,14 +219,16 @@ def resolve_context(
             )
 
     # ── Graph expansion: ModeSpec-driven (v5) or TaskType-based (legacy) ──
-    if mode_spec is not None:
-        _expand_from_mode_spec(
-            target_fqns, mode_spec, store, ranker, candidates, target_file,
-        )
-    else:
-        _expand_from_task_type(
-            target_fqns, intent, max_depth, store, ranker, candidates, target_file,
-        )
+    # sg-nograph ablation: skip entirely — only direct entity hits are returned.
+    if enable_graph_expansion:
+        if mode_spec is not None:
+            _expand_from_mode_spec(
+                target_fqns, mode_spec, store, ranker, candidates, target_file,
+            )
+        else:
+            _expand_from_task_type(
+                target_fqns, intent, max_depth, store, ranker, candidates, target_file,
+            )
 
     # Step 6: Auto-include constructors for any class that's in context
     _auto_include_constructors(candidates, store, ranker, target_file)

@@ -243,12 +243,27 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         return retrieve(query, repo, k)
 
     if backend in ("sg-nograph", "sg-norerank", "sg-nosummary"):
-        # SG ablations: same heuristic_query with one component disabled.
-        # Wire the SG-config toggle here before running stage 2-ablation —
-        # fail loud rather than silently return un-ablated SG results.
-        raise NotImplementedError(
-            f"SG ablation '{backend}' not wired. Disable the component in "
-            f"SGEngine config / heuristic_query, then return its candidates. "
-            f"See STAGES.md.")
+        from skeletongraph.engine import SGEngine
+        from skeletongraph.config import SGConfig
+        cfg = SGConfig()
+        if backend == "sg-nograph":
+            # Disable graph expansion: only direct entity matches returned.
+            # Expects fewer candidates; tests whether graph traversal drives gain.
+            cfg.enable_graph_expansion = False
+        elif backend == "sg-norerank":
+            # Disable hub/centrality signal in ranking.
+            # Same candidates, different order; tests PageRank contribution.
+            cfg.enable_centrality_rerank = False
+        elif backend == "sg-nosummary":
+            # Disable Tier-2 summary text in assembled context.
+            # Note: heuristic_query returns ranked FQNs (not summaries), so
+            # retrieval metrics are identical to sg. The ablation's effect
+            # manifests in full-pipeline (engine.query) where the assembled
+            # context omits summary descriptions. File-level retrieval rank
+            # is unchanged; pass@1 effect requires the assembly path.
+            cfg.enable_summaries = False
+        engine = SGEngine(project_root=repo, config=cfg)
+        res = engine.heuristic_query(query, top_n=k)
+        return [c.skeleton.fqn for c in res.candidates]
 
     raise ValueError(f"unknown backend: {backend}")

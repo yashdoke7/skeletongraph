@@ -42,10 +42,14 @@ class Ranker:
         self,
         graph: DependencyGraph,
         weights: Optional[RankWeights] = None,
+        centrality_enabled: bool = True,
     ) -> None:
         self.graph = graph
         self.weights = weights or RankWeights()
         self._hub_scores: Dict[str, float] = {}
+        # When False (sg-norerank ablation): hub/centrality signal is silenced.
+        # Distance, complexity, test, export, and same-file signals are preserved.
+        self._centrality_enabled = centrality_enabled
 
     def compute_hub_scores(self, all_fqns: Set[str]) -> None:
         """Pre-compute hub scores (in-degree based) for all nodes.
@@ -91,9 +95,10 @@ class Ranker:
         elif distance > 0:
             score += self.weights.distance / distance
 
-        # Signal 2: Connectivity (hub score)
-        hub = self._hub_scores.get(fqn, 0.0)
-        score += hub * self.weights.connectivity
+        # Signal 2: Connectivity (hub score — disabled for sg-norerank ablation)
+        if self._centrality_enabled:
+            hub = self._hub_scores.get(fqn, 0.0)
+            score += hub * self.weights.connectivity
 
         # Signal 3: Complexity (check higher threshold first)
         if skeleton.complexity > 10:

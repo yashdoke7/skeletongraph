@@ -247,6 +247,13 @@ class SGConfig:
     summary_queue_enabled: bool = True      # Enable async post-turn summary queue
     summary_queue_max_batch: int = 10       # Max functions to process per drain run
 
+    # ── Ablation toggles (eval only) ──────────────────────────────────────
+    # These default to True (full SG); the eval harness flips them off one at
+    # a time for the stage-2 ablation. NEVER ship them False in production.
+    enable_graph_expansion: bool = True   # Tier-2/Tier-3 graph neighbor inclusion
+    enable_centrality_rerank: bool = True # PageRank/hub-score reranking signal
+    enable_summaries: bool = True         # Include Tier-2 summaries in assembled context
+
     # ── Build & Indexing ───────────────────────────────────────────────
     ignore_patterns: List[str] = field(default_factory=list)  # Extra ignore patterns
     parallel_parse: bool = False            # Reserved for future concurrent parsing
@@ -507,6 +514,10 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "summary_min_words": config.summary_min_words,
         "auto_rebuild_on_completion": config.auto_rebuild_on_completion,
         "enable_embeddings": config.enable_embeddings,
+        # Ablation toggles (eval only)
+        "enable_graph_expansion": config.enable_graph_expansion,
+        "enable_centrality_rerank": config.enable_centrality_rerank,
+        "enable_summaries": config.enable_summaries,
         # Tier-0.5 / queue
         "ollama_base_url": config.ollama_base_url,
         "ollama_summary_model": config.ollama_summary_model,
