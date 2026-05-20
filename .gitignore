@@ -13,12 +13,19 @@ build/
 venv/
 env/
 
-# IDE
+# IDE — machine-local files only, not for the public repo
 .claude/
+.cursor/
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# Agent-specific guidance files (local to whichever IDE you use)
+AGENT_RULES.md
+CLAUDE.md
+CURSOR_SETUP.md
+GEMINI_DIAGRAM_PROMPT.md
 
 # SkeletonGraph index (generated, not committed)
 .skeletongraph/
