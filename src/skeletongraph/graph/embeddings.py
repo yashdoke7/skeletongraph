@@ -282,7 +282,11 @@ class EmbeddingStore:
             convert_to_numpy=True,
         ).astype(np.float32)
 
-        return float(self.matrix[idx] @ query_emb.T)
+        # query_emb shape is (1, 384) — use [0] to get (384,) so the dot product
+        # with matrix[idx] (384,) returns a numpy scalar, not a (1,) array.
+        # float((1,) array) raises "only 0-dimensional arrays can be converted
+        # to Python scalars"; float(scalar) works.
+        return float(self.matrix[idx] @ query_emb[0])
 
     # ── Persistence ──────────────────────────────────────────────────────
 
