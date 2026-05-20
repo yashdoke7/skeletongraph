@@ -35,6 +35,9 @@ GEMINI_DIAGRAM_PROMPT.md
 .env
 .env.local
 
+# Machine-local MCP config (copy mcp.example.json and fill in your paths)
+mcp.json
+
 # OS
 .DS_Store
 Thumbs.db
