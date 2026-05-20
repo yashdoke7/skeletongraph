@@ -139,6 +139,76 @@ def aggregate(stage: str | None) -> None:
     else:
         lines.append("_No SG runs in this selection._")
 
+    # ── trajectory dynamics ─────────────────────────────────────────────────
+    # The interesting agent-behavior signals: when does the agent first edit?
+    # how many edits does it attempt vs land? does the empty-submit guard fire?
+    # These differentiate retrieval quality from model capability.
+    lines += ["", "## Trajectory dynamics by arm", "",
+              "edits-success-rate = successful / attempted edit_file calls · "
+              "guard-fired% = empty-submit guard had to nudge the model · "
+              "tte = mean turn index of first successful edit",
+              "",
+              "| Arm | n | edits attempted | edits successful | "
+              "success-rate | guard-fired% | mean tte |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]
+    for arm in sorted(by_arm):
+        rs = by_arm[arm]
+        att = [r.get("edits_attempted", 0) for r in rs]
+        suc = [r.get("edits_successful", 0) for r in rs]
+        rate = round(sum(suc) / sum(att), 4) if sum(att) else 0.0
+        guard = _mean([1 if r.get("empty_submit_blocked") else 0 for r in rs])
+        ttes = [r.get("time_to_first_edit_turn") for r in rs
+                if r.get("time_to_first_edit_turn") is not None]
+        mean_tte = round(sum(ttes) / len(ttes), 1) if ttes else "n/a"
+        lines.append(
+            f"| {arm} | {len(rs)} | {round(_mean(att), 2)} "
+            f"| {round(_mean(suc), 2)} | {rate} | {guard} | {mean_tte} |"
+        )
+
+    # ── consolidation gap (the ContextBench-style headline figure) ──────────
+    # Files retrieved but never appearing in the final patch. Lower is better;
+    # SG with summaries should focus the model and shrink this gap vs naive
+    # retrievers that surface noise.
+    lines += ["", "## Consolidation gap by arm", "",
+              "files-read = mean files opened with read_file · "
+              "files-in-patch = mean files touched by patch · "
+              "gap-files = 1 − (read ∩ patch) / read   (0 = perfect)",
+              "",
+              "| Arm | n | files-read | files-in-patch | gap-files |",
+              "| --- | --- | --- | --- | --- |"]
+    for arm in sorted(by_arm):
+        rs = by_arm[arm]
+        gaps = [(r.get("consolidation") or {}).get("consolidation_gap_files")
+                for r in rs]
+        read_c = [(r.get("consolidation") or {}).get("files_read_count", 0)
+                  for r in rs]
+        patch_c = [(r.get("consolidation") or {}).get("files_in_patch_count", 0)
+                   for r in rs]
+        lines.append(
+            f"| {arm} | {len(rs)} | {round(_mean(read_c), 2)} "
+            f"| {round(_mean(patch_c), 2)} | {_mean(gaps)} |"
+        )
+
+    # ── search dynamics ─────────────────────────────────────────────────────
+    # Did the agent thrash on retrieval? Multiple searches per task with high
+    # search_calls but low retrieval_precision = thrashing. Useful for the
+    # "smart retrieval reduces tool calls" claim.
+    lines += ["", "## Search dynamics by arm", "",
+              "| Arm | n | mean search-calls | mean unique-files-retrieved | search-errors% |",
+              "| --- | --- | --- | --- | --- |"]
+    for arm in sorted(by_arm):
+        rs = by_arm[arm]
+        ncalls = [r.get("n_search_calls", 0) for r in rs]
+        uniq = [r.get("unique_files_retrieved_total", 0) for r in rs]
+        errs = []
+        for r in rs:
+            scs = r.get("search_calls") or []
+            errs.append(sum(1 for sc in scs if sc.get("error")) / max(len(scs), 1))
+        lines.append(
+            f"| {arm} | {len(rs)} | {round(_mean(ncalls), 2)} "
+            f"| {round(_mean(uniq), 2)} | {round(_mean(errs), 4)} |"
+        )
+
     # significance: SG vs each baseline, paired on task_id
     lines += ["", "## Significance — SG vs each baseline (McNemar, paired)", ""]
     if "sg" in arm_pass and any("resolved" in r for r in recs):
@@ -185,6 +255,8 @@ def aggregate(stage: str | None) -> None:
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote {out}")
     print("\n".join(lines[:18]))
+    print("...")
+    print(f"({len(lines)} total lines in SUMMARY.md — open the file for the full breakdown)")
 
 
 def main() -> None:
