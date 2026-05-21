@@ -11,6 +11,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
 
+# Silence HuggingFace / sentence-transformers model-load progress bars
+# ("Loading weights: 100%|...") that interleave with the eval console output.
+# Must be set before any transformers/huggingface_hub import; config is imported
+# first by every agent module, so this covers the whole harness.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 # ── paths ──────────────────────────────────────────────────────────────────
 
 EVAL_DIR = Path(__file__).resolve().parent.parent          # .../eval

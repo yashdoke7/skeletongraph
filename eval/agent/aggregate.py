@@ -84,14 +84,24 @@ def aggregate(stage: str | None) -> None:
         raise SystemExit("no runs found")
 
     # group by arm (collapsing repeats/models for the headline table)
-    by_arm: dict = defaultdict(list)
+    by_arm_all: dict = defaultdict(list)
     for r in recs:
-        by_arm[r["arm"]].append(r)
+        by_arm_all[r["arm"]].append(r)
+    # Metric tables count only COMPLETED runs. A run that errored (endpoint down)
+    # or never produced a tool call has no meaningful retrieval/edit data, and
+    # including it as zeros silently drags every average down — and lets a stale
+    # failed run from an earlier session pollute the summary. Failures are still
+    # surfaced in the Stop-reason table below.
+    _COMPLETE = ("submit", "max_turns")
+    by_arm: dict = {a: [r for r in rs if r.get("stopped") in _COMPLETE]
+                    for a, rs in by_arm_all.items()}
+    n_excluded = len(recs) - sum(len(v) for v in by_arm.values())
 
     lines = ["# Agentic Evaluation — Summary", ""]
     if stage:
         lines.append(f"Stage: **{stage}**  ·  {config.STAGES[stage].note}")
-    lines += [f"Runs: {len(recs)}  ·  arms: {sorted(by_arm)}", "",
+    lines += [f"Runs: {len(recs)} ({n_excluded} incomplete excluded from metrics)"
+              f"  ·  arms: {sorted(by_arm)}", "",
               "## Axes 1/2/3/5 by arm", "",
               "retrieval-hit = recall (gameable by noise dumps) · "
               "precision = gold/returned · rank = median rank of first gold file",
@@ -126,7 +136,7 @@ def aggregate(stage: str | None) -> None:
 
     # ── data integrity — SG runs that silently lost their embedding index ───
     lines += ["", "## Data integrity", ""]
-    sg_runs = [r for r in recs if str(r.get("arm", "")).startswith("sg")]
+    sg_runs = [r for a, rs in by_arm.items() if a.startswith("sg") for r in rs]
     degraded = [r for r in sg_runs if r.get("embeddings_used") is False]
     if degraded:
         lines.append(f"**WARNING — {len(degraded)}/{len(sg_runs)} SG run(s) ran "
@@ -243,8 +253,8 @@ def aggregate(stage: str | None) -> None:
     lines += ["", "## Stop reason (failure mode) by arm", "",
               "| Arm | submit | max_turns | error | no_tool |",
               "| --- | --- | --- | --- | --- |"]
-    for arm in sorted(by_arm):
-        rs = by_arm[arm]
+    for arm in sorted(by_arm_all):
+        rs = by_arm_all[arm]          # ALL runs — failures belong in this table
         cnt = defaultdict(int)
         for r in rs:
             cnt[r.get("stopped", "?")] += 1

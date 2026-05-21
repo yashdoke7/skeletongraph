@@ -29,9 +29,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Sequence
+
+# Silence HuggingFace / sentence-transformers model-load progress bars before
+# any transformers/huggingface_hub import (the hybrid + sg backends load models).
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────
