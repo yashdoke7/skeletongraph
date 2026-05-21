@@ -143,6 +143,16 @@ STAGES: Dict[str, Stage] = {
         "Retrieval + consolidation metrics; confirms the smoke precision gap "
         "holds at larger N before committing AMD budget.",
     ),
+    # Local full-arm comparison (7B, then 14B by swapping SG_EVAL_MODEL). All six
+    # retrieval arms × the full 30-task stage0 set = 180 runs. Yields the
+    # retrieval + efficiency + (weak) consolidation picture across every arm.
+    # pass@1 is NOT produced here (needs the SWE-bench Docker harness on Linux/
+    # AMD) — local runs are for retrieval/efficiency + harness validation.
+    "0-full": Stage(
+        "0-full", ["sg", "bm25", "grep", "none", "hybrid", "aider"], 30, "swebench",
+        "Local full-arm comparison (7B/14B) — all six retrieval arms × 30 tasks. "
+        "Retrieval + efficiency + consolidation; pass@1 deferred to the AMD run.",
+    ),
     # Stage 0 is free/CPU and done (eval/run_stage0.py + the IDE smoke).
     "1-core": Stage(
         "1-core", ["sg", "bm25", "grep", "none"], SWEBENCH_N, "swebench",

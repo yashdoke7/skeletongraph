@@ -141,7 +141,17 @@ class ToolExecutor:
     # ── search_code — the arm under test ───────────────────────────────────
 
     def _search(self, query: str, k: int) -> str:
-        hits = _retrieve(self.backend, query, self.repo, k)
+        # SG arms return (fqn, summary) pairs so the agent sees a tier-2 preview
+        # per hit (the C2 mechanism). sg-nosummary returns empty summaries; all
+        # other arms return bare file/FQN strings. Metrics always use the FQN
+        # list, so retrieval recall/precision are unaffected by the summaries.
+        summaries: List[str] = []
+        if self.backend in _SG_BACKENDS:
+            pairs = _retrieve_sg(self.backend, query, self.repo, k)
+            hits = [fqn for fqn, _ in pairs]
+            summaries = [s for _, s in pairs]
+        else:
+            hits = _retrieve(self.backend, query, self.repo, k)
         if self._search_calls == 0:
             # record first (successful) call's file ranking for recall (Axis 2)
             seen: List[str] = []
@@ -159,6 +169,15 @@ class ToolExecutor:
         self._search_calls += 1
         if not hits:
             return "No results."
+        # SG-with-summaries: surface "fqn — summary" so the agent can triage
+        # what to open without reading the file (this is what shrinks the
+        # consolidation gap). Falls back to bare lines when no summary text.
+        if summaries and any(summaries):
+            lines = []
+            for i, h in enumerate(hits[:k]):
+                s = summaries[i] if i < len(summaries) else ""
+                lines.append(f"{i+1}. {h}" + (f"\n   summary: {s}" if s else ""))
+            return "Ranked results (file::symbol + summary):\n" + "\n".join(lines)
         lines = [f"{i+1}. {h}" for i, h in enumerate(hits[:k])]
         return "Ranked results (file::symbol):\n" + "\n".join(lines)
 
@@ -204,13 +223,13 @@ class ToolExecutor:
 
 # ── retrieval backends ─────────────────────────────────────────────────────
 
+# Every SkeletonGraph variant (full + ablations). These route through the
+# summary-aware path so the agent receives tier-2 previews (the C2 mechanism).
+_SG_BACKENDS = {"sg", "sg-nograph", "sg-norerank", "sg-nosummary"}
 
-def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
-    """Dispatch to the arm's retrieval implementation. Returns ranked FQNs/files."""
-    if backend == "none":
-        return []                       # no-retrieval arm: agent reads files blind
 
-    # eval/ on path so the existing backends import
+def _ensure_sg_on_path() -> None:
+    """Put eval/ and the repo root on sys.path so backends + skeletongraph import."""
     eval_dir = str(Path(__file__).resolve().parent.parent)
     if eval_dir not in sys.path:
         sys.path.insert(0, eval_dir)
@@ -218,11 +237,74 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
-    if backend == "sg":
-        from skeletongraph.engine import SGEngine
-        engine = SGEngine(project_root=repo)            # auto-builds index
-        res = engine.heuristic_query(query, top_n=k)
-        return [c.skeleton.fqn for c in res.candidates]
+
+def _sg_config(backend: str):
+    """Build the SGConfig for an SG arm, flipping off the ablated component."""
+    from skeletongraph.config import SGConfig
+    cfg = SGConfig()
+    if backend == "sg-nograph":
+        # Direct entity matches only — tests whether graph traversal drives gain.
+        cfg.enable_graph_expansion = False
+    elif backend == "sg-norerank":
+        # Same candidates, no hub/centrality reweight — tests PageRank's value.
+        cfg.enable_centrality_rerank = False
+    elif backend == "sg-nosummary":
+        # No tier-2 summary text delivered to the agent — the C2 ablation.
+        cfg.enable_summaries = False
+    return cfg
+
+
+def _retrieve_sg(backend: str, query: str, repo: Path, k: int):
+    """SG retrieval that also returns a tier-2 summary per hit (the C2 path).
+
+    Returns a list of (fqn, summary) pairs. summary is "" for the sg-nosummary
+    ablation; otherwise it is the function's tier-2 summary — the stored
+    LLM/human summary if one exists, else SkeletonGraph's deterministic *local*
+    summary (docstring first line, or name/params/return-type derived). The
+    local tier needs no LLM and is fully reproducible, which matters because the
+    async summary worker never runs inside an isolated eval workspace.
+    """
+    _ensure_sg_on_path()
+    from skeletongraph.engine import SGEngine
+    from skeletongraph.summary.local import build_local_summary
+
+    engine = SGEngine(project_root=repo, config=_sg_config(backend))  # auto-builds
+    res = engine.heuristic_query(query, top_n=k)
+    store = engine.get_store()
+    include = backend != "sg-nosummary"
+
+    out = []
+    for c in res.candidates:
+        sk = c.skeleton
+        summ = ""
+        if include:
+            stored = store.summaries.get(sk.fqn) or ""
+            if stored and not stored.startswith("[pending"):
+                summ = stored
+            else:
+                try:
+                    summ = build_local_summary(sk)
+                except Exception:
+                    summ = ""
+            summ = " ".join(summ.split())[:160]   # collapse to one capped line
+        out.append((sk.fqn, summ))
+    return out
+
+
+def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
+    """Dispatch to the arm's retrieval implementation. Returns ranked FQNs/files.
+
+    SG arms return FQN-only here; the agent-facing summary text is added by
+    ToolExecutor._search via _retrieve_sg. retrieval_eval.py uses this FQN list
+    for recall/precision, so summaries never affect the retrieval metrics.
+    """
+    if backend == "none":
+        return []                       # no-retrieval arm: agent reads files blind
+
+    _ensure_sg_on_path()
+
+    if backend in _SG_BACKENDS:
+        return [fqn for fqn, _ in _retrieve_sg(backend, query, repo, k)]
 
     if backend == "bm25":
         from backends.bm25_flat import retrieve
@@ -233,37 +315,11 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         return retrieve(query, repo, k)
 
     if backend == "hybrid":
-        # strong baseline — implement eval/backends/hybrid.py (BM25+dense+rerank)
-        from backends.hybrid import retrieve            # noqa: validate on box
+        from backends.hybrid import retrieve            # BM25+dense+rerank
         return retrieve(query, repo, k)
 
     if backend == "aider":
-        # strong baseline — implement eval/backends/aider_map.py (repo-map)
-        from backends.aider_map import retrieve          # noqa: validate on box
+        from backends.aider_map import retrieve          # repo-map (PageRank)
         return retrieve(query, repo, k)
-
-    if backend in ("sg-nograph", "sg-norerank", "sg-nosummary"):
-        from skeletongraph.engine import SGEngine
-        from skeletongraph.config import SGConfig
-        cfg = SGConfig()
-        if backend == "sg-nograph":
-            # Disable graph expansion: only direct entity matches returned.
-            # Expects fewer candidates; tests whether graph traversal drives gain.
-            cfg.enable_graph_expansion = False
-        elif backend == "sg-norerank":
-            # Disable hub/centrality signal in ranking.
-            # Same candidates, different order; tests PageRank contribution.
-            cfg.enable_centrality_rerank = False
-        elif backend == "sg-nosummary":
-            # Disable Tier-2 summary text in assembled context.
-            # Note: heuristic_query returns ranked FQNs (not summaries), so
-            # retrieval metrics are identical to sg. The ablation's effect
-            # manifests in full-pipeline (engine.query) where the assembled
-            # context omits summary descriptions. File-level retrieval rank
-            # is unchanged; pass@1 effect requires the assembly path.
-            cfg.enable_summaries = False
-        engine = SGEngine(project_root=repo, config=cfg)
-        res = engine.heuristic_query(query, top_n=k)
-        return [c.skeleton.fqn for c in res.candidates]
 
     raise ValueError(f"unknown backend: {backend}")
