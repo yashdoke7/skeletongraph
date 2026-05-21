@@ -143,15 +143,25 @@ STAGES: Dict[str, Stage] = {
         "Retrieval + consolidation metrics; confirms the smoke precision gap "
         "holds at larger N before committing AMD budget.",
     ),
-    # Local full-arm comparison (7B, then 14B by swapping SG_EVAL_MODEL). All six
-    # retrieval arms × the full 30-task stage0 set = 180 runs. Yields the
-    # retrieval + efficiency + (weak) consolidation picture across every arm.
-    # pass@1 is NOT produced here (needs the SWE-bench Docker harness on Linux/
-    # AMD) — local runs are for retrieval/efficiency + harness validation.
+    # Local full comparison (7B, then 14B by swapping SG_EVAL_MODEL). These five
+    # arms ALL require the sentence-transformers stack (SG embeddings + hybrid
+    # dense), so they share one env. aider-chat hard-pins huggingface-hub==1.4.1
+    # which is incompatible with that stack — it runs separately as `0-aider`
+    # from its own venv. 5 arms × 30 tasks = 150 runs. Retrieval + efficiency +
+    # (weak) consolidation; pass@1 deferred to the SWE-bench Docker run on AMD.
     "0-full": Stage(
-        "0-full", ["sg", "bm25", "grep", "none", "hybrid", "aider"], 30, "swebench",
-        "Local full-arm comparison (7B/14B) — all six retrieval arms × 30 tasks. "
-        "Retrieval + efficiency + consolidation; pass@1 deferred to the AMD run.",
+        "0-full", ["sg", "bm25", "grep", "none", "hybrid"], 30, "swebench",
+        "Local comparison (7B/14B) — SG vs lexical (bm25/grep) vs no-retrieval "
+        "(none) vs dense-RAG (hybrid) × 30 tasks. pass@1 deferred to the AMD run.",
+    ),
+    # aider repo-map baseline — run from an ISOLATED venv (aider-chat's
+    # huggingface-hub==1.4.1 pin conflicts with the sentence-transformers stack).
+    # Writes into the same RUNS_DIR; combine with `aggregate` (no --stage) for the
+    # full 6-arm table. The aider arm needs no sentence-transformers.
+    "0-aider": Stage(
+        "0-aider", ["aider"], 30, "swebench",
+        "Aider repo-map baseline (isolated venv) — merges with 0-full for the "
+        "complete 6-arm comparison.",
     ),
     # Stage 0 is free/CPU and done (eval/run_stage0.py + the IDE smoke).
     "1-core": Stage(
