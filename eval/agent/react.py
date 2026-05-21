@@ -183,7 +183,7 @@ def _parse_text_tool_calls(content: str) -> List[dict]:
 
 
 def run_react(task: dict, arm: str, executor: ToolExecutor,
-              model: str = "qwen-32b") -> Trajectory:
+              model: str = "main") -> Trajectory:
     """Run one task with one arm to completion. Returns the trajectory."""
     client = _client()
     traj = Trajectory(task_id=task["task_id"], arm=arm, model=model)

@@ -30,7 +30,7 @@ def load_tasks(path: Path = config.DATASET) -> list:
             if l.strip()]
 
 
-def run_one(task: dict, arm: str, repeat: int = 0, model: str = "qwen-32b",
+def run_one(task: dict, arm: str, repeat: int = 0, model: str = "main",
             keep_workspace: bool = False) -> dict:
     """Execute one run. Returns a record dict (also written to RUNS_DIR)."""
     rid = run_id(task["task_id"], arm, repeat, model)
@@ -334,7 +334,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--task-id", required=True)
     ap.add_argument("--arm", required=True, choices=list(config.ARMS))
-    ap.add_argument("--model", default="qwen-32b", choices=list(config.MODELS))
+    ap.add_argument("--model", default="main", choices=list(config.MODELS))
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--keep-workspace", action="store_true")
     args = ap.parse_args()

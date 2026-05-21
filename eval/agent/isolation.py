@@ -18,6 +18,12 @@ from pathlib import Path
 
 from .config import WORKSPACE_ROOT
 
+# Resolve git executable once at import time.  On Windows, subprocess.run with
+# a custom env= sometimes cannot resolve bare "git" even though git is on PATH
+# (conda/venv PATH stripping, DLL search path, etc.).  Using the absolute path
+# returned by shutil.which bypasses that lookup entirely.
+_GIT = shutil.which("git") or "git"
+
 # SG state that must NOT survive into a fresh run.
 _SG_ARTIFACTS = [
     ".skeletongraph",
@@ -46,12 +52,12 @@ def _rmtree_safe(path: Path) -> None:
         shutil.rmtree(str(path), onerror=_on_error)
 
 
-def run_id(task_id: str, arm: str, repeat: int = 0, model: str = "qwen-32b") -> str:
+def run_id(task_id: str, arm: str, repeat: int = 0, model: str = "main") -> str:
     return f"{task_id}__{arm}__{model}__r{repeat}"
 
 
 def prepare_workspace(task: dict, arm: str, repeat: int = 0,
-                      model: str = "qwen-32b") -> Path:
+                      model: str = "main") -> Path:
     """Create a clean, isolated workspace for one run. Returns the repo path.
 
     The source repo (eval/datasets/repos/<task_id>) is a git worktree at the
@@ -69,8 +75,16 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
     # Exclude .git: the source repos are git WORKTREES, so their .git is a
     # FILE pointing into a shared cache — copying it leaves a broken pointer.
     # We re-init a clean git repo below so `git diff` still works.
+    #
+    # symlinks=True: preserve symlinks instead of following them.  Some repos
+    # have dangling symlinks (test fixtures that exist only on Linux) that cause
+    # FileNotFoundError on Windows when copytree tries to read the target.
+    # ignore_dangling_symlinks=True: skip un-followable links entirely so a
+    # missing symlink target never aborts the whole copy.
     shutil.copytree(src, repo,
-                    ignore=shutil.ignore_patterns(*_SG_ARTIFACTS, ".git"))
+                    ignore=shutil.ignore_patterns(*_SG_ARTIFACTS, ".git"),
+                    symlinks=True,
+                    ignore_dangling_symlinks=True)
 
     _strip_sg_state(repo)
     _init_clean_git(repo)
@@ -99,11 +113,14 @@ def _init_clean_git(repo: Path) -> None:
     elif git_path.exists():          # git worktree: .git is a FILE, not a dir
         git_path.unlink()
     env = {"GIT_AUTHOR_NAME": "sg-eval", "GIT_AUTHOR_EMAIL": "eval@local",
-           "GIT_COMMITTER_NAME": "sg-eval", "GIT_COMMITTER_EMAIL": "eval@local"}
+           "GIT_COMMITTER_NAME": "sg-eval", "GIT_COMMITTER_EMAIL": "eval@local",
+           # Prevent git from reading system/user .gitconfig — avoids broken
+           # config files or safeDirectory complaints in the subprocess env.
+           "GIT_CONFIG_NOSYSTEM": "1"}
     for cmd in (
-        ["git", "init", "-q"],
-        ["git", "add", "-A"],
-        ["git", "commit", "-q", "-m", "baseline", "--no-verify"],
+        [_GIT, "init", "-q"],
+        [_GIT, "add", "-A"],
+        [_GIT, "commit", "-q", "-m", "baseline", "--no-verify"],
     ):
         subprocess.run(cmd, cwd=repo, check=True, capture_output=True,
                        env={**_os_environ(), **env})
@@ -111,7 +128,7 @@ def _init_clean_git(repo: Path) -> None:
 
 def diff_patch(repo: Path) -> str:
     """The agent's changes as a unified diff against the baseline commit."""
-    r = subprocess.run(["git", "diff", "HEAD"], cwd=repo,
+    r = subprocess.run([_GIT, "diff", "HEAD"], cwd=repo,
                        capture_output=True, text=True)
     return r.stdout
 

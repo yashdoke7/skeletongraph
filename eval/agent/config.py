@@ -123,6 +123,18 @@ class Stage:
 SWEBENCH_N = 150
 
 STAGES: Dict[str, Stage] = {
+    # Pre-AMD assessment — the single most informative cheap run. Answers:
+    # does SG's retrieval edge over lexical (bm25) AND dense-RAG (hybrid) hold
+    # beyond the 5-task smoke? Retrieval/consolidation metrics only — no
+    # verify.py / pass@1 needed (that requires the SWE-bench Docker harness).
+    # Run on whatever model is served via SG_EVAL_MODEL; the "main" label is
+    # cosmetic for the run-id. 3 arms × 15 tasks = 45 runs.
+    "0-assess": Stage(
+        "0-assess", ["sg", "bm25", "hybrid"], 15, "swebench",
+        "Pre-AMD assessment — SG vs lexical-RAG (bm25) vs dense-RAG (hybrid). "
+        "Retrieval + consolidation metrics; confirms the smoke precision gap "
+        "holds at larger N before committing AMD budget.",
+    ),
     # Stage 0 is free/CPU and done (eval/run_stage0.py + the IDE smoke).
     "1-core": Stage(
         "1-core", ["sg", "bm25", "grep", "none"], SWEBENCH_N, "swebench",
