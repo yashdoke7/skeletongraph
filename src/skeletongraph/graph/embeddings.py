@@ -12,6 +12,7 @@ Storage: embeddings.npz (numpy compressed, ~6KB per 100 functions)
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -20,9 +21,16 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Model name — small, fast, good enough for code retrieval
-_MODEL_NAME = "all-MiniLM-L6-v2"
-_EMBEDDING_DIM = 384
+# Model name — configurable so the eval can run a controlled embedder
+# comparison. The shipped default is the small/fast MiniLM (22 MB, 384-dim).
+# Set SG_EMBED_MODEL to a code-specific embedder (e.g.
+# "jinaai/jina-embeddings-v2-base-code") for a stronger, fairer dense baseline.
+# SG and the hybrid eval backend read the SAME env var, so SG never gets an
+# embedder advantage over the dense-RAG baseline. NOTE: changing the model
+# changes the vector dimension, so existing indexes (.skeletongraph /
+# .hybrid_index) must be rebuilt after switching.
+_MODEL_NAME = os.environ.get("SG_EMBED_MODEL", "all-MiniLM-L6-v2")
+_EMBEDDING_DIM = int(os.environ.get("SG_EMBED_DIM", "384"))
 
 # Lazy-loaded model singleton
 _model = None
@@ -35,7 +43,9 @@ def _get_model():
         return _model
     try:
         from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(_MODEL_NAME)
+        # trust_remote_code lets code-specific embedders (jina, nomic, …) load;
+        # harmless for MiniLM.
+        _model = SentenceTransformer(_MODEL_NAME, trust_remote_code=True)
         return _model
     except ImportError:
         logger.debug("sentence-transformers not installed. Embeddings disabled.")

@@ -90,20 +90,33 @@ _CROSS_ENCODER = None     # CrossEncoder (ms-marco-MiniLM-L-6-v2)
 
 
 def _get_embed_model():
-    """Load the dense embedder once and reuse it across all repos."""
+    """Load the dense embedder once and reuse it across all repos.
+
+    Reads SG_EMBED_MODEL — the SAME env var SkeletonGraph uses — so the dense
+    baseline and SG always share an embedder (controlled comparison). Defaults
+    to MiniLM. trust_remote_code allows code-specific embedders to load.
+    """
     global _EMBED_MODEL
     if _EMBED_MODEL is None:
+        import os
         from sentence_transformers import SentenceTransformer
-        _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        name = os.environ.get("SG_EMBED_MODEL", "all-MiniLM-L6-v2")
+        _EMBED_MODEL = SentenceTransformer(name, trust_remote_code=True)
     return _EMBED_MODEL
 
 
 def _get_cross_encoder():
-    """Load the cross-encoder reranker once and reuse it across all calls."""
+    """Load the cross-encoder reranker once and reuse it across all calls.
+
+    Reads SG_RERANK_MODEL (defaults to the standard MS-MARCO MiniLM reranker).
+    """
     global _CROSS_ENCODER
     if _CROSS_ENCODER is None:
+        import os
         from sentence_transformers import CrossEncoder
-        _CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        name = os.environ.get("SG_RERANK_MODEL",
+                              "cross-encoder/ms-marco-MiniLM-L-6-v2")
+        _CROSS_ENCODER = CrossEncoder(name)
     return _CROSS_ENCODER
 
 
