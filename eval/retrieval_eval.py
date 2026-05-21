@@ -106,6 +106,13 @@ def backend_dense(query: str, repo_path: Path, top_n: int) -> List[str]:
     return dense_retrieve(query, repo_path, top_n)
 
 
+def backend_hybrid(query: str, repo_path: Path, top_n: int) -> List[str]:
+    """Strong baseline: BM25 ∪ dense → cross-encoder rerank (the deployed RAG
+    default). Returns file paths. See eval/backends/hybrid.py."""
+    from eval.backends.hybrid import retrieve as hybrid_retrieve
+    return hybrid_retrieve(query, repo_path, top_n)
+
+
 def backend_grep(query: str, repo_path: Path, top_n: int) -> List[str]:
     """Keyword-grep simulation — the naive-agent baseline."""
     from eval.backends.grep_sim import retrieve as grep_retrieve
@@ -116,6 +123,7 @@ BACKENDS: Dict[str, RetrieverFn] = {
     "sg": backend_sg,
     "bm25": backend_bm25,
     "dense": backend_dense,
+    "hybrid": backend_hybrid,
     "grep": backend_grep,
 }
 

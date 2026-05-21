@@ -76,14 +76,16 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
     # FILE pointing into a shared cache — copying it leaves a broken pointer.
     # We re-init a clean git repo below so `git diff` still works.
     #
-    # symlinks=True: preserve symlinks instead of following them.  Some repos
-    # have dangling symlinks (test fixtures that exist only on Linux) that cause
-    # FileNotFoundError on Windows when copytree tries to read the target.
-    # ignore_dangling_symlinks=True: skip un-followable links entirely so a
-    # missing symlink target never aborts the whole copy.
+    # symlinks=False (default): follow symlinks and copy the actual content.
+    # This avoids creating Windows symlinks in the workspace, which would
+    # require Developer Mode and cause `git add -A` to fail (exit 128).
+    # ignore_dangling_symlinks=True: silently skip symlinks whose target does
+    # not exist (common in Linux-native repos for test fixtures).  Without
+    # this, copytree raises FileNotFoundError: [WinError 2] for every dangling
+    # link it encounters — which was the original failure mode.
     shutil.copytree(src, repo,
                     ignore=shutil.ignore_patterns(*_SG_ARTIFACTS, ".git"),
-                    symlinks=True,
+                    symlinks=False,
                     ignore_dangling_symlinks=True)
 
     _strip_sg_state(repo)

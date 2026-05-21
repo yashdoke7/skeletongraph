@@ -79,6 +79,34 @@ class _BM25:
         return [i for _, i in scores[:k]]
 
 
+# ── model singletons ────────────────────────────────────────────────────────
+# The embedder and cross-encoder are process-wide: loading them is expensive
+# and they carry no per-repo state.  Without this, every task (= every repo)
+# re-instantiates both models — the repeated "Loading weights" bars — which is
+# pure waste in a 30-task eval loop.
+
+_EMBED_MODEL = None       # SentenceTransformer (all-MiniLM-L6-v2)
+_CROSS_ENCODER = None     # CrossEncoder (ms-marco-MiniLM-L-6-v2)
+
+
+def _get_embed_model():
+    """Load the dense embedder once and reuse it across all repos."""
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        from sentence_transformers import SentenceTransformer
+        _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+    return _EMBED_MODEL
+
+
+def _get_cross_encoder():
+    """Load the cross-encoder reranker once and reuse it across all calls."""
+    global _CROSS_ENCODER
+    if _CROSS_ENCODER is None:
+        from sentence_transformers import CrossEncoder
+        _CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    return _CROSS_ENCODER
+
+
 # ── per-repo index ─────────────────────────────────────────────────────────────
 
 class _HybridIndex:
@@ -119,7 +147,6 @@ class _HybridIndex:
     def _build_and_save(self) -> None:
         """Build the index from scratch and persist to disk."""
         import numpy as np
-        from sentence_transformers import SentenceTransformer
 
         self._file_paths, self._file_texts = _collect_file_texts(self.repo)
         if not self._file_paths:
@@ -128,8 +155,8 @@ class _HybridIndex:
         # BM25
         self._bm25 = _BM25([_tokenize(t) for t in self._file_texts])
 
-        # Dense embeddings
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Dense embeddings (shared model singleton)
+        model = _get_embed_model()
         embeddings = model.encode(
             self._file_texts,
             batch_size=32,
@@ -153,7 +180,6 @@ class _HybridIndex:
     def _load_from_disk(self) -> None:
         """Restore a previously built index from disk."""
         import numpy as np
-        from sentence_transformers import SentenceTransformer
 
         self._file_paths = json.loads(
             (self._idx_dir / self.FILES_JSON).read_text(encoding="utf-8")
@@ -164,7 +190,7 @@ class _HybridIndex:
         # Re-collect texts for BM25 (not persisted — cheap to recompute)
         _, self._file_texts = _collect_file_texts(self.repo)
         self._bm25 = _BM25([_tokenize(t) for t in self._file_texts])
-        self._embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+        self._embed_model = _get_embed_model()
 
     # ── search ────────────────────────────────────────────────────────────────
 
@@ -193,8 +219,7 @@ class _HybridIndex:
         if not candidates:
             return []
         try:
-            from sentence_transformers import CrossEncoder
-            ce = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            ce = _get_cross_encoder()       # shared singleton, loaded once
         except Exception:
             # Cross-encoder unavailable → keep dense/BM25 union order
             return candidates[:top_k]
