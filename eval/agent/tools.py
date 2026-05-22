@@ -225,7 +225,7 @@ class ToolExecutor:
 
 # Every SkeletonGraph variant (full + ablations). These route through the
 # summary-aware path so the agent receives tier-2 previews (the C2 mechanism).
-_SG_BACKENDS = {"sg", "sg-nograph", "sg-norerank", "sg-nosummary"}
+_SG_BACKENDS = {"sg", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"}
 
 
 def _ensure_sg_on_path() -> None:
@@ -251,6 +251,10 @@ def _sg_config(backend: str):
     elif backend == "sg-nosummary":
         # No tier-2 summary text delivered to the agent — the C2 ablation.
         cfg.enable_summaries = False
+    elif backend == "sg-noembed":
+        # No semantic embeddings (lexical + graph only) — the embedding part of
+        # the C3 ablation.
+        cfg.enable_embeddings = False
     return cfg
 
 
@@ -320,6 +324,10 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
 
     if backend == "aider":
         from backends.aider_map import retrieve          # repo-map (PageRank)
+        return retrieve(query, repo, k)
+
+    if backend == "cbmem":
+        from backends.cbmem import retrieve              # Codebase-Memory CLI
         return retrieve(query, repo, k)
 
     raise ValueError(f"unknown backend: {backend}")

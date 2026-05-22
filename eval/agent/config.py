@@ -99,12 +99,21 @@ ARMS: Dict[str, Arm] = {
     "none":   Arm("none",   "none",   "No retrieval (long-context)"),
     "hybrid": Arm("hybrid", "hybrid", "Hybrid RAG (BM25+dense+rerank)", strong=True),
     "aider":  Arm("aider",  "aider",  "Aider repo-map", strong=True),
+    "cbmem":  Arm("cbmem",  "cbmem",  "Codebase-Memory (MCP graph)", strong=True),
     # SG ablations — same SG retrieval with one component disabled. The backend
     # toggle is not yet wired (tools._retrieve raises NotImplementedError); do
     # that before running stage 2-ablation.
     "sg-nograph":   Arm("sg-nograph",   "sg-nograph",   "SG (no graph expansion)"),
     "sg-norerank":  Arm("sg-norerank",  "sg-norerank",  "SG (no centrality rerank)"),
     "sg-nosummary": Arm("sg-nosummary", "sg-nosummary", "SG (no summaries)"),
+    "sg-noembed":   Arm("sg-noembed",   "sg-noembed",   "SG (no embeddings)"),
+    # Single-shot SG (no agent loop): retrieve once → one generation → patch.
+    # This is the "is the agent worth it" measure (agent vs no-agent) — which is
+    # also where SG's internal query routing would matter, since with no agent
+    # there is nothing else doing the adaptive handling. Run via
+    # run_singleshot.py, not run_stage; recorded as this arm so it lands in the
+    # same aggregate/plots tables next to `sg`.
+    "sg-noagent":   Arm("sg-noagent",   "sg",           "SG single-shot (no agent)"),
 }
 
 
@@ -162,6 +171,26 @@ STAGES: Dict[str, Stage] = {
         "0-aider", ["aider"], 30, "swebench",
         "Aider repo-map baseline (isolated venv) — merges with 0-full for the "
         "complete 6-arm comparison.",
+    ),
+    # SG component ablations — isolate which part of SG carries the gain. Run on
+    # the SAME 30 tasks; compare against the `sg` arm from 0-full. sg-nosummary
+    # is the C2 ablation (search results drop the tier-2 summaries); sg-nograph
+    # / sg-norerank toggle graph expansion / centrality rerank.
+    "0-ablation": Stage(
+        "0-ablation",
+        ["sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
+        30, "swebench",
+        "SG ablations (local) — graph / centrality / summary / embeddings "
+        "contributions, vs the full `sg` arm. (Agent-vs-no-agent is measured "
+        "separately by the sg-noagent single-shot runner.)",
+    ),
+    # Codebase-Memory MCP baseline — the closest published competitor. Wrapped
+    # via its CLI binary (subprocess), so no Python-env conflict; runs from the
+    # main env. Merges with the others via `aggregate` (no --stage).
+    "0-cbmem": Stage(
+        "0-cbmem", ["cbmem"], 30, "swebench",
+        "Codebase-Memory (MCP graph) baseline — needs the binary on PATH "
+        "(CBMEM_BIN). Closest published competitor to SG.",
     ),
     # Stage 0 is free/CPU and done (eval/run_stage0.py + the IDE smoke).
     "1-core": Stage(
