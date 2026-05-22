@@ -353,7 +353,7 @@ def build_index(
 
         store.embeddings = EmbeddingStore()
         if on_progress:
-            on_progress(f"Embedding {len(emb_entries)} functions...")
+            on_progress(f"Embedding {len(emb_entries)} functions...", 0, 0)
         store.embeddings.build(emb_entries)
     else:
         store.embeddings = EmbeddingStore()
