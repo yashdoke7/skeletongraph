@@ -34,7 +34,9 @@ SG MCP tools are available. Use them every session:
 - `sg_get`        — exact FQN metadata when you already know the target.
 - `sg_expand`     — exact follow-up only. Expand a specific FQN when you are
                     about to edit it and the body was not already returned.
-                    Do not read MCP `content.txt` result files.
+                    sg_search results are complete inline (exact source + file:line
+                    range) — edit from them; do NOT re-grep/re-read returned code,
+                    and ignore any `content.txt` spill (it duplicates the result).
 - `sg_constraint` — view/propose project constraints
 - `sg_log`        — recent session log entries
 """

@@ -38,7 +38,9 @@ SG is active. Follow these rules:
    or the target is absent.
 3. Use `sg_get` / `sg_expand` only for exact follow-up. Expand a specific FQN
    only when you are about to edit it and the body was not already in `sg_search`.
-   Do not read MCP `content.txt` result files.
+   `sg_search` results are complete and self-contained (each body is exact current
+   source with its file:line range) — edit directly from them; do NOT re-grep or
+   re-read code `sg_search` already returned, and ignore any `content.txt` spill.
 4. Check `sg_constraint` before proposing architectural changes.
 5. Use `sg_log` to review recent session history.
 

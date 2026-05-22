@@ -38,7 +38,10 @@ _USE_SG_REMINDER = (
     "Call sg_overview at session start for the project briefing. "
     "Use sg_search as a task-context assembler, not grep: ask for the whole task once; "
     "it returns likely edit targets, helpers, graph neighbors, and likely tests. "
-    "Use sg_get/sg_expand only for exact follow-up FQNs, and do not read MCP content.txt result files. "
+    "Its results are complete and self-contained — each body is the exact current "
+    "source with its file:line range, so edit directly from them and do NOT re-grep "
+    "or re-read code that sg_search already returned. "
+    "Use sg_get/sg_expand only for exact follow-up FQNs. "
     "Call sg_constraint to see project rules before proposing changes."
 )
 
@@ -508,7 +511,11 @@ class MCPServer:
         top_n = min(max(int(args.get("top_n", 10)), 1), 20)
         requested_expand_top = min(max(int(args.get("expand_top", 3)), 1), 7)
         file_filter = str(args.get("file_filter", "")).strip()
-        max_tokens = min(max(int(args.get("max_tokens", 5000)), 1000), 12000)
+        # Default kept modest: large bodies make some IDE clients spill the
+        # result into a separate content.txt resource (which the agent is told
+        # not to read), so it falls back to native grep/read. A tighter budget
+        # keeps the result inline and self-sufficient.
+        max_tokens = min(max(int(args.get("max_tokens", 3000)), 1000), 12000)
         intent_arg = str(args.get("intent", "")).strip() or None
 
         if not query:
@@ -675,10 +682,12 @@ class MCPServer:
             return (f"No results for {query!r}. Try different keywords, "
                     f"or sg_overview to see what's indexed.")
 
-        lines.append("_Use the target bodies above. Search again only if the "
-                     "target is absent or confidence is LOW/MISS; expand only "
-                     "the exact function you are about to edit. Do not read MCP "
-                     "content.txt artifacts; they duplicate this result._")
+        lines.append("_This result is complete and self-contained: each body "
+                     "above is the exact current source, and its header gives the "
+                     "file:line range — edit directly from it. Do NOT re-fetch the "
+                     "same code with grep/read_file (and ignore any content.txt "
+                     "spill — it is a duplicate of this result). Search again only "
+                     "if a needed target is absent or confidence is LOW/MISS._")
         return "\n".join(lines)
 
     def _render_quick_map(self, query: str, candidates: List, store) -> str:

@@ -35,7 +35,10 @@ _USE_SG_SYSTEM_MSG = (
     "ALWAYS call sg_overview at session start for the project briefing. "
     "Use sg_search as a task-context assembler, not grep: ask for the whole task once; "
     "it returns likely edit targets, helpers, graph neighbors, and likely tests. "
-    "Use sg_get/sg_expand only for exact follow-up FQNs, and do not read MCP content.txt result files. "
+    "Its results are complete and self-contained — each body is the exact current "
+    "source with its file:line range, so edit directly from them and do NOT re-grep "
+    "or re-read code sg_search already returned. "
+    "Use sg_get/sg_expand only for exact follow-up FQNs. "
     "sg_constraint to view project rules before proposing changes. "
     "MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log."
 )
