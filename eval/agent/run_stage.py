@@ -23,10 +23,20 @@ from .isolation import run_id
 from .run_agent import load_tasks, run_one
 
 
-def _stage_jobs(stage: config.Stage, probe: bool) -> list:
-    """Expand a stage into a flat list of (task, arm, model, repeat) jobs."""
+def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0) -> list:
+    """Expand a stage into a flat list of (task, arm, model, repeat) jobs.
+
+    probe → first 5 tasks; limit>0 → first N tasks (overrides probe); else the
+    stage's n_tasks. Tasks are deterministic (dataset order) so a 10-task 14B
+    run hits the SAME first 10 tasks as the 7B run for a clean comparison.
+    """
     tasks = load_tasks()
-    n = 5 if probe else stage.n_tasks
+    if limit and limit > 0:
+        n = limit
+    elif probe:
+        n = 5
+    else:
+        n = stage.n_tasks
     tasks = tasks[:n]
     jobs = []
     for model in stage.models:
@@ -55,7 +65,7 @@ def _already_done(task: dict, arm: str, model: str, repeat: int) -> bool:
 
 
 def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
-              force: bool = False) -> None:
+              force: bool = False, limit: int = 0) -> None:
     if stage_name not in config.STAGES:
         raise SystemExit(f"unknown stage {stage_name}; "
                          f"choose from {list(config.STAGES)}")
@@ -65,7 +75,7 @@ def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
               f"This harness currently drives SWE-bench. Wire the {stage.benchmark} "
               f"loader before running it (see STAGES.md).")
 
-    jobs = _stage_jobs(stage, probe)
+    jobs = _stage_jobs(stage, probe, limit)
     if not force:
         jobs = [j for j in jobs if not _already_done(j[0], j[1], j[2], j[3])]
 
@@ -107,8 +117,10 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--probe", action="store_true", help="5-task timing probe")
     ap.add_argument("--force", action="store_true", help="re-run completed jobs")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="run only the first N tasks (e.g. 10 for a quick 14B/NIM read)")
     args = ap.parse_args()
-    run_stage(args.stage, args.workers, args.probe, args.force)
+    run_stage(args.stage, args.workers, args.probe, args.force, args.limit)
 
 
 if __name__ == "__main__":
