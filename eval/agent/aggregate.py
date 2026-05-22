@@ -136,7 +136,9 @@ def aggregate(stage: str | None) -> None:
 
     # ── data integrity — SG runs that silently lost their embedding index ───
     lines += ["", "## Data integrity", ""]
-    sg_runs = [r for a, rs in by_arm.items() if a.startswith("sg") for r in rs]
+    # sg-noembed runs WITHOUT embeddings on purpose — don't flag it as degraded.
+    sg_runs = [r for a, rs in by_arm.items()
+               if a.startswith("sg") and a != "sg-noembed" for r in rs]
     degraded = [r for r in sg_runs if r.get("embeddings_used") is False]
     if degraded:
         lines.append(f"**WARNING — {len(degraded)}/{len(sg_runs)} SG run(s) ran "
