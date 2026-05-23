@@ -207,11 +207,17 @@ def main() -> None:
 
     print(f"Single-shot SG (no agent) — {len(tasks)} task(s)")
     for i, t in enumerate(tasks, 1):
-        rec = run_one(t, keep_workspace=args.keep_workspace)
-        print(f"  [{i}/{len(tasks)}] {rec['run_id']}: {rec['stopped']} "
-              f"hit={rec['retrieval_hit']} edited_gold={rec['edited_gold_file']} "
-              f"edits={rec['edits_successful']}/{rec['edits_attempted']} "
-              f"cost=${rec['imputed_cost']}")
+        # One bad task (e.g. a workspace/git failure) must not abort the whole
+        # run — log it and continue, like run_stage does.
+        try:
+            rec = run_one(t, keep_workspace=args.keep_workspace)
+            print(f"  [{i}/{len(tasks)}] {rec['run_id']}: {rec['stopped']} "
+                  f"hit={rec['retrieval_hit']} edited_gold={rec['edited_gold_file']} "
+                  f"edits={rec['edits_successful']}/{rec['edits_attempted']} "
+                  f"cost=${rec['imputed_cost']}")
+        except Exception as e:
+            print(f"  [{i}/{len(tasks)}] {t['task_id']} FAILED: "
+                  f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

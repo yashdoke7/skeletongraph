@@ -31,6 +31,7 @@ _SG_ARTIFACTS = [
     ".claude",
     "summary_queue.jsonl",
     "summary_drain.lock",
+    "SG_EVAL_RUNBOOK.md",   # per-repo IDE prompt sheet — must not leak into eval
 ]
 
 
@@ -121,11 +122,22 @@ def _init_clean_git(repo: Path) -> None:
            "GIT_CONFIG_NOSYSTEM": "1"}
     for cmd in (
         [_GIT, "init", "-q"],
+        # core.longpaths: Windows `git add` fails with exit 128 on paths >260
+        # chars (deeply-nested test fixtures) unless long paths are enabled.
+        # core.autocrlf=false: never rewrite line endings (keeps the baseline
+        # byte-identical so `git diff` only shows the agent's real edits).
+        [_GIT, "config", "core.longpaths", "true"],
+        [_GIT, "config", "core.autocrlf", "false"],
         [_GIT, "add", "-A"],
         [_GIT, "commit", "-q", "-m", "baseline", "--no-verify"],
     ):
-        subprocess.run(cmd, cwd=repo, check=True, capture_output=True,
-                       env={**_os_environ(), **env})
+        r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True,
+                           env={**_os_environ(), **env})
+        if r.returncode != 0:
+            # Surface git's real message (CalledProcessError hides stderr).
+            raise RuntimeError(
+                f"git {' '.join(str(c) for c in cmd[1:])} failed (exit "
+                f"{r.returncode}) in {repo}: {(r.stderr or r.stdout).strip()[:300]}")
 
 
 def diff_patch(repo: Path) -> str:
