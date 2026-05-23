@@ -26,6 +26,7 @@ AGENT_RULES.md
 CLAUDE.md
 CURSOR_SETUP.md
 GEMINI_DIAGRAM_PROMPT.md
+CURATOR.md
 
 # SkeletonGraph index (generated, not committed)
 .skeletongraph/
@@ -78,3 +79,8 @@ constraints
 
 # Scratch eval runbooks — working docs, not part of the package
 temp/
+
+.venv-aider/
+eval/results/agent_*/
+**/.hybrid_index/
+**/.skeletongraph/

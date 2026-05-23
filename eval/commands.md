@@ -228,6 +228,37 @@ This is the only honest source of pass@1 — defer to the AMD box.
 
 ---
 
+## 9b. AMD staged plan (1a/1b parallel → 2 → 3)
+
+Stage 1 = 1a + 1b run **in parallel** (MI300X 192 GB → many isolated tasks at
+once). Full isolation, no index cache; parallelism absorbs the build cost.
+```bash
+export SG_EVAL_API_BASE=http://localhost:8000/v1
+export SG_EVAL_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct
+export SG_EMBED_MODEL=jinaai/jina-embeddings-v2-base-code   # strong embedder
+
+# Stage 1 (parallel): workshop + conference arms + single-shot
+python -m eval.agent.run_stage --stage 1a-workshop   --workers 24 &
+python -m eval.agent.run_stage --stage 1b-conference --workers 24 &
+python -m eval.agent.run_singleshot --all &           # sg-noagent
+wait
+python -m eval.agent.verify --stage 1a-workshop       # pass@1 (Docker)
+python -m eval.agent.verify --stage 1b-conference
+python -m eval.agent.aggregate ; python -m eval.agent.plots
+
+# Stage 2: graph competitor + ContextBench (2nd benchmark)
+python -m eval.agent.run_stage --stage 2-competitor --workers 24      # cbmem/CodeCompass
+python -m eval.agent.run_stage --stage 1a-workshop  --workers 24 \
+    --dataset eval/datasets/contextbench.jsonl
+python -m eval.agent.verify --stage 2-competitor ; python -m eval.agent.aggregate
+
+# Stage 3 (only if 1-2 justify): variance + learned curator + 2nd language
+python -m eval.agent.run_stage --stage 3-further --workers 24         # 3x repeats
+# learned curator: train first (docs/CURATOR.md), then sg-learned is live
+```
+Measure the first 5 tasks' wall time to lock the per-stage budget (~20-35 GPU-hrs
+for the full plan; $100 = ~50 hrs).
+
 ## 10. AMD final (32B coder, the headline)
 
 Clean dedicated venv (avoid the shared-env dependency hell):
