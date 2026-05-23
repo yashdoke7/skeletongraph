@@ -50,6 +50,14 @@ def _bin() -> str:
     """Locate the codebase-memory-mcp binary (env override wins)."""
     env = os.environ.get("CBMEM_BIN")
     if env:
+        if not Path(env).is_file():
+            raise RuntimeError(
+                f"CBMEM_BIN points to a non-existent file: {env}\n"
+                f"You currently have the SOURCE, not a binary. Either download "
+                f"the Windows release .exe from "
+                f"github.com/DeusData/codebase-memory-mcp/releases, or build it "
+                f"with Go, then set CBMEM_BIN to the real .exe."
+            )
         return env
     found = shutil.which("codebase-memory-mcp")
     if found:
@@ -74,9 +82,12 @@ def _ensure_indexed(bin_path: str, repo: Path) -> None:
     """Index the repo. The binary auto-indexes on first query in many setups;
     we also try an explicit index verb (best-effort, never fatal)."""
     # NEEDS-VALIDATION: confirm the real index verb (`index` vs `scan` vs none).
+    # Capped at 120s so a wrong/hanging CLI fails fast instead of blocking the
+    # whole run for 10 min per repo (cbmem claims ms-level indexing — a long
+    # hang means the invocation is wrong; run `--selftest` to diagnose).
     index_cmd = os.environ.get("CBMEM_INDEX_CMD", "index")
     if index_cmd:
-        _run(bin_path, [index_cmd, "."], repo, timeout=600)
+        _run(bin_path, [index_cmd, "."], repo, timeout=120)
 
 
 def _query_terms(query: str, limit: int = 8) -> List[str]:

@@ -82,7 +82,8 @@ def _as_file_list(val: Any) -> List[str]:
     return []
 
 
-def _load_contextbench(split: str, source: Optional[str], lang: Optional[str]) -> List[dict]:
+def _load_contextbench(split: str, source: Optional[str], lang: Optional[str],
+                       data_files: Optional[str] = None) -> List[dict]:
     if source:
         # local jsonl/json file
         p = Path(source)
@@ -98,22 +99,36 @@ def _load_contextbench(split: str, source: Optional[str], lang: Optional[str]) -
         except ImportError:
             print("ERROR: pip install datasets  (or pass --source <local file>)")
             sys.exit(1)
-        ds = load_dataset(split)
-        # pick the first available split
-        split_name = "test" if "test" in ds else list(ds.keys())[0]
+        # Load ONE parquet file by default: the multi-file dataset has
+        # inconsistent column types across files (e.g. `version` is float in
+        # one, the string 'gcc' in another), so auto-merging all of them throws
+        # an Arrow schema cast error. A single file has a consistent schema.
+        if data_files:
+            ds = load_dataset(split, data_files=data_files)
+        else:
+            ds = load_dataset(split)
+        split_name = "train" if "train" in ds else list(ds.keys())[0]
         rows = [dict(x) for x in ds[split_name]]
-    if lang:
+    if lang and rows and any(("language" in r or "lang" in r) for r in rows):
         rows = [r for r in rows
                 if str(r.get("language", r.get("lang", ""))).lower() == lang.lower()]
+    elif lang:
+        print(f"  (no language field in this dataset — ignoring --lang {lang})")
     return rows
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="ContextBench → stage jsonl")
-    ap.add_argument("--split", default="EuniAI/ContextBench",
-                    help="HF dataset id (verify the exact id on the repo page)")
+    ap.add_argument("--split", default="jiayuanz3/SWEContextBench",
+                    help="HF dataset id. Default jiayuanz3/SWEContextBench "
+                         "(SWE-format, gold derived from patch). For the "
+                         "human-annotated EuniAI set try Contextbench/Tracebench "
+                         "+ --inspect to map its gold-context fields.")
     ap.add_argument("--source", default=None,
                     help="local ContextBench json/jsonl instead of HF")
+    ap.add_argument("--data-files", default="data/SWEContextBench_Experience.parquet",
+                    help="single parquet to load (avoids cross-file schema "
+                         "clashes). Set '' to merge all files.")
     ap.add_argument("--n", type=int, default=60)
     ap.add_argument("--lang", default="python", help="filter to one language")
     ap.add_argument("--out", type=Path, default=OUT_PATH)
@@ -125,7 +140,8 @@ def main() -> None:
                         help=f"override the source field used for {f}")
     args = ap.parse_args()
 
-    rows = _load_contextbench(args.split, args.source, args.lang)
+    rows = _load_contextbench(args.split, args.source, args.lang,
+                              args.data_files or None)
     if not rows:
         raise SystemExit("no ContextBench records loaded")
 
@@ -165,8 +181,17 @@ def main() -> None:
         gold_fqns = _as_file_list(_first(r, fields["gold_fqns"]))
         if not gold_files and gold_fqns:
             gold_files = [g.split("::")[0] for g in gold_fqns]
+        # Fallback: SWE-bench-format datasets (e.g. SWEContextBench) have no
+        # explicit gold-context field — derive gold files/fqns from the gold
+        # patch, exactly like make_dataset.py does for stage0 (consistent method).
         if not gold_files:
-            print(f"  [{i}/{len(picked)}] {tid}: skip — no gold context")
+            patch = _first(r, ["patch", "gold_patch", "golden_patch"])
+            if patch:
+                from make_dataset import parse_patch
+                gold_files, patch_fqns = parse_patch(str(patch))
+                gold_fqns = gold_fqns or patch_fqns
+        if not gold_files:
+            print(f"  [{i}/{len(picked)}] {tid}: skip — no gold context / patch")
             continue
         print(f"[{i}/{len(picked)}] {tid}  ({repo})")
         repo_path = setup_repo(repo, commit, str(tid))
