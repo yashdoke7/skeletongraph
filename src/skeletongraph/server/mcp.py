@@ -322,6 +322,34 @@ class MCPServer:
         # Session-level dedup: FQNs whose full bodies were already returned this
         # session (model's context window already has them — no value in re-sending).
         self._returned_fqns: set = set()
+        # Session-level dedup for line-range expands: file_path -> [(start, end)]
+        # already returned (by sg_search bodies or earlier sg_expand ranges). Stops
+        # the agent paging through a file with overlapping sg_expand calls.
+        self._returned_ranges: dict = {}
+
+    # ── range-dedup helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _norm_path(p: str) -> str:
+        return str(p or "").replace("\\", "/").strip()
+
+    def _record_range(self, file_path: str, start, end) -> None:
+        if not file_path or start is None or end is None:
+            return
+        key = self._norm_path(file_path)
+        self._returned_ranges.setdefault(key, []).append((int(start), int(end)))
+
+    def _range_already_covered(self, file_path: str, start: int, end: int,
+                              thresh: float = 0.8):
+        """Return a covering (s, e) if >= thresh of [start, end] was already
+        returned this session, else None."""
+        key = self._norm_path(file_path)
+        req_len = max(1, end - start + 1)
+        for s, e in self._returned_ranges.get(key, []):
+            overlap = max(0, min(end, e) - max(start, s) + 1)
+            if overlap / req_len >= thresh:
+                return (s, e)
+        return None
 
     # ── JSON-RPC dispatch ────────────────────────────────────────────────
 
@@ -593,6 +621,7 @@ class MCPServer:
                         lines += ["", "```", body, "```"]
                         used_chars += len(body)
                         self._returned_fqns.add(sk.fqn)
+                        self._record_range(sk.file_path, sk.line_start, sk.line_end)
                 elif not include_body:
                     lines.append("   [body skipped: metadata match, not a likely edit target]")
 
@@ -1603,15 +1632,37 @@ class MCPServer:
                 start_line, end_line = (int(p.strip()) for p in range_part.split("-", 1))
                 target = parts_colon[0]
 
+        # Range dedup: if most of this line range was already returned this
+        # session (by an sg_search body or an earlier sg_expand), don't re-fetch
+        # it — that overlapping-range paging is the main source of wasted tokens.
+        if start_line is not None and end_line is not None:
+            covered = self._range_already_covered(target, start_line, end_line)
+            if covered:
+                return (
+                    f"Note: lines {start_line}-{end_line} of `{target}` overlap "
+                    f"code already returned this session "
+                    f"(`{target}:{covered[0]}-{covered[1]}`) — it is already in "
+                    f"your context. Reuse it instead of re-reading. Request a "
+                    f"non-overlapping range only if you need genuinely new lines."
+                )
+
         result = self._engine.expand(
             target=target,
             start_line=start_line,
             end_line=end_line,
             max_tokens=max_tokens,
         )
-        # Track FQN-based expands so later sg_search/sg_expand calls can dedup.
+        # Track what was returned so later sg_search/sg_expand calls can dedup.
+        if start_line is not None and end_line is not None:
+            self._record_range(target, start_line, end_line)
         if "::" in target:
             self._returned_fqns.add(target)
+            try:                                  # also record the FQN's line span
+                sk = self._engine.get_store().skeleton_table.get(target)
+                if sk:
+                    self._record_range(sk.file_path, sk.line_start, sk.line_end)
+            except Exception:
+                pass
         return result
 
     # ── Tool: sg_constraint ──────────────────────────────────────────────
