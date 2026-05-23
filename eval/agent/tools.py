@@ -225,7 +225,8 @@ class ToolExecutor:
 
 # Every SkeletonGraph variant (full + ablations). These route through the
 # summary-aware path so the agent receives tier-2 previews (the C2 mechanism).
-_SG_BACKENDS = {"sg", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"}
+_SG_BACKENDS = {"sg", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed",
+                "sg-learned"}
 
 
 def _ensure_sg_on_path() -> None:
@@ -273,7 +274,16 @@ def _retrieve_sg(backend: str, query: str, repo: Path, k: int):
     from skeletongraph.summary.local import build_local_summary
 
     engine = SGEngine(project_root=repo, config=_sg_config(backend))  # auto-builds
-    res = engine.heuristic_query(query, top_n=k)
+    # sg-learned: a trained classifier picks the retrieval mode for this query
+    # (the learned curator), passed via mode_hint. Same index, only mode changes.
+    mode_hint = None
+    if backend == "sg-learned":
+        try:
+            from curator.curator import predict_mode   # eval/ is on sys.path
+            mode_hint = predict_mode(query)
+        except Exception:
+            mode_hint = None                            # no model → rule-based
+    res = engine.heuristic_query(query, top_n=k, mode_hint=mode_hint)
     store = engine.get_store()
     include = backend != "sg-nosummary"
 

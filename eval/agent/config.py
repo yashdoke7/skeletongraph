@@ -100,13 +100,16 @@ ARMS: Dict[str, Arm] = {
     "hybrid": Arm("hybrid", "hybrid", "Hybrid RAG (BM25+dense+rerank)", strong=True),
     "aider":  Arm("aider",  "aider",  "Aider repo-map", strong=True),
     "cbmem":  Arm("cbmem",  "cbmem",  "Codebase-Memory (MCP graph)", strong=True),
-    # SG ablations — same SG retrieval with one component disabled. The backend
-    # toggle is not yet wired (tools._retrieve raises NotImplementedError); do
-    # that before running stage 2-ablation.
+    # SG ablations — same SG retrieval with exactly one component disabled
+    # (wired in tools._sg_config). Each isolates a contribution.
     "sg-nograph":   Arm("sg-nograph",   "sg-nograph",   "SG (no graph expansion)"),
     "sg-norerank":  Arm("sg-norerank",  "sg-norerank",  "SG (no centrality rerank)"),
     "sg-nosummary": Arm("sg-nosummary", "sg-nosummary", "SG (no summaries)"),
     "sg-noembed":   Arm("sg-noembed",   "sg-noembed",   "SG (no embeddings)"),
+    # Learned curator (see docs/CURATOR.md): a trained classifier predicts the
+    # retrieval mode per query instead of the rule-based router. Same SG index;
+    # only the mode selection changes (passed via heuristic_query mode_hint).
+    "sg-learned":   Arm("sg-learned",   "sg-learned",   "SG (learned curator)"),
     # Single-shot SG (no agent loop): retrieve once → one generation → patch.
     # This is the "is the agent worth it" measure (agent vs no-agent) — which is
     # also where SG's internal query routing would matter, since with no agent
@@ -192,37 +195,36 @@ STAGES: Dict[str, Stage] = {
         "Codebase-Memory (MCP graph) baseline — needs the binary on PATH "
         "(CBMEM_BIN). Closest published competitor to SG.",
     ),
-    # Stage 0 is free/CPU and done (eval/run_stage0.py + the IDE smoke).
-    "1-core": Stage(
-        "1-core", ["sg", "bm25", "grep", "none"], SWEBENCH_N, "swebench",
-        "WORKSHOP tier — controlled agentic result vs floor baselines. "
-        "Yields Axes 1/2/3/5.",
+    # ── AMD staged plan (the real spend) ────────────────────────────────────
+    # Stage 1 = 1a + 1b, run in PARALLEL on the MI300X (192 GB → many isolated
+    # tasks concurrently; --workers 16-32). pass@1 via verify.py (Docker) after.
+    # Full rationale, budget, and decisions: docs/PLAN.md.  Stage 0 (local
+    # 7B/14B) is done; it gives the retrieval/efficiency baseline without pass@1.
+    "1a-workshop": Stage(
+        "1a-workshop", ["sg", "bm25", "grep", "none", "hybrid"], SWEBENCH_N,
+        "swebench",
+        "STAGE 1a (WORKSHOP) — SG vs floors (bm25/grep/none) + dense-RAG "
+        "(hybrid). pass@1 + retrieval + efficiency. The defensible workshop core.",
     ),
-    "2-strong": Stage(
-        "2-strong", ["sg", "hybrid", "aider"], SWEBENCH_N, "swebench",
-        "CONFERENCE tier (a) — vs strong deployed baselines "
-        "(hybrid RAG, Aider repo-map).",
-    ),
-    "2-ablation": Stage(
-        "2-ablation", ["sg-nograph", "sg-norerank", "sg-nosummary"],
+    "1b-conference": Stage(
+        "1b-conference",
+        ["aider", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
         SWEBENCH_N, "swebench",
-        "CONFERENCE tier (b) — which SG component carries the gain. "
-        "Ablation backends need wiring (see tools._retrieve).",
+        "STAGE 1b (CONFERENCE) — strong repo-map baseline (aider) + SG component "
+        "ablations (C2 summaries; C3 graph/rerank/embed). Run in PARALLEL with "
+        "1a. Agent-vs-no-agent (sg-noagent) is run via run_singleshot.",
     ),
-    "2-variance": Stage(
-        "2-variance", ["sg", "bm25", "hybrid"], 60, "swebench",
-        "CONFERENCE tier (c) — 3x repeats on a subset → mean±std + McNemar/CIs.",
+    "2-competitor": Stage(
+        "2-competitor", ["cbmem"], SWEBENCH_N, "swebench",
+        "STAGE 2 — closest published graph competitor (cbmem / CodeCompass). "
+        "Plus ContextBench: re-run 1a arms with "
+        "--dataset eval/datasets/contextbench.jsonl (2nd benchmark).",
+    ),
+    "3-further": Stage(
+        "3-further", ["sg", "bm25", "hybrid", "sg-learned"], 60, "swebench",
+        "STAGE 3 (FURTHER / TOP-TIER) — 3x variance (mean±std + McNemar/CIs), "
+        "the learned curator (sg-learned, see docs/CURATOR.md), and a 2nd "
+        "language. Spend only if 1-2 warrant the push.",
         repeats=3,
-    ),
-    "3-benchmark": Stage(
-        "3-benchmark", ["sg", "bm25", "hybrid"], SWEBENCH_N, "contextbench",
-        "TOP-TIER (a) — second benchmark; generalisation beyond SWE-bench. "
-        "Needs the contextbench loader wired.",
-    ),
-    "3-scale": Stage(
-        "3-scale", ["sg", "bm25"], 60, "swebench",
-        "TOP-TIER (b) — does SG's gain hold on a smaller model. The 7B leaves "
-        "the MI300X mostly idle, so co-host it and run this alongside stage 1/2.",
-        models=["qwen-7b"],
     ),
 }

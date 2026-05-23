@@ -23,14 +23,17 @@ from .isolation import run_id
 from .run_agent import load_tasks, run_one
 
 
-def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0) -> list:
+def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0,
+                dataset: str = "") -> list:
     """Expand a stage into a flat list of (task, arm, model, repeat) jobs.
 
     probe → first 5 tasks; limit>0 → first N tasks (overrides probe); else the
     stage's n_tasks. Tasks are deterministic (dataset order) so a 10-task 14B
     run hits the SAME first 10 tasks as the 7B run for a clean comparison.
+    dataset → load tasks from a non-default jsonl (e.g. contextbench.jsonl).
     """
-    tasks = load_tasks()
+    from pathlib import Path
+    tasks = load_tasks(Path(dataset)) if dataset else load_tasks()
     if limit and limit > 0:
         n = limit
     elif probe:
@@ -65,7 +68,7 @@ def _already_done(task: dict, arm: str, model: str, repeat: int) -> bool:
 
 
 def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
-              force: bool = False, limit: int = 0) -> None:
+              force: bool = False, limit: int = 0, dataset: str = "") -> None:
     if stage_name not in config.STAGES:
         raise SystemExit(f"unknown stage {stage_name}; "
                          f"choose from {list(config.STAGES)}")
@@ -75,7 +78,7 @@ def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
               f"This harness currently drives SWE-bench. Wire the {stage.benchmark} "
               f"loader before running it (see STAGES.md).")
 
-    jobs = _stage_jobs(stage, probe, limit)
+    jobs = _stage_jobs(stage, probe, limit, dataset)
     if not force:
         jobs = [j for j in jobs if not _already_done(j[0], j[1], j[2], j[3])]
 
@@ -119,8 +122,12 @@ def main() -> None:
     ap.add_argument("--force", action="store_true", help="re-run completed jobs")
     ap.add_argument("--limit", type=int, default=0,
                     help="run only the first N tasks (e.g. 10 for a quick 14B/NIM read)")
+    ap.add_argument("--dataset", default="",
+                    help="tasks jsonl to use instead of the default (e.g. "
+                         "eval/datasets/contextbench.jsonl)")
     args = ap.parse_args()
-    run_stage(args.stage, args.workers, args.probe, args.force, args.limit)
+    run_stage(args.stage, args.workers, args.probe, args.force, args.limit,
+              args.dataset)
 
 
 if __name__ == "__main__":
