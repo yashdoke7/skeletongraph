@@ -220,6 +220,13 @@ class SGConfig:
     # ── Retrieval Fallbacks ─────────────────────────────────────────────
     enable_bm25_fallback: bool = True       # Use BM25 over comment/token corpus when no entity matches
     enable_keyword_fallback: bool = False   # Allow inverted-index fallback when no entity matches
+    # Gated recall booster (default ON as of eval v2). When an entity match is
+    # AMBIGUOUS (a common token short-name-matched >6 FQNs → likely coincidental),
+    # ALSO run full-corpus BM25 and add its top-3 hits as seeds. Gated on
+    # ambiguity so PRECISE matches (1-3 FQNs) are never diluted. Promoted from
+    # ablation arm sg-weakfallback after confirming: precision +85% (0.18→0.34),
+    # same recall (0.68), rank 1.0 vs 2.0, −37% input tokens on 7B/30-task eval.
+    enable_weak_entity_fallback: bool = True
 
     # ── Tier Routing ───────────────────────────────────────────────────
     enable_dynamic_model_routing: bool = True  # Adjust tier by complexity/confidence

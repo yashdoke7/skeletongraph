@@ -434,6 +434,7 @@ class SGEngine:
             enable_bm25_fallback=self._config.enable_bm25_fallback,
             enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
             enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
+            enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", False),
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -738,6 +739,7 @@ class SGEngine:
             enable_bm25_fallback=self._config.enable_bm25_fallback,
             enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
             enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
+            enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", False),
         )
 
         # Apply file filter post-hoc

@@ -66,6 +66,12 @@ class ResolverResult:
     session_dedup_count: int = 0  # How many Zone 2 bodies were skipped
 
 
+# Above this many resolved entity FQNs, an entity match is treated as AMBIGUOUS
+# (likely a common token matching many same-named functions) by the gated
+# weak-entity fallback. Precise references resolve to 1-3 FQNs.
+_WEAK_ENTITY_THRESHOLD = 6
+
+
 def resolve_context(
     prompt: str,
     store: IndexStore,
@@ -78,6 +84,7 @@ def resolve_context(
     enable_bm25_fallback: bool = False,
     enable_graph_expansion: bool = True,
     enable_centrality_rerank: bool = True,
+    enable_weak_entity_fallback: bool = False,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
@@ -136,6 +143,20 @@ def resolve_context(
             if any(getattr(e, "entity_type", "") == "slm_entity" for e in intent.entities)
             else "entity"
         )
+        # Weak-entity fallback (ablation, gated). An AMBIGUOUS entity match — a
+        # common token that short-name-matched many FQNs — is likely coincidental
+        # (e.g. "format" matching every *.format). Only THEN pull full-corpus BM25
+        # and add its top hits as seeds. Gated on ambiguity so precise matches
+        # (the common case, where SG's precision lives) are never diluted — this
+        # is the disciplined version of the reverted blanket blend.
+        if (enable_weak_entity_fallback and enable_bm25_fallback
+                and len(target_fqns) > _WEAK_ENTITY_THRESHOLD):
+            _bm = _bm25_fallback(prompt, store, top_k=15)
+            if _bm:
+                _lex_max = max(s for _, s in _bm) or 1.0
+                _lexical_scores = {fqn: s / _lex_max for fqn, s in _bm}
+                for _f, _s in _bm[:3]:        # only the top-3 lexical hits
+                    target_fqns.add(_f)
     else:
         # Optional BM25 fallback (disabled by default)
         if enable_bm25_fallback:
