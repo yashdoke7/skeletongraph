@@ -60,6 +60,9 @@ eval/logs/
 
 # Internal planning docs (not public)
 docs/plan.md
+docs/BLUEPRINT.md
+docs/CODEMEMBENCH.md
+docs/results_memory_analysis.md
 docs/*.local.md
 EVALUATION_WORKFLOW.md
 evaluation_dataset.md
@@ -84,3 +87,6 @@ temp/
 eval/results/agent_*/
 **/.hybrid_index/
 **/.skeletongraph/
+
+eval/curator/*.pkl
+eval/results_backup.zip
