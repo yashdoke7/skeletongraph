@@ -196,17 +196,27 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
 
     for step in range(config.MAX_TURNS):
         ts = time.time()
-        try:
-            resp = client.chat.completions.create(
-                model=config.MODEL_NAME,
-                messages=messages,
-                tools=TOOL_SCHEMAS,
-                tool_choice="auto",
-                temperature=config.TEMPERATURE,
-                seed=config.SEED,
-            )
-        except Exception as e:
-            traj.stopped, traj.error = "error", f"{type(e).__name__}: {e}"
+        for attempt in range(5):
+            try:
+                resp = client.chat.completions.create(
+                    model=config.MODEL_NAME,
+                    messages=messages,
+                    tools=TOOL_SCHEMAS,
+                    tool_choice="auto",
+                    temperature=config.TEMPERATURE,
+                    seed=config.SEED,
+                )
+                break  # success
+            except Exception as e:
+                if "429" in str(e) or "RateLimit" in type(e).__name__:
+                    time.sleep(5 * (2 ** attempt))  # 5s, 10s, 20s, 40s, 80s
+                    continue
+                traj.stopped, traj.error = "error", f"{type(e).__name__}: {e}"
+                break
+        else:
+            traj.stopped, traj.error = "error", "RateLimitError: exhausted retries"
+
+        if traj.stopped == "error":
             break
 
         choice = resp.choices[0]

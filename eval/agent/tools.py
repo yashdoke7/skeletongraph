@@ -88,6 +88,12 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# ── Loop-breaker budgets (identical for EVERY arm → no bias; just removes the
+# pathological 40-turn tail that pollutes all arms' turn/token metrics). ──────
+_MAX_UNIQUE_SEARCHES = 8     # global unique-query budget per task
+_MAX_FAILED_EDITS = 4        # per-file failed edit_file attempts before forced help
+_SEARCH_NOREAD_NUDGE = 3     # consecutive searches w/o a read before nudging
+
 
 class ToolExecutor:
     """Stateful tool runner bound to one run's repo + arm.
@@ -108,6 +114,11 @@ class ToolExecutor:
         self.embeddings_used = None
         self.edits_made = 0                      # successful edit_file calls
         self._empty_submit_warned = False        # block one empty submit only
+        # ── loop-breaker state (identical for every arm → no bias) ──────────
+        self._query_counts: Dict[str, int] = {}  # normalized query -> times seen
+        self._unique_queries: set = set()        # distinct normalized queries
+        self._searches_since_read = 0            # searches with no intervening read
+        self._failed_edits: Dict[str, int] = {}  # path -> consecutive failed edits
 
     # ── dispatch ───────────────────────────────────────────────────────────
 
@@ -141,6 +152,26 @@ class ToolExecutor:
     # ── search_code — the arm under test ───────────────────────────────────
 
     def _search(self, query: str, k: int) -> str:
+        # ── loop-breaker: block identical re-searches & cap unique searches ──
+        # The first call always runs (counts start empty), so first_search_hits
+        # and recall metrics are never affected. Only wasteful 2nd+ identical
+        # queries and beyond-budget searches are short-circuited with a directive.
+        norm = " ".join((query or "").lower().split())
+        self._query_counts[norm] = self._query_counts.get(norm, 0) + 1
+        if self._query_counts[norm] >= 2:
+            hint = (f" Top result so far: {self.first_search_hits[0]}."
+                    if self.first_search_hits else "")
+            return ("NOTE: you already ran this exact search "
+                    f"(attempt {self._query_counts[norm]}). Results are identical "
+                    "— do NOT search it again." + hint +
+                    " read_file a listed path and look for the fix, then edit_file.")
+        self._unique_queries.add(norm)
+        if len(self._unique_queries) > _MAX_UNIQUE_SEARCHES:
+            return (f"NOTE: search budget reached ({_MAX_UNIQUE_SEARCHES} unique "
+                    "queries). Stop searching. Based on results so far, read_file "
+                    "the most likely file and apply the fix with edit_file.")
+        self._searches_since_read += 1
+
         # SG arms return (fqn, summary) pairs so the agent sees a tier-2 preview
         # per hit (the C2 mechanism). sg-nosummary returns empty summaries; all
         # other arms return bare file/FQN strings. Metrics always use the FQN
@@ -177,9 +208,14 @@ class ToolExecutor:
             for i, h in enumerate(hits[:k]):
                 s = summaries[i] if i < len(summaries) else ""
                 lines.append(f"{i+1}. {h}" + (f"\n   summary: {s}" if s else ""))
-            return "Ranked results (file::symbol + summary):\n" + "\n".join(lines)
-        lines = [f"{i+1}. {h}" for i, h in enumerate(hits[:k])]
-        return "Ranked results (file::symbol):\n" + "\n".join(lines)
+            result = "Ranked results (file::symbol + summary):\n" + "\n".join(lines)
+        else:
+            lines = [f"{i+1}. {h}" for i, h in enumerate(hits[:k])]
+            result = "Ranked results (file::symbol):\n" + "\n".join(lines)
+        if self._searches_since_read >= _SEARCH_NOREAD_NUDGE:
+            result += (f"\n\n(You have searched {self._searches_since_read} times "
+                       "without reading. read_file the top result now to make progress.)")
+        return result
 
     # ── neutral file tools (identical for all arms) ────────────────────────
 
@@ -193,6 +229,7 @@ class ToolExecutor:
         return "\n".join(entries) or "(empty)"
 
     def _read(self, path: str, start, end) -> str:
+        self._searches_since_read = 0   # reading is progress — reset the nudge
         f = (self.repo / path).resolve()
         if not str(f).startswith(str(self.repo)):
             return "ERROR: path escapes repo"
@@ -211,14 +248,50 @@ class ToolExecutor:
         if not f.is_file():
             return f"ERROR: not a file: {path}"
         text = f.read_text(encoding="utf-8", errors="replace")
+        
+        # 1. Exact match
         n = text.count(old)
-        if n == 0:
-            return "ERROR: old_str not found"
-        if n > 1:
-            return f"ERROR: old_str matches {n} times — make it unique"
-        f.write_text(text.replace(old, new, 1), encoding="utf-8")
-        self.edits_made += 1
-        return f"Edited {path}."
+        if n == 1:
+            f.write_text(text.replace(old, new, 1), encoding="utf-8")
+            self.edits_made += 1
+            self._failed_edits[path] = 0          # success resets the fail counter
+            return f"Edited {path}."
+
+        # 2. Line-ending normalized match (fixes \r\n vs \n issues on Windows)
+        text_norm = text.replace('\r\n', '\n')
+        old_norm = old.replace('\r\n', '\n')
+        n_norm = text_norm.count(old_norm)
+        if n_norm == 1:
+            # Safely replace using normalized target, keeping file format intact elsewhere
+            new_norm = new.replace('\r\n', '\n')
+            f.write_text(text_norm.replace(old_norm, new_norm, 1), encoding="utf-8")
+            self.edits_made += 1
+            self._failed_edits[path] = 0
+            return f"Edited {path}."
+
+        if n > 1 or n_norm > 1:
+            return f"ERROR: old_str matches multiple times — make it unique."
+
+        # ── loop-breaker: edit-thrash. After repeated misses on the SAME file,
+        # feed back the actual current lines so the model can copy exact text
+        # (this is what kills the 37-failed-edit / 674K-token blowups). ───────
+        self._failed_edits[path] = self._failed_edits.get(path, 0) + 1
+        if self._failed_edits[path] >= _MAX_FAILED_EDITS:
+            self._failed_edits[path] = 0
+            anchor = next((ln.strip() for ln in old.strip().splitlines()
+                           if ln.strip()), "")[:40]
+            ctx = [f"{i+1}: {ln}" for i, ln in enumerate(text.splitlines())
+                   if anchor and anchor in ln][:6]
+            if ctx:
+                return ("ERROR: old_str not found after several attempts. The "
+                        "closest CURRENT lines in the file are below — copy "
+                        "old_str EXACTLY from these (match indentation):\n"
+                        + "\n".join(ctx))
+            return ("ERROR: old_str not found after several attempts. Use "
+                    "read_file to view the exact current text of this region, "
+                    "then copy old_str verbatim before editing again.")
+        return ("ERROR: old_str not found. Make sure you copy the EXACT text including "
+                "leading spaces and indentation, and do not skip any lines.")
 
 
 # ── retrieval backends ─────────────────────────────────────────────────────
@@ -226,7 +299,7 @@ class ToolExecutor:
 # Every SkeletonGraph variant (full + ablations). These route through the
 # summary-aware path so the agent receives tier-2 previews (the C2 mechanism).
 _SG_BACKENDS = {"sg", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed",
-                "sg-learned"}
+                "sg-learned", "sg-weakfallback"}
 
 
 def _ensure_sg_on_path() -> None:
@@ -256,6 +329,11 @@ def _sg_config(backend: str):
         # No semantic embeddings (lexical + graph only) — the embedding part of
         # the C3 ablation.
         cfg.enable_embeddings = False
+    elif backend == "sg-weakfallback":
+        # Full SG + the gated weak-entity recall booster (ablation arm). Only
+        # fires when the entity match is ambiguous, so precise-match precision is
+        # preserved. Tests whether it recovers the semantic-mismatch misses.
+        cfg.enable_weak_entity_fallback = True
     return cfg
 
 
