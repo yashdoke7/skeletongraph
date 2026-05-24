@@ -270,11 +270,46 @@ def aggregate(stage: str | None) -> None:
     print("...")
     print(f"({len(lines)} total lines in SUMMARY.md — open the file for the full breakdown)")
 
+    # Machine-readable summary alongside the human-readable SUMMARY.md.
+    # Keyed by arm — retrieval/efficiency numbers for downstream scripting.
+    summary = {}
+    for arm in sorted(by_arm):
+        recs = by_arm[arm]
+        complete = [r for r in by_arm_all[arm]
+                    if r.get("stopped") in ("submit", "max_turns")]
+        summary[arm] = {
+            "n": len(recs),
+            "n_complete": len(complete),
+            "retrieval_hit": _mean([r["retrieval_hit"] for r in recs
+                                    if "retrieval_hit" in r]),
+            "precision": _mean([r["retrieval_precision"] for r in recs
+                                if "retrieval_precision" in r]),
+            "edited_gold": _mean([r["edited_gold_file"] for r in recs
+                                  if "edited_gold_file" in r]),
+            "avg_turns": _mean([r["n_turns"] for r in complete
+                                if "n_turns" in r]),
+            "avg_input_tok": _mean([r["billed_input"] for r in complete
+                                    if "billed_input" in r]),
+            "avg_output_tok": _mean([r["billed_output"] for r in complete
+                                     if "billed_output" in r]),
+            "total_cost_usd": round(sum(r.get("imputed_cost", 0)
+                                        for r in complete), 4),
+            "pass1": _mean([r.get("verdict", 0) or 0 for r in recs]),
+        }
+    jsout = config.RUNS_DIR / "summary.json"
+    jsout.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"Wrote {jsout}")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", default=None)
+    ap.add_argument("--stage", default=None,
+                    help="Filter to a specific stage's arms (e.g. 0-full)")
+    ap.add_argument("--run-dir", default=None, type=Path,
+                    help="Override RUNS_DIR (e.g. eval/results/agent/qwen7b_swebench)")
     args = ap.parse_args()
+    if args.run_dir:
+        config.RUNS_DIR = Path(args.run_dir).expanduser().resolve()
     aggregate(args.stage)
 
 

@@ -24,8 +24,21 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 EVAL_DIR = Path(__file__).resolve().parent.parent          # .../eval
 REPO_ROOT = EVAL_DIR.parent                                 # repo root
 DATASET = EVAL_DIR / "datasets" / "stage0.jsonl"            # built by make_dataset.py
-RUNS_DIR = EVAL_DIR / "results" / "agent"                   # per-run trajectories
-WORKSPACE_ROOT = EVAL_DIR / "datasets" / "_agent_work"      # isolated per-run checkouts
+# Results folder tag — isolates results by model + benchmark so different runs
+# never overwrite each other (run_id always uses "main" regardless of model).
+# Set this env var BEFORE running run_stage / run_singleshot / aggregate:
+#   CMD:    set SG_EVAL_RUN_TAG=qwen7b_swebench
+#   bash:   export SG_EVAL_RUN_TAG=qwen32b_swebench
+# Default (empty) = eval/results/agent/ — backward-compatible with legacy runs.
+_RUN_TAG = os.environ.get("SG_EVAL_RUN_TAG", "")
+RUNS_DIR = (EVAL_DIR / "results" / "agent" / _RUN_TAG
+            if _RUN_TAG else EVAL_DIR / "results" / "agent")  # per-run trajectories
+# Workspace root is ALSO tag-namespaced. run_id uses model="main" for every
+# model, so two runs (e.g. 7B + NIM-70B) on the same (task, arm) would otherwise
+# share one checkout dir and clobber each other if run concurrently. Tagging the
+# root lets different SG_EVAL_RUN_TAG runs execute fully in parallel.
+WORKSPACE_ROOT = (EVAL_DIR / "datasets" / "_agent_work" / _RUN_TAG
+                  if _RUN_TAG else EVAL_DIR / "datasets" / "_agent_work")  # isolated per-run checkouts
 
 
 # ── model endpoint ─────────────────────────────────────────────────────────
@@ -106,6 +119,11 @@ ARMS: Dict[str, Arm] = {
     "sg-norerank":  Arm("sg-norerank",  "sg-norerank",  "SG (no centrality rerank)"),
     "sg-nosummary": Arm("sg-nosummary", "sg-nosummary", "SG (no summaries)"),
     "sg-noembed":   Arm("sg-noembed",   "sg-noembed",   "SG (no embeddings)"),
+    # Recall booster (gated weak-entity fallback, see docs/BLUEPRINT.md §4/§7).
+    # Full SG + BM25 seeds ONLY when the entity match is ambiguous, so precise
+    # matches keep SG's precision. Tests recovery of semantic-mismatch misses.
+    "sg-weakfallback": Arm("sg-weakfallback", "sg-weakfallback",
+                           "SG (gated weak-entity recall booster)"),
     # Learned curator (see docs/CURATOR.md): a trained classifier predicts the
     # retrieval mode per query instead of the rule-based router. Same SG index;
     # only the mode selection changes (passed via heuristic_query mode_hint).
@@ -194,6 +212,15 @@ STAGES: Dict[str, Stage] = {
         "0-cbmem", ["cbmem"], 30, "swebench",
         "Codebase-Memory (MCP graph) baseline — needs the binary on PATH "
         "(CBMEM_BIN). Closest published competitor to SG.",
+    ),
+    "0-learned": Stage(
+        "0-learned", ["sg-learned"], 30, "swebench",
+        "Test just the learned curator against the 0-full baselines."
+    ),
+    "0-weakfallback": Stage(
+        "0-weakfallback", ["sg-weakfallback"], 30, "swebench",
+        "Test the gated weak-entity recall booster vs the `sg` baseline — does it "
+        "recover semantic-mismatch misses WITHOUT diluting precision? (default off)"
     ),
     # ── AMD staged plan (the real spend) ────────────────────────────────────
     # Stage 1 = 1a + 1b, run in PARALLEL on the MI300X (192 GB → many isolated
