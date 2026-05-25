@@ -14,9 +14,9 @@ BM25     — hand-rolled Okapi BM25 (same as bm25_flat.py, no extra dep)
 Dense    — sentence-transformers all-MiniLM-L6-v2  (same model as SG uses)
 Reranker — cross-encoder/ms-marco-MiniLM-L-6-v2
 
-Indexing unit: FILE (all function text in a file concatenated). This is the
-natural unit for file-level retrieval recall — matches how bm25 and grep arms
-rank. Chunk-level indexing is a possible future enhancement.
+Indexing unit: symbol/function chunk when SG's parser is available, raw file as
+a fallback. This is the standard "BM25 + dense + reranker over chunks" baseline;
+returning FQNs keeps it comparable to SG and BM25 without giving it graph edges.
 
 Install
 -------
@@ -126,14 +126,14 @@ class _HybridIndex:
     """Lazy per-repo hybrid index (BM25 + dense embeddings)."""
 
     INDEX_DIR = ".hybrid_index"
-    FILES_JSON = "file_paths.json"
+    FILES_JSON = "doc_ids.json"
     EMBED_NPZ = "embeddings.npz"
 
     def __init__(self, repo: Path) -> None:
         self.repo = repo
         self._idx_dir = repo / self.INDEX_DIR
-        self._file_paths: List[str] = []       # relative, forward-slash
-        self._file_texts: List[str] = []       # aggregated text per file
+        self._file_paths: List[str] = []       # FQNs or relative file paths
+        self._file_texts: List[str] = []       # chunk text
         self._bm25: Optional[_BM25] = None
         self._matrix = None                    # np.ndarray (n_files, embed_dim)
         self._embed_model = None               # SentenceTransformer
@@ -263,7 +263,7 @@ def _get_index(repo: Path) -> _HybridIndex:
 
 
 def retrieve(query: str, repo: Path, k: int = 10) -> List[str]:
-    """Return up to k ranked file paths (forward-slash, relative to repo).
+    """Return up to k ranked FQNs/chunks, falling back to file paths.
 
     Pipeline: BM25 top-30 ∪ dense top-30 → cross-encoder rerank → top k.
     """
@@ -308,34 +308,31 @@ def _collect_file_texts(repo: Path) -> Tuple[List[str], List[str]]:
 
 
 def _collect_via_sg(repo: Path) -> Tuple[List[str], List[str]]:
-    """Collect per-file text via SG's existing index (preferred path)."""
+    """Collect per-symbol chunk text via SG's existing index (preferred path)."""
     from skeletongraph.engine import SGEngine
 
     engine = SGEngine(project_root=repo)
     store = engine.get_store()
 
-    file_to_funcs: Dict[str, List[Tuple]] = {}
-    for fqn, sk in store.skeleton_table.items():
-        file_to_funcs.setdefault(sk.file_path, []).append((fqn, sk))
-
     paths: List[str] = []
     texts: List[str] = []
-    for rel, sks in sorted(file_to_funcs.items()):
-        fp = repo / rel
+    for fqn, sk in sorted(store.skeleton_table.items()):
+        fp = repo / sk.file_path
         try:
             lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             lines = []
-        parts = []
-        for fqn, sk in sks:
-            parts.append(fqn)
-            parts.append(getattr(sk, "signature", "") or "")
-            parts.append(getattr(sk, "docstring", "") or "")
-            if lines:
-                s = max(0, getattr(sk, "line_start", 1) - 1)
-                e = min(len(lines), getattr(sk, "line_end", s + 30))
-                parts.append("\n".join(lines[s:e]))
-        paths.append(rel)
+        parts = [
+            fqn,
+            getattr(sk, "signature", "") or "",
+            getattr(sk, "docstring", "") or "",
+            getattr(sk, "file_path", "") or "",
+        ]
+        if lines:
+            s = max(0, getattr(sk, "line_start", 1) - 1)
+            e = min(len(lines), getattr(sk, "line_end", s + 30))
+            parts.append("\n".join(lines[s:e]))
+        paths.append(fqn)
         texts.append("\n".join(parts))
     return paths, texts
 

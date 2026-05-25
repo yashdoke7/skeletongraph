@@ -91,8 +91,18 @@ TOOL_SCHEMAS = [
 # ── Loop-breaker budgets (identical for EVERY arm → no bias; just removes the
 # pathological 40-turn tail that pollutes all arms' turn/token metrics). ──────
 _MAX_UNIQUE_SEARCHES = 8     # global unique-query budget per task
-_MAX_FAILED_EDITS = 4        # per-file failed edit_file attempts before forced help
+_MAX_FAILED_EDITS = 4        # per-file failed edits before we surface the real lines
 _SEARCH_NOREAD_NUDGE = 3     # consecutive searches w/o a read before nudging
+# Hard GLOBAL cap on failed edits across the whole run. The per-file counter
+# above only *nudges* (and previously reset itself, so a model could thrash
+# forever — observed 37 failed edits / 3.7M tokens / 40 turns before MAX_TURNS
+# finally stopped it). This is the true circuit-breaker: once a run accumulates
+# this many failed edit_file calls total, edit_file is refused; if the model
+# keeps hammering it, the run is force-submitted so it ends near ~12 turns
+# instead of bleeding to the turn ceiling. 8 is far above any legitimate need
+# (real fixes succeed in 1-3 edits; failures are rare) so good runs are untouched.
+_MAX_TOTAL_FAILED_EDITS = 8     # whole-run failed-edit budget (hard stop)
+_EDIT_BUDGET_IGNORES = 3        # times the budget message may be ignored before force-submit
 
 
 class ToolExecutor:
@@ -119,6 +129,8 @@ class ToolExecutor:
         self._unique_queries: set = set()        # distinct normalized queries
         self._searches_since_read = 0            # searches with no intervening read
         self._failed_edits: Dict[str, int] = {}  # path -> consecutive failed edits
+        self._total_failed_edits = 0             # whole-run failed-edit count (hard cap)
+        self._edit_budget_ignores = 0            # times the exhausted-budget msg was ignored
 
     # ── dispatch ───────────────────────────────────────────────────────────
 
@@ -242,6 +254,20 @@ class ToolExecutor:
         return f"{path} [{s}-{e} of {len(lines)}]\n{body}"
 
     def _edit(self, path: str, old: str, new: str) -> str:
+        # ── global circuit-breaker: stop runaway edit-retry loops ────────────
+        # Once the run has burned its whole-run failed-edit budget, refuse
+        # further edits. If the model ignores that repeatedly, force-submit so
+        # the run terminates near here instead of bleeding to MAX_TURNS.
+        if self._total_failed_edits >= _MAX_TOTAL_FAILED_EDITS:
+            self._edit_budget_ignores += 1
+            if self._edit_budget_ignores >= _EDIT_BUDGET_IGNORES:
+                self.submitted = True
+                return ("ERROR: edit budget exhausted and ignored repeatedly — "
+                        "ending the task.")
+            return (f"ERROR: edit budget exhausted ({self._total_failed_edits} "
+                    "failed edits this task). Do NOT call edit_file again. Use "
+                    "read_file to view the exact current text, then submit.")
+
         f = (self.repo / path).resolve()
         if not str(f).startswith(str(self.repo)):
             return "ERROR: path escapes repo"
@@ -273,11 +299,13 @@ class ToolExecutor:
             return f"ERROR: old_str matches multiple times — make it unique."
 
         # ── loop-breaker: edit-thrash. After repeated misses on the SAME file,
-        # feed back the actual current lines so the model can copy exact text
-        # (this is what kills the 37-failed-edit / 674K-token blowups). ───────
+        # feed back the actual current lines so the model can copy exact text.
+        # The per-file counter is NOT reset (resetting created a sliding window
+        # that let a model thrash indefinitely); the global budget checked at
+        # the top of this method is the real hard stop. ──────────────────────
+        self._total_failed_edits += 1
         self._failed_edits[path] = self._failed_edits.get(path, 0) + 1
         if self._failed_edits[path] >= _MAX_FAILED_EDITS:
-            self._failed_edits[path] = 0
             anchor = next((ln.strip() for ln in old.strip().splitlines()
                            if ln.strip()), "")[:40]
             ctx = [f"{i+1}: {ln}" for i, ln in enumerate(text.splitlines())
@@ -298,8 +326,9 @@ class ToolExecutor:
 
 # Every SkeletonGraph variant (full + ablations). These route through the
 # summary-aware path so the agent receives tier-2 previews (the C2 mechanism).
-_SG_BACKENDS = {"sg", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed",
-                "sg-learned", "sg-weakfallback"}
+_SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
+                "sg-norerank", "sg-nosummary", "sg-noembed", "sg-learned",
+                "sg-weakfallback"}
 
 
 def _ensure_sg_on_path() -> None:
@@ -319,6 +348,14 @@ def _sg_config(backend: str):
     if backend == "sg-nograph":
         # Direct entity matches only — tests whether graph traversal drives gain.
         cfg.enable_graph_expansion = False
+    elif backend == "sg-gatedgraph":
+        # Proposed policy: graph only for exact/small seed sets, broad-impact
+        # intents, or explicit graph/blast-radius requests.
+        cfg.graph_expansion_policy = "gated"
+    elif backend == "sg-fullgraph":
+        # Historical policy: expand whenever the query mode permits graph
+        # traversal. Useful as an ablation against the gated policy.
+        cfg.graph_expansion_policy = "always"
     elif backend == "sg-norerank":
         # Same candidates, no hub/centrality reweight — tests PageRank's value.
         cfg.enable_centrality_rerank = False
@@ -416,6 +453,10 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
 
     if backend == "cbmem":
         from backends.cbmem import retrieve              # Codebase-Memory CLI
+        return retrieve(query, repo, k)
+
+    if backend == "graphify":
+        from backends.graphify import retrieve           # knowledge-graph RAG
         return retrieve(query, repo, k)
 
     raise ValueError(f"unknown backend: {backend}")

@@ -108,7 +108,7 @@ class Arm:
 ARMS: Dict[str, Arm] = {
     "sg":     Arm("sg",     "sg",     "SkeletonGraph (structural)"),
     "bm25":   Arm("bm25",   "bm25",   "Flat BM25"),
-    "grep":   Arm("grep",   "grep",   "Keyword grep (naive)"),
+    "grep":   Arm("grep",   "grep",   "Ripgrep-style lexical"),
     "none":   Arm("none",   "none",   "No retrieval (long-context)"),
     "hybrid": Arm("hybrid", "hybrid", "Hybrid RAG (BM25+dense+rerank)", strong=True),
     "aider":  Arm("aider",  "aider",  "Aider repo-map", strong=True),
@@ -116,6 +116,8 @@ ARMS: Dict[str, Arm] = {
     # SG ablations — same SG retrieval with exactly one component disabled
     # (wired in tools._sg_config). Each isolates a contribution.
     "sg-nograph":   Arm("sg-nograph",   "sg-nograph",   "SG (no graph expansion)"),
+    "sg-gatedgraph": Arm("sg-gatedgraph", "sg-gatedgraph", "SG (gated graph expansion)"),
+    "sg-fullgraph": Arm("sg-fullgraph", "sg-fullgraph", "SG (eager graph expansion)"),
     "sg-norerank":  Arm("sg-norerank",  "sg-norerank",  "SG (no centrality rerank)"),
     "sg-nosummary": Arm("sg-nosummary", "sg-nosummary", "SG (no summaries)"),
     "sg-noembed":   Arm("sg-noembed",   "sg-noembed",   "SG (no embeddings)"),
@@ -135,6 +137,11 @@ ARMS: Dict[str, Arm] = {
     # run_singleshot.py, not run_stage; recorded as this arm so it lands in the
     # same aggregate/plots tables next to `sg`.
     "sg-noagent":   Arm("sg-noagent",   "sg",           "SG single-shot (no agent)"),
+    # Graphify — knowledge-graph RAG. Builds an entity/relationship graph of the
+    # codebase using tree-sitter + LLM extraction + NetworkX/Leiden clustering.
+    # pip install graphifyy  (https://github.com/safishamsi/graphify)
+    # Backend stub: eval/backends/graphify.py — implement before running this arm.
+    "graphify":     Arm("graphify",     "graphify",     "Graphify (knowledge-graph RAG)", strong=True),
 }
 
 
@@ -199,11 +206,11 @@ STAGES: Dict[str, Stage] = {
     # / sg-norerank toggle graph expansion / centrality rerank.
     "0-ablation": Stage(
         "0-ablation",
-        ["sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
+        ["sg-fullgraph", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
         30, "swebench",
-        "SG ablations (local) — graph / centrality / summary / embeddings "
-        "contributions, vs the full `sg` arm. (Agent-vs-no-agent is measured "
-        "separately by the sg-noagent single-shot runner.)",
+        "SG ablations (local) — eager graph / no graph / centrality / summary "
+        "/ embeddings contributions, vs the default gated `sg` arm. "
+        "(Agent-vs-no-agent is measured separately by sg-noagent.)",
     ),
     # Codebase-Memory MCP baseline — the closest published competitor. Wrapped
     # via its CLI binary (subprocess), so no Python-env conflict; runs from the
@@ -221,6 +228,24 @@ STAGES: Dict[str, Stage] = {
         "0-weakfallback", ["sg-weakfallback"], 30, "swebench",
         "Test the gated weak-entity recall booster vs the `sg` baseline — does it "
         "recover semantic-mismatch misses WITHOUT diluting precision? (default off)"
+    ),
+    # ── Named tiers (paper-facing names for tables/CLI) ──────────────────────
+    # `baseline` = the five core comparison arms. Functionally identical to
+    # 0-full; the old name is preserved for backward compat with existing results.
+    "baseline": Stage(
+        "baseline", ["sg", "bm25", "grep", "none", "hybrid"], 30, "swebench",
+        "Baseline tier — SG vs lexical (bm25/grep) vs no-retrieval (none) vs "
+        "dense-RAG (hybrid). Same arms as 0-full; cleaner name for paper tables.",
+    ),
+    # `full` = baseline + Graphify (knowledge-graph RAG) + cbmem (MCP graph).
+    # Three different graph strategies side-by-side with lexical/dense floors.
+    # Requires both external tools to be set up first (see their backends).
+    "full": Stage(
+        "full",
+        ["sg", "bm25", "grep", "none", "hybrid", "graphify", "cbmem"],
+        30, "swebench",
+        "Full comparison — 5 baseline arms + Graphify knowledge-graph RAG "
+        "+ cbmem (Codebase-Memory MCP). External tools must be set up first.",
     ),
     # ── AMD staged plan (the real spend) ────────────────────────────────────
     # Stage 1 = 1a + 1b, run in PARALLEL on the MI300X (192 GB → many isolated

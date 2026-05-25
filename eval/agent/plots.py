@@ -33,7 +33,7 @@ _ARM_ORDER = ["none", "grep", "bm25", "hybrid", "aider", "cbmem",
 def _load(stage: str | None) -> List[dict]:
     recs = []
     for p in sorted(config.RUNS_DIR.glob("*.json")):
-        if p.name.startswith("_"):
+        if p.name.startswith("_") or p.name == "summary.json":
             continue
         try:
             r = json.loads(p.read_text(encoding="utf-8"))
@@ -178,7 +178,11 @@ def make_figures(stage: str | None) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default=None)
+    ap.add_argument("--run-dir", default=None, type=Path,
+                    help="Override RUNS_DIR (e.g. eval/results/agent/qwen7b_swebench)")
     args = ap.parse_args()
+    if args.run_dir:
+        config.RUNS_DIR = Path(args.run_dir).expanduser().resolve()
     make_figures(args.stage)
 
 

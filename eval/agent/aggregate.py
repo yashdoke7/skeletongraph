@@ -26,7 +26,7 @@ from . import config
 def _load(stage: str | None) -> list:
     recs = []
     for p in sorted(config.RUNS_DIR.glob("*.json")):
-        if p.name.startswith("_"):
+        if p.name.startswith("_") or p.name == "summary.json":
             continue
         try:
             r = json.loads(p.read_text(encoding="utf-8"))
@@ -277,6 +277,12 @@ def aggregate(stage: str | None) -> None:
         recs = by_arm[arm]
         complete = [r for r in by_arm_all[arm]
                     if r.get("stopped") in ("submit", "max_turns")]
+        pass_vals = []
+        for r in recs:
+            if "resolved" in r:
+                pass_vals.append(1 if r.get("resolved") else 0)
+            elif "verdict" in r and r.get("verdict") is not None:
+                pass_vals.append(1 if r.get("verdict") else 0)
         summary[arm] = {
             "n": len(recs),
             "n_complete": len(complete),
@@ -294,7 +300,7 @@ def aggregate(stage: str | None) -> None:
                                      if "billed_output" in r]),
             "total_cost_usd": round(sum(r.get("imputed_cost", 0)
                                         for r in complete), 4),
-            "pass1": _mean([r.get("verdict", 0) or 0 for r in recs]),
+            "pass1": _mean(pass_vals) if pass_vals else None,
         }
     jsout = config.RUNS_DIR / "summary.json"
     jsout.write_text(json.dumps(summary, indent=2), encoding="utf-8")
