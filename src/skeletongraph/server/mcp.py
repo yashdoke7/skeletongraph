@@ -3,7 +3,7 @@ MCP server: 7 canonical tools for IDE agent integration.
 
 Tools (in order of typical use):
   sg_overview   — project DNA + architecture + constraints + digest (call first)
-  sg_search     — hybrid search: BM25 + graph centrality (PREFERRED over native grep)
+  sg_search     — precise task-context search; graph expansion is gated/on demand
   sg_get        — get a function (or several) by FQN (signature + summary)
   sg_expand     — full function body / file view on demand
   sg_constraint — view or propose project constraints
@@ -37,7 +37,9 @@ _USE_SG_REMINDER = (
     "SkeletonGraph (SG) is your PREFERRED context source for this repo. "
     "Call sg_overview at session start for the project briefing. "
     "Use sg_search as a task-context assembler, not grep: ask for the whole task once; "
-    "it returns likely edit targets, helpers, graph neighbors, and likely tests. "
+    "it returns likely edit targets, compact helpers, and likely tests. "
+    "Graph/blast-radius context is added automatically only when the task needs it; "
+    "request graph='on' for impact analysis, refactors, callers/callees, or architecture. "
     "Its results are complete and self-contained — each body is the exact current "
     "source with its file:line range, so edit directly from them and do NOT re-grep "
     "or re-read code that sg_search already returned. "
@@ -94,13 +96,16 @@ _TOOL_SCHEMAS = [
             "broad expansions.\n\n"
             "Returns:\n"
             "  • Top matches: FQN + file:line-range + imports/prelude + signature "
-            "+ summary + target body + caller/callee signatures\n"
+            "+ summary + target body\n"
             "  • Debug/test bundle: small helper bodies and likely test files/snippets\n"
+            "  • Gated graph context: callers/callees only for exact targets, "
+            "broad-impact intents, or graph='on'\n"
             "  • Remaining matches: FQN + file:line-range + signature + summary\n"
             "  • Lexical grep fallback: when graph confidence is not HIGH, a "
             "plain-text scan catches module-level constants, decorators and type "
             "aliases that the function graph cannot index.\n\n"
-            "PREFERRED over native grep/glob. Hybrid BM25 + graph centrality.\n"
+            "PREFERRED over native grep/glob. Hybrid lexical/semantic search "
+            "with graph expansion gated for precision.\n"
             "Only call sg_expand for a listed function when you are about to edit "
             "that function and its body was not included."
         ),
@@ -133,6 +138,16 @@ _TOOL_SCHEMAS = [
                                "refactor for behavior-preserving rewrites, review, "
                                "architecture. Omit to let SG infer it.",
                 "default": "",
+            },
+            "graph": {
+                "type": "string",
+                "enum": ["auto", "off", "on"],
+                "description": "Graph expansion policy for this search. auto "
+                               "keeps normal bug-fix searches precise and adds "
+                               "graph only when useful. on requests callers/"
+                               "callees/blast-radius context immediately. off "
+                               "returns direct lexical/entity targets only.",
+                "default": "auto",
             },
             "max_tokens": {
                 "type": "integer",
@@ -545,6 +560,8 @@ class MCPServer:
         # keeps the result inline and self-sufficient.
         max_tokens = min(max(int(args.get("max_tokens", 3000)), 1000), 12000)
         intent_arg = str(args.get("intent", "")).strip() or None
+        graph_arg = str(args.get("graph", "auto")).strip().lower()
+        graph_policy = {"on": "always", "off": "off", "auto": None}.get(graph_arg)
 
         if not query:
             return "Error: query is required"
@@ -554,6 +571,7 @@ class MCPServer:
             result = self._engine.heuristic_query(
                 query, top_n=top_n, file_filter=file_filter or None,
                 mode_hint=intent_arg,
+                graph_policy=graph_policy,
             )
         except RuntimeError as e:
             return str(e)
@@ -573,7 +591,8 @@ class MCPServer:
         # ── Graph matches ────────────────────────────────────────────────
         if candidates:
             lines.append(
-                f"Confidence: {confidence}  |  Matches: {len(candidates)}  "
+                f"Confidence: {confidence}  |  Graph: {graph_arg or 'auto'}  "
+                f"|  Matches: {len(candidates)}  "
                 f"|  Full bodies for top {min(expand_top, len(candidates))}")
             lines.append("")
 

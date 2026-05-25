@@ -33,7 +33,9 @@ SG is active. Follow these rules:
    project purpose, important structure, constraints, recent turns, and index status.
 2. Use `sg_search` as a task-context assembler, not as grep. Ask for the whole
    task/symptom once. For coding/debug tasks it returns likely edit targets,
-   imports/prelude, helper bodies, graph neighbors, and likely tests.
+   imports/prelude, compact helper context, and likely tests. Normal bug-fix
+   searches stay precise; use `graph="on"` only for impact analysis,
+   callers/callees, architecture, migration, review, or refactor work.
    Do not split one task into many symbol searches unless confidence is LOW/MISS
    or the target is absent.
 3. Use `sg_get` / `sg_expand` only for exact follow-up. Expand a specific FQN

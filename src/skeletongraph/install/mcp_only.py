@@ -28,9 +28,12 @@ SG MCP tools are available. Use them every session:
                     recent turns/decisions, and index status (call FIRST).
 - `sg_search`     — task-context assembler, not grep. Ask for the whole task or
                     symptom once; for coding/debug tasks it returns likely edit
-                    targets, imports/prelude, helper bodies, graph neighbors,
-                    and likely tests. Do not split one task into many symbol
-                    searches unless confidence is LOW/MISS or the target is absent.
+                    targets, imports/prelude, compact helper context, and likely
+                    tests. Normal bug-fix searches stay precise; use `graph="on"`
+                    only for impact analysis, callers/callees, architecture,
+                    migration, review, or refactor work. Do not split one task
+                    into many symbol searches unless confidence is LOW/MISS or
+                    the target is absent.
 - `sg_get`        — exact FQN metadata when you already know the target.
 - `sg_expand`     — exact follow-up only. Expand a specific FQN when you are
                     about to edit it and the body was not already returned.
