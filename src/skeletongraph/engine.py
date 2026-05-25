@@ -433,6 +433,7 @@ class SGEngine:
             enable_keyword_fallback=self._config.enable_keyword_fallback,
             enable_bm25_fallback=self._config.enable_bm25_fallback,
             enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
+            graph_expansion_policy=getattr(self._config, "graph_expansion_policy", "gated"),
             enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
             enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", False),
         )
@@ -704,6 +705,7 @@ class SGEngine:
         top_n: int = 15,
         file_filter: Optional[str] = None,
         mode_hint: Optional[str] = None,
+        graph_policy: Optional[str] = None,
     ):
         """IDE-mode retrieval: regex + BM25 + graph, zero LLM calls.
 
@@ -738,6 +740,9 @@ class SGEngine:
             enable_keyword_fallback=self._config.enable_keyword_fallback,
             enable_bm25_fallback=self._config.enable_bm25_fallback,
             enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
+            graph_expansion_policy=(
+                graph_policy or getattr(self._config, "graph_expansion_policy", "gated")
+            ),
             enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
             enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", False),
         )

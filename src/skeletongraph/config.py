@@ -258,6 +258,7 @@ class SGConfig:
     # These default to True (full SG); the eval harness flips them off one at
     # a time for the stage-2 ablation. NEVER ship them False in production.
     enable_graph_expansion: bool = True   # Tier-2/Tier-3 graph neighbor inclusion
+    graph_expansion_policy: str = "gated"  # gated | always | off
     enable_centrality_rerank: bool = True # PageRank/hub-score reranking signal
     enable_summaries: bool = True         # Include Tier-2 summaries in assembled context
 
@@ -428,6 +429,7 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
             "enable_bm25_fallback",
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
+        "SG_GRAPH_POLICY": ("graph_expansion_policy", str),
         "SG_SHOW_COST": ("show_cost_per_query", lambda v: v.lower() in ("1", "true", "yes")),
         # Tier-0.5 / queue
         "SG_OLLAMA_URL": ("ollama_base_url", str),
@@ -523,6 +525,7 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "enable_embeddings": config.enable_embeddings,
         # Ablation toggles (eval only)
         "enable_graph_expansion": config.enable_graph_expansion,
+        "graph_expansion_policy": config.graph_expansion_policy,
         "enable_centrality_rerank": config.enable_centrality_rerank,
         "enable_summaries": config.enable_summaries,
         # Tier-0.5 / queue

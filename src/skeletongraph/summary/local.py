@@ -23,8 +23,15 @@ def build_local_summary(
     if sk.docstring:
         return sk.docstring.strip().splitlines()[0]
 
-    name = sk.fqn.split("::")[-1].split(".")[-1]
+    symbol_path = sk.fqn.split("::")[-1]
+    parts = symbol_path.split(".")
+    name = parts[-1]
+    owner = parts[-2] if len(parts) > 1 else ""
     action = _humanize_name(name)
+    if _is_generic_name(name) and owner:
+        action = f"{_humanize_name(owner)}.{action}"
+    if _is_generic_name(name) and getattr(sk, "file_path", ""):
+        action += f" in {sk.file_path.rsplit('/', 1)[-1]}"
     details: List[str] = []
 
     params = _extract_params(sk.signature)
@@ -52,6 +59,8 @@ def _humanize_name(name: str) -> str:
 
 
 def _extract_params(signature: str) -> List[str]:
+    if signature.strip().startswith("class "):
+        return []
     match = re.search(r"\((.*?)\)", signature)
     if not match:
         return []
@@ -79,14 +88,26 @@ def _extract_return_type(signature: str) -> str:
 
 
 def _dedupe_keywords(keywords: Iterable[str], max_keywords: int) -> List[str]:
+    stop = {
+        "self", "cls", "none", "true", "false", "return", "returns", "value",
+        "values", "data", "item", "items", "result", "results", "object",
+        "objects", "model", "base", "field", "fields", "test", "tests",
+    }
     seen = set()
     result = []
     for kw in keywords:
         clean = str(kw).strip().lower()
-        if not clean or clean in seen:
+        if not clean or clean in seen or clean in stop or len(clean) < 3:
             continue
         seen.add(clean)
         result.append(clean)
         if len(result) >= max_keywords:
             break
     return result
+
+
+def _is_generic_name(name: str) -> bool:
+    return name.lower().strip("_") in {
+        "init", "get", "set", "save", "load", "create", "delete", "update",
+        "clean", "validate", "model", "form", "run", "main", "test",
+    }

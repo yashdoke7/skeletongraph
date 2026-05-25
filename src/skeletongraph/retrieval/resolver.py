@@ -18,7 +18,7 @@ v4/v5 additions:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
@@ -83,6 +83,7 @@ def resolve_context(
     enable_keyword_fallback: bool = False,
     enable_bm25_fallback: bool = False,
     enable_graph_expansion: bool = True,
+    graph_expansion_policy: str = "gated",
     enable_centrality_rerank: bool = True,
     enable_weak_entity_fallback: bool = False,
 ) -> ResolverResult:
@@ -242,11 +243,27 @@ def resolve_context(
     # ── Graph expansion: ModeSpec-driven (v5) or TaskType-based (legacy) ──
     # sg-nograph ablation: skip entirely — only direct entity hits are returned.
     if enable_graph_expansion:
-        if mode_spec is not None:
-            _expand_from_mode_spec(
-                target_fqns, mode_spec, store, ranker, candidates, target_file,
+        expansion_spec = mode_spec
+        expansion_seeds = set(target_fqns)
+        policy = (graph_expansion_policy or "gated").lower()
+        if policy == "off":
+            expansion_spec = None
+            expansion_seeds = set()
+        elif policy == "gated":
+            expansion_spec, expansion_seeds = _gate_graph_expansion(
+                prompt=prompt,
+                intent=intent,
+                mode_spec=mode_spec,
+                target_fqns=target_fqns,
+                match_source=match_source,
+                lexical_scores=_lexical_scores,
             )
-        else:
+
+        if expansion_spec is not None and expansion_seeds:
+            _expand_from_mode_spec(
+                expansion_seeds, expansion_spec, store, ranker, candidates, target_file,
+            )
+        elif policy == "always" and mode_spec is None:
             _expand_from_task_type(
                 target_fqns, intent, max_depth, store, ranker, candidates, target_file,
             )
@@ -375,6 +392,89 @@ def _bm25_fallback(prompt: str, store: IndexStore, top_k: int = 10) -> List[Tupl
         store.bm25_model = bm25
 
     return bm25.search(prompt, top_k=top_k)
+
+
+# ── Graph expansion policy ──────────────────────────────────────────────
+
+_GRAPH_REQUEST_TERMS = (
+    "caller", "callers", "callee", "callees", "call graph", "dependency",
+    "dependencies", "dependents", "blast radius", "impact", "affected",
+    "uses of", "usage", "flow", "trace", "refactor", "migration", "migrate",
+    "architecture", "design", "review",
+)
+
+
+def _gate_graph_expansion(
+    prompt: str,
+    intent: Intent,
+    mode_spec: Optional["ModeSpec"],
+    target_fqns: Set[str],
+    match_source: str,
+    lexical_scores: Dict[str, float],
+) -> Tuple[Optional["ModeSpec"], Set[str]]:
+    """Decide whether graph neighbors should enter the first packet.
+
+    The old policy expanded from every seed whenever the mode allowed graph
+    context. That is helpful for refactors and impact analysis, but noisy for
+    bug-localization: a BM25 fallback can produce 15 seeds, and expanding all of
+    them drowns the actual edit target. The gated policy keeps first-search
+    packets precise and lets broad graph context appear only when the task asks
+    for it or when we have a small, exact seed set.
+    """
+    if not target_fqns or mode_spec is None:
+        return None, set()
+
+    from .classifier import QueryMode
+
+    prompt_l = prompt.lower()
+    explicit_graph = any(term in prompt_l for term in _GRAPH_REQUEST_TERMS)
+    graph_modes = {
+        QueryMode.REFACTOR,
+        QueryMode.REVIEW,
+        QueryMode.MIGRATE,
+        QueryMode.ARCHITECTURE,
+    }
+    precise_entity = match_source in {"entity", "slm"} and len(target_fqns) <= 3
+
+    if mode_spec.mode == QueryMode.RETRIEVAL_FAST:
+        return None, set()
+
+    if precise_entity and mode_spec.mode in {
+        QueryMode.DEBUG_TARGETED,
+        QueryMode.TEST,
+        QueryMode.DOCUMENT,
+    }:
+        # Exact bug/test/doc targets benefit from immediate 1-hop context, but
+        # deeper traversal is where precision collapses.
+        return replace(mode_spec, blast_depth=min(mode_spec.blast_depth, 1),
+                       dep_depth=min(mode_spec.dep_depth, 1)), set(target_fqns)
+
+    if explicit_graph or mode_spec.mode in graph_modes:
+        seeds = _top_graph_seeds(target_fqns, lexical_scores, limit=4)
+        return replace(
+            mode_spec,
+            blast_depth=min(mode_spec.blast_depth, 2),
+            dep_depth=min(mode_spec.dep_depth, 2),
+        ), seeds
+
+    # BM25/keyword/no-entity fallback for normal fix/build prompts: keep the
+    # retrieved candidates selective. The agent can request graph via intent or
+    # sg_expand after seeing the top target.
+    return None, set()
+
+
+def _top_graph_seeds(
+    target_fqns: Set[str],
+    lexical_scores: Dict[str, float],
+    limit: int,
+) -> Set[str]:
+    if not target_fqns:
+        return set()
+    if lexical_scores:
+        ranked = sorted(target_fqns, key=lambda f: -lexical_scores.get(f, 0.0))
+    else:
+        ranked = sorted(target_fqns)
+    return set(ranked[:limit])
 
 
 # ── ModeSpec-driven expansion (v5) ──────────────────────────────────────

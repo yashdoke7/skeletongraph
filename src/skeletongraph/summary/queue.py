@@ -314,13 +314,43 @@ def _read_body(
 
 
 def _heuristic_fallback(fqn: str, signature: str) -> str:
-    """Tier-0 fallback: derive a minimal summary from name tokens."""
-    name = fqn.split("::")[-1].split(".")[-1]
+    """Tier-0 fallback: derive a compact summary from symbol + signature."""
+    symbol = fqn.split("::")[-1]
+    parts = symbol.split(".")
+    name = parts[-1]
+    owner = parts[-2] if len(parts) > 1 else ""
     try:
         from ..graph.inverted_index import tokenize_identifier
-        tokens = tokenize_identifier(name)
-        if tokens:
-            return " ".join(tokens).capitalize() + "."
+        tokens = tokenize_identifier(name) or [name]
+        action = " ".join(tokens)
+        if name.lower().strip("_") in {
+            "init", "get", "set", "save", "load", "create", "delete",
+            "update", "clean", "validate", "model", "form", "run", "main",
+            "test",
+        } and owner:
+            action = f"{' '.join(tokenize_identifier(owner))}.{action}"
+        params = _params_from_signature(signature)
+        if params:
+            return f"{action}; parameters: {', '.join(params[:5])}."
+        return action.capitalize() + "."
     except Exception:
         pass
     return f"{name}."
+
+
+def _params_from_signature(signature: str) -> List[str]:
+    if signature.strip().startswith("class "):
+        return []
+    import re
+    match = re.search(r"\((.*?)\)", signature or "")
+    if not match:
+        return []
+    params: List[str] = []
+    for raw in match.group(1).split(","):
+        param = raw.strip()
+        if not param or param in {"self", "cls"}:
+            continue
+        name = param.split(":", 1)[0].split("=", 1)[0].strip().lstrip("*")
+        if name and name not in {"*", "/"}:
+            params.append(name)
+    return params
