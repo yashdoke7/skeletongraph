@@ -10,40 +10,39 @@ and therefore no env conflict with the sentence-transformers stack.
 We hold the agent's tool surface fixed (every arm exposes the same
 search_code/read_file/edit_file/submit). For this arm, search_code dispatches
 to Codebase-Memory's graph search and returns ranked file paths — the same
-contract as bm25 / hybrid / aider.
+contract as bm25 / hybrid / sg.
+
+CLI interface (confirmed against v0.6.1 Windows binary):
+    codebase-memory-mcp cli index_repository '{"repo_path":"C:/forward/slash/path"}'
+    codebase-memory-mcp cli search_graph '{"query":"...","project":"<slug>","limit":N}'
+    codebase-memory-mcp cli list_projects '{}'
+
+Project slug: repo path with ':' removed and all separators ('/' or '\\') replaced by '-'.
+Example: C:/Users/foo/repos/django → C-Users-foo-repos-django
 
 Install (binary, separate from the Python env):
-    curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/scripts/setup.sh | bash
-    # Windows: download + run the installer from the releases page.
-Point the harness at it with CBMEM_BIN if it isn't on PATH.
+    # Windows: download the .exe from github.com/DeusData/codebase-memory-mcp/releases
+    # Set CBMEM_BIN to the full path of the .exe
+    set CBMEM_BIN=C:\\path\\to\\codebase-memory-mcp.exe
 
-⚠ ON-BOX VALIDATION NEEDED (cannot be tested without the binary):
-  1. The index subcommand (we try `<bin> index <repo>`; confirm the real verb).
-  2. The `cli search_graph` JSON output schema (we scan for file-path-like
-     fields; confirm the actual key names and adjust _extract_files).
-Run `python -m eval.backends.cbmem --selftest <repo>` once the binary is
-installed to print the raw JSON and verify the parsing.
+    # Linux/Mac:
+    curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/scripts/setup.sh | bash
+
+Run `python -m eval.backends.cbmem --selftest <repo>` to verify.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Set
 
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 # File-path-like keys we look for in whatever JSON the binary returns.
-_PATH_KEYS = ("file", "path", "file_path", "filepath", "location", "rel_path",
-              "relative_path", "uri")
-_STOP = {
-    "the", "this", "that", "with", "from", "into", "when", "then", "should",
-    "fix", "add", "error", "issue", "bug", "code", "test", "tests", "return",
-    "self", "args", "kwargs", "for", "and", "not", "but", "use", "using",
-}
+_PATH_KEYS = {"file", "path", "file_path", "filepath", "location", "rel_path",
+              "relative_path", "uri"}
 
 
 def _bin() -> str:
@@ -53,62 +52,89 @@ def _bin() -> str:
         if not Path(env).is_file():
             raise RuntimeError(
                 f"CBMEM_BIN points to a non-existent file: {env}\n"
-                f"You currently have the SOURCE, not a binary. Either download "
-                f"the Windows release .exe from "
-                f"github.com/DeusData/codebase-memory-mcp/releases, or build it "
-                f"with Go, then set CBMEM_BIN to the real .exe."
+                f"Download the Windows .exe from "
+                f"github.com/DeusData/codebase-memory-mcp/releases "
+                f"and set CBMEM_BIN to its full path."
             )
         return env
     found = shutil.which("codebase-memory-mcp")
     if found:
         return found
     raise RuntimeError(
-        "codebase-memory-mcp binary not found. Install it (see eval/backends/"
-        "cbmem.py header) or set CBMEM_BIN to its full path."
+        "codebase-memory-mcp binary not found. Install it or set CBMEM_BIN."
     )
 
 
-def _run(bin_path: str, args: List[str], repo: Path, timeout: int = 120) -> str:
-    """Run a cbmem CLI command inside the repo; return stdout ('' on failure)."""
+def _project_slug(repo: Path) -> str:
+    """Compute the cbmem project identifier for a repo path.
+
+    cbmem derives the project slug by:
+        - converting backslashes to forward slashes
+        - removing the colon from Windows drive letters  (C: → C)
+        - replacing all '/' with '-'
+    Example:
+        C:/Users/foo/repos/django  →  C-Users-foo-repos-django
+    """
+    s = str(repo).replace("\\", "/")   # normalise separators
+    s = s.replace(":", "")              # remove Windows drive colon
+    s = s.replace("/", "-")             # slashes → hyphens
+    while "--" in s:
+        s = s.replace("--", "-")
+    return s.strip("-")
+
+
+def _run(bin_path: str, args: List[str], timeout: int = 300) -> str:
+    """Run a cbmem CLI command; return stdout ('' on failure).
+
+    stderr (level=info log lines) is discarded — only the JSON on stdout matters.
+    timeout is generous because index_repository on a large repo can take ~30s.
+    """
     try:
-        r = subprocess.run([bin_path, *args], cwd=str(repo),
-                           capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(
+            [bin_path, *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
         return r.stdout or ""
     except (subprocess.SubprocessError, OSError):
         return ""
 
 
+def _is_indexed(bin_path: str, slug: str) -> bool:
+    """Return True if the project is already in cbmem's registry."""
+    blob = _run(bin_path, ["cli", "list_projects", "{}"], timeout=15)
+    try:
+        data = json.loads(blob)
+        projects = data.get("projects", [])
+        return any(p.get("name") == slug for p in projects)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return False
+
+
 def _ensure_indexed(bin_path: str, repo: Path) -> None:
-    """Index the repo. The binary auto-indexes on first query in many setups;
-    we also try an explicit index verb (best-effort, never fatal)."""
-    # NEEDS-VALIDATION: confirm the real index verb (`index` vs `scan` vs none).
-    # Capped at 120s so a wrong/hanging CLI fails fast instead of blocking the
-    # whole run for 10 min per repo (cbmem claims ms-level indexing — a long
-    # hang means the invocation is wrong; run `--selftest` to diagnose).
-    index_cmd = os.environ.get("CBMEM_INDEX_CMD", "index")
-    if index_cmd:
-        _run(bin_path, [index_cmd, "."], repo, timeout=120)
+    """Index the repo if not already present in cbmem's project registry.
 
-
-def _query_terms(query: str, limit: int = 8) -> List[str]:
-    terms = [t for t in _IDENT_RE.findall(query or "") if t.lower() not in _STOP]
-    # preserve order, dedupe, cap
-    seen: Set[str] = set()
-    out: List[str] = []
-    for t in terms:
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-        if len(out) >= limit:
-            break
-    return out
+    cbmem persists the index in an OS data directory, so this is a one-time
+    cost per repo path. On subsequent calls (same run or re-run of the same
+    task), the check is cheap (~15ms) and indexing is skipped.
+    """
+    slug = _project_slug(repo)
+    if _is_indexed(bin_path, slug):
+        return
+    # Forward slashes required — the binary rejects backslash paths.
+    repo_str = str(repo).replace("\\", "/")
+    payload = json.dumps({"repo_path": repo_str})
+    _run(bin_path, ["cli", "index_repository", payload], timeout=300)
 
 
 def _extract_files(blob: str, repo: Path) -> List[str]:
     """Pull repo-relative file paths (ordered, deduped) from cbmem JSON output.
 
-    Robust to schema variation: walks the JSON and collects any string value
-    under a path-like key that resolves to a file inside the repo.
+    cbmem search_graph returns:
+        {"results": [{"file_path": "django/db/models/query.py", ...}, ...]}
+
+    We walk the JSON and collect any string value under a path-like key that
+    resolves to a file inside the repo. Results are already ranked by cbmem
+    (BM25 by default); we preserve that order.
     """
     try:
         data = json.loads(blob)
@@ -152,39 +178,59 @@ def _extract_files(blob: str, repo: Path) -> List[str]:
 def retrieve(query: str, repo: Path, k: int = 10) -> List[str]:
     """Return up to k ranked file paths (forward-slash, repo-relative).
 
-    Maps the free-text query to a Codebase-Memory graph search over symbol
-    names, then collects the files of the matched nodes (graph order preserved).
+    Indexes the repo on first call (subsequent calls are cheap — already indexed).
+    Dispatches to cbmem's search_graph with the raw query string (cbmem uses BM25
+    over symbol names and doc strings internally).
     """
     repo = Path(repo).resolve()
     bin_path = _bin()
     _ensure_indexed(bin_path, repo)
 
-    terms = _query_terms(query)
-    if not terms:
-        return []
-    # search_graph matches symbol names by regex; OR the query identifiers.
-    name_pattern = "(?i)(" + "|".join(re.escape(t) for t in terms) + ")"
-    payload = json.dumps({"name_pattern": name_pattern, "limit": max(k * 5, 50)})
-
-    # NEEDS-VALIDATION: confirm `cli search_graph <json>` and its output schema.
-    blob = _run(bin_path, ["cli", "search_graph", payload], repo)
+    slug = _project_slug(repo)
+    payload = json.dumps({
+        "query": query,
+        "project": slug,
+        "limit": max(k * 5, 50),
+    })
+    blob = _run(bin_path, ["cli", "search_graph", payload], timeout=60)
     files = _extract_files(blob, repo)
     return files[:k]
 
 
 def _selftest(repo: str) -> None:
-    """`python -m eval.backends.cbmem --selftest <repo>` — print raw output so
-    the index verb + JSON schema can be verified on a box that has the binary."""
+    """`python -m eval.backends.cbmem --selftest <repo>` — verify the binary.
+
+    Prints the project slug, raw JSON output, and parsed file paths so you can
+    confirm the binary is working and parsing is correct.
+    """
     repo_p = Path(repo).resolve()
     bin_path = _bin()
-    print("binary:", bin_path)
+    slug = _project_slug(repo_p)
+    print(f"binary : {bin_path}")
+    print(f"repo   : {repo_p}")
+    print(f"slug   : {slug}")
+
+    print("\n--- indexing (may take 10-30s for a large repo) ---")
     _ensure_indexed(bin_path, repo_p)
-    payload = json.dumps({"name_pattern": "(?i)(handler|parse|config)", "limit": 20})
-    blob = _run(bin_path, ["cli", "search_graph", payload], repo_p)
-    print("--- raw search_graph output (first 2000 chars) ---")
+    print("indexed OK")
+
+    print("\n--- list_projects ---")
+    lp = _run(bin_path, ["cli", "list_projects", "{}"], timeout=15)
+    print(lp[:500])
+
+    print("\n--- search_graph (query='handler parse config') ---")
+    payload = json.dumps({"query": "handler parse config", "project": slug, "limit": 20})
+    blob = _run(bin_path, ["cli", "search_graph", payload], timeout=60)
+    print("raw output (first 2000 chars):")
     print(blob[:2000])
-    print("--- parsed files ---")
+
+    print("\n--- parsed file paths ---")
     for f in _extract_files(blob, repo_p):
+        print(" ", f)
+
+    print("\n--- retrieve('QuerySet as_manager', k=10) ---")
+    files = retrieve("QuerySet as_manager method", repo_p, k=10)
+    for f in files:
         print(" ", f)
 
 
