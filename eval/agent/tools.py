@@ -447,10 +447,6 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         from backends.hybrid import retrieve            # BM25+dense+rerank
         return retrieve(query, repo, k)
 
-    if backend == "aider":
-        from backends.aider_map import retrieve          # repo-map (PageRank)
-        return retrieve(query, repo, k)
-
     if backend == "cbmem":
         from backends.cbmem import retrieve              # Codebase-Memory CLI
         return retrieve(query, repo, k)
