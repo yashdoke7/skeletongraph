@@ -254,6 +254,16 @@ class SGConfig:
     summary_queue_enabled: bool = True      # Enable async post-turn summary queue
     summary_queue_max_batch: int = 10       # Max functions to process per drain run
 
+    # ── IDE push/pull integration ─────────────────────────────────────────
+    # When SG is installed as an MCP server (the pull path), the agent calls
+    # sg_search itself. If the UserPromptSubmit hook ALSO runs heuristic_query
+    # and injects the results (push), the same retrieval fires twice → doubled
+    # tokens. Default OFF: the hook injects only AMBIENT memory (constraints,
+    # session digest, the use-SG reminder) and leaves task retrieval to
+    # sg_search. Set True ONLY for hook-only installs with no MCP (then the push
+    # is the sole retrieval path). See docs/RESEARCH.md §5d.
+    hook_push_retrieval: bool = False
+
     # ── Ablation toggles (eval only) ──────────────────────────────────────
     # These default to True (full SG); the eval harness flips them off one at
     # a time for the stage-2 ablation. NEVER ship them False in production.

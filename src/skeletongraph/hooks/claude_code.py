@@ -115,8 +115,12 @@ def hook_user_prompt_submit(project_root: Path, event_data: Dict[str, Any]) -> D
         if digest:
             parts.append(digest)
 
-        # Query-relevant functions with summaries (if prompt given)
-        if prompt.strip():
+        # Query-relevant functions with summaries (PUSH retrieval). Skipped by
+        # default: when the MCP server is installed the agent calls sg_search
+        # itself, so running heuristic_query here too would double the retrieval
+        # (and the tokens). Enable cfg.hook_push_retrieval only for hook-only
+        # installs with no MCP path. See docs/RESEARCH.md §5d.
+        if prompt.strip() and getattr(cfg, "hook_push_retrieval", False):
             try:
                 result = engine.heuristic_query(prompt.strip(), top_n=8)
                 candidates = result.candidates if hasattr(result, "candidates") else []
