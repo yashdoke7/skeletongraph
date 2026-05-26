@@ -7,9 +7,10 @@ sheet used to impute cost, and paths. Nothing else should hard-code these.
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # Silence HuggingFace / sentence-transformers model-load progress bars
 # ("Loading weights: 100%|...") that interleave with the eval console output.
@@ -49,10 +50,64 @@ API_BASE = os.environ.get("SG_EVAL_API_BASE", "http://localhost:8000/v1")
 API_KEY = os.environ.get("SG_EVAL_API_KEY", "EMPTY")        # vLLM ignores it
 MODEL_NAME = os.environ.get("SG_EVAL_MODEL", "Qwen/Qwen2.5-Coder-32B-Instruct")
 
+# ── Multi-account NIM key rotation ─────────────────────────────────────────
+# When running against NIM (nvidia inference microservices) with multiple
+# accounts, set SG_EVAL_API_KEYS to a comma-separated list of API keys.
+# run_stage.py assigns one key per job (round-robin by job index) and sets it
+# as a thread-local before dispatching. _client() in react.py reads this
+# thread-local, so each concurrent worker uses a different NIM account and
+# therefore a separate per-account rate limit.
+#
+# Usage (CMD):
+#   set SG_EVAL_API_KEYS=nvapi-key1,nvapi-key2,nvapi-key3,nvapi-key4
+#   python -m eval.agent.run_stage --stage baseline --workers 8
+#
+# Usage (bash/AMD):
+#   export SG_EVAL_API_KEYS="nvapi-key1,nvapi-key2,nvapi-key3,nvapi-key4"
+#   python -m eval.agent.run_stage --stage 1a-workshop --workers 16
+#
+# If SG_EVAL_API_KEYS is not set, falls back to API_KEY (single-account mode).
+
+_NIM_KEYS: list = [
+    k.strip()
+    for k in os.environ.get("SG_EVAL_API_KEYS", "").split(",")
+    if k.strip()
+]
+
+# Thread-local storage: run_stage sets this per-job so each worker uses its
+# assigned key for the duration of the run_one() call.
+_thread_api_key: threading.local = threading.local()
+
+
+def get_api_key() -> str:
+    """Return the API key for the current worker thread.
+
+    If multi-key rotation is active (SG_EVAL_API_KEYS set), returns the key
+    assigned to this thread by run_stage. Otherwise returns the global API_KEY.
+    """
+    return getattr(_thread_api_key, "key", None) or API_KEY
+
+
+def set_thread_api_key(key: Optional[str]) -> None:
+    """Called by run_stage before dispatching each job to assign its NIM key."""
+    _thread_api_key.key = key
+
 TEMPERATURE = 0.0          # deterministic — pin this, never change mid-study
 SEED = 42
 MAX_TURNS = 40             # ReAct step ceiling; tasks hitting it = a failure mode
 REQUEST_TIMEOUT = 300      # seconds per model call
+
+# ── bounded context (matches how real IDE/agent loops manage history) ────────
+# The transcript is re-sent every turn. Without bounds, old read_file/search
+# dumps accumulate and inflate input tokens linearly with turns (observed: 200K+
+# tails). Real agents (SWE-agent/OpenHands history processors, Aider, Cursor)
+# keep only recent observations verbatim and elide older ones. We keep the last
+# N tool-result messages in full and stub the rest (the action trace + task are
+# always kept). Identical for every arm → no bias. Set 0 to disable (legacy).
+# This MATTERS MOST for SG: the agent should lean on the structural summary
+# instead of re-reading, so eliding stale raw dumps should widen SG's lead.
+CONTEXT_KEEP_LAST_TOOL_OUTPUTS = 5   # tool results kept verbatim; older → stub
+CONTEXT_STUB_OVER_CHARS = 600        # only stub outputs longer than this
 
 
 # ONE model for the whole study — it is a fixed control, not the contribution.
@@ -111,7 +166,6 @@ ARMS: Dict[str, Arm] = {
     "grep":   Arm("grep",   "grep",   "Ripgrep-style lexical"),
     "none":   Arm("none",   "none",   "No retrieval (long-context)"),
     "hybrid": Arm("hybrid", "hybrid", "Hybrid RAG (BM25+dense+rerank)", strong=True),
-    "aider":  Arm("aider",  "aider",  "Aider repo-map", strong=True),
     "cbmem":  Arm("cbmem",  "cbmem",  "Codebase-Memory (MCP graph)", strong=True),
     # SG ablations — same SG retrieval with exactly one component disabled
     # (wired in tools._sg_config). Each isolates a contribution.
@@ -182,23 +236,12 @@ STAGES: Dict[str, Stage] = {
     ),
     # Local full comparison (7B, then 14B by swapping SG_EVAL_MODEL). These five
     # arms ALL require the sentence-transformers stack (SG embeddings + hybrid
-    # dense), so they share one env. aider-chat hard-pins huggingface-hub==1.4.1
-    # which is incompatible with that stack — it runs separately as `0-aider`
-    # from its own venv. 5 arms × 30 tasks = 150 runs. Retrieval + efficiency +
-    # (weak) consolidation; pass@1 deferred to the SWE-bench Docker run on AMD.
+    # dense), so they share one env. 5 arms × 30 tasks = 150 runs. Retrieval +
+    # efficiency + (weak) consolidation; pass@1 from the SWE-bench Docker run.
     "0-full": Stage(
         "0-full", ["sg", "bm25", "grep", "none", "hybrid"], 30, "swebench",
         "Local comparison (7B/14B) — SG vs lexical (bm25/grep) vs no-retrieval "
         "(none) vs dense-RAG (hybrid) × 30 tasks. pass@1 deferred to the AMD run.",
-    ),
-    # aider repo-map baseline — run from an ISOLATED venv (aider-chat's
-    # huggingface-hub==1.4.1 pin conflicts with the sentence-transformers stack).
-    # Writes into the same RUNS_DIR; combine with `aggregate` (no --stage) for the
-    # full 6-arm table. The aider arm needs no sentence-transformers.
-    "0-aider": Stage(
-        "0-aider", ["aider"], 30, "swebench",
-        "Aider repo-map baseline (isolated venv) — merges with 0-full for the "
-        "complete 6-arm comparison.",
     ),
     # SG component ablations — isolate which part of SG carries the gain. Run on
     # the SAME 30 tasks; compare against the `sg` arm from 0-full. sg-nosummary
@@ -260,11 +303,11 @@ STAGES: Dict[str, Stage] = {
     ),
     "1b-conference": Stage(
         "1b-conference",
-        ["aider", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
+        ["sg-fullgraph", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
         SWEBENCH_N, "swebench",
-        "STAGE 1b (CONFERENCE) — strong repo-map baseline (aider) + SG component "
-        "ablations (C2 summaries; C3 graph/rerank/embed). Run in PARALLEL with "
-        "1a. Agent-vs-no-agent (sg-noagent) is run via run_singleshot.",
+        "STAGE 1b (CONFERENCE) — SG component ablations (eager-graph; C2 "
+        "summaries; C3 graph/rerank/embed) vs the default gated `sg`. Run in "
+        "PARALLEL with 1a. Agent-vs-no-agent (sg-noagent) via run_singleshot.",
     ),
     "2-competitor": Stage(
         "2-competitor", ["cbmem"], SWEBENCH_N, "swebench",

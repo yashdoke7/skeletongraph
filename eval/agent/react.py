@@ -22,6 +22,19 @@ from .tools import TOOL_SCHEMAS, ToolExecutor
 # Valid tool names — used to validate text-parsed tool calls (below).
 _VALID_TOOLS = {s["function"]["name"] for s in TOOL_SCHEMAS}
 
+# API call robustness — retry transient failures so one blip doesn't drop a task
+# (which would unpair the arm comparison). Substring match on the error string.
+_MAX_API_ATTEMPTS = 6
+_RETRYABLE_TOKENS = (
+    "429", "RateLimit", "Timeout", "timed out", "Connection", "APIConnection",
+    "ServiceUnavailable", "InternalServer", "overloaded", "Overloaded",
+    "500", "502", "503", "504", "Gateway", "temporarily",
+)
+
+
+def _is_retryable(err_msg: str) -> bool:
+    return any(tok in err_msg for tok in _RETRYABLE_TOKENS)
+
 SYSTEM_PROMPT = """You are an autonomous software engineer fixing a bug in a \
 repository. You can only see the code through your tools.
 
@@ -111,7 +124,9 @@ class Trajectory:
 
 def _client():
     from openai import OpenAI
-    return OpenAI(base_url=config.API_BASE, api_key=config.API_KEY,
+    # get_api_key() returns the thread-local key set by run_stage (multi-account
+    # NIM rotation) or falls back to the global API_KEY (single-account / vLLM).
+    return OpenAI(base_url=config.API_BASE, api_key=config.get_api_key(),
                   timeout=config.REQUEST_TIMEOUT)
 
 
@@ -182,6 +197,35 @@ def _parse_text_tool_calls(content: str) -> List[dict]:
     return calls
 
 
+def _compact_history(messages: List[dict]) -> None:
+    """Elide stale tool-output bodies in place — bounded context.
+
+    Re-sending every prior read_file/search dump each turn is what makes input
+    tokens grow linearly with turns. Real agent loops keep only recent
+    observations verbatim. We stub the CONTENT of all but the last N
+    tool-result messages (role=='tool', or the text-fallback user messages that
+    carry tool output), keeping a short head so the model recalls what it was
+    and can re-read on demand. Structure is preserved (we never drop a message),
+    so tool_call_id pairing stays valid. Applied identically to every arm.
+    """
+    keep = getattr(config, "CONTEXT_KEEP_LAST_TOOL_OUTPUTS", 0)
+    if not keep:
+        return
+    over = getattr(config, "CONTEXT_STUB_OVER_CHARS", 600)
+    tool_idxs = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "tool"
+        or (m.get("role") == "user"
+            and str(m.get("content", "")).startswith("[tool result"))
+    ]
+    for i in tool_idxs[:-keep] if keep else tool_idxs:
+        c = messages[i].get("content", "")
+        if isinstance(c, str) and len(c) > over and "[…elided" not in c:
+            messages[i]["content"] = (
+                c[:200].rstrip()
+                + "\n[…elided to save context — re-read the file/search if needed]")
+
+
 def run_react(task: dict, arm: str, executor: ToolExecutor,
               model: str = "main") -> Trajectory:
     """Run one task with one arm to completion. Returns the trajectory."""
@@ -195,8 +239,14 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
     ]
 
     for step in range(config.MAX_TURNS):
+        _compact_history(messages)   # bounded context — elide stale tool dumps
         ts = time.time()
-        for attempt in range(5):
+        # Retry not just rate limits but ALSO transient server/connection errors
+        # (timeouts, 5xx, overloaded). On NIM these were the main cause of lost
+        # tasks: a single transient 500/timeout used to hard-fail the whole run,
+        # so arms ended up with different task subsets (unpaired n). Treating them
+        # as retryable keeps the task set complete and the comparison paired.
+        for attempt in range(_MAX_API_ATTEMPTS):
             try:
                 resp = client.chat.completions.create(
                     model=config.MODEL_NAME,
@@ -208,13 +258,15 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
                 )
                 break  # success
             except Exception as e:
-                if "429" in str(e) or "RateLimit" in type(e).__name__:
-                    time.sleep(5 * (2 ** attempt))  # 5s, 10s, 20s, 40s, 80s
+                msg = f"{type(e).__name__}: {e}"
+                last_attempt = attempt >= _MAX_API_ATTEMPTS - 1
+                if _is_retryable(msg) and not last_attempt:
+                    time.sleep(min(60, 5 * (2 ** attempt)))  # 5,10,20,40,60,60...
                     continue
-                traj.stopped, traj.error = "error", f"{type(e).__name__}: {e}"
+                traj.stopped, traj.error = "error", msg
                 break
         else:
-            traj.stopped, traj.error = "error", "RateLimitError: exhausted retries"
+            traj.stopped, traj.error = "error", "exhausted retries (transient)"
 
         if traj.stopped == "error":
             break

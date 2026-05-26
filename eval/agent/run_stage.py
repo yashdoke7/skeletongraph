@@ -23,6 +23,23 @@ from .isolation import run_id
 from .run_agent import load_tasks, run_one
 
 
+def _run_one_with_key(task: dict, arm: str, repeat: int, model: str,
+                      key_idx: int) -> dict:
+    """Wrapper that assigns a per-job NIM API key before calling run_one.
+
+    key_idx is the job's position in the pending list; config._NIM_KEYS is
+    indexed modulo the number of available keys. This ensures round-robin
+    distribution across all NIM accounts. If _NIM_KEYS is empty (single-account
+    or vLLM), the call is a no-op and falls back to the global API_KEY.
+    """
+    if config._NIM_KEYS:
+        config.set_thread_api_key(config._NIM_KEYS[key_idx % len(config._NIM_KEYS)])
+    try:
+        return run_one(task, arm, repeat, model)
+    finally:
+        config.set_thread_api_key(None)   # release so no stale key lingers
+
+
 def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0,
                 dataset: str = "") -> list:
     """Expand a stage into a flat list of (task, arm, model, repeat) jobs.
@@ -89,11 +106,19 @@ def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
         print("  nothing to do (all results exist) — run aggregate.py + verify.py")
         return
 
+    n_keys = len(config._NIM_KEYS)
+    if n_keys:
+        print(f"  Multi-account NIM: {n_keys} API keys → "
+              f"~{n_keys}× rate-limit headroom  "
+              f"(SG_EVAL_API_KEYS)")
+    else:
+        print(f"  Single-account mode (SG_EVAL_API_KEYS not set)")
+
     t0 = time.time()
     done = fail = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(run_one, t, a, r, m): (t["task_id"], a, m, r)
-                for (t, a, m, r) in jobs}
+        futs = {pool.submit(_run_one_with_key, t, a, r, m, i): (t["task_id"], a, m, r)
+                for i, (t, a, m, r) in enumerate(jobs)}
         for fut in as_completed(futs):
             tid, arm, model, rep = futs[fut]
             try:
