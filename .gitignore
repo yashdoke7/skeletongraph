@@ -90,3 +90,11 @@ eval/results/agent_*/
 
 eval/curator/*.pkl
 eval/results_backup.zip
+
+# SWE-bench harness output JSONs (run_harness() writes <arm>.<run_tag>.json to CWD)
+bm25.*.json
+grep.*.json
+hybrid.*.json
+none.*.json
+sg.*.json
+logs/
