@@ -43,62 +43,63 @@ def _run_records(stage: str | None) -> list:
 
 
 def write_predictions(records: list, out: Path) -> Path:
-    """SWE-bench predictions file: one JSON object per (run) line.
+    """SWE-bench predictions file for ONE arm: one JSON object per line.
 
-    instance_id is suffixed with the run_id so every arm/repeat is a distinct
-    prediction the harness can score independently.
+    The harness keys predictions by instance_id and expects ONE prediction per
+    instance_id per run. So we write one file PER ARM (model_name_or_path is the
+    arm), each containing instance_id=task_id. This is why verify loops arms —
+    a single mixed file would collapse all arms to one verdict per task.
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as f:
         for r in records:
             f.write(json.dumps({
                 "instance_id": r["task_id"],
-                "model_name_or_path": r["run_id"],   # unique per arm/repeat
+                "model_name_or_path": r.get("arm", "sg"),
                 "model_patch": r.get("model_patch", ""),
             }) + "\n")
     return out
 
 
-def run_harness(predictions: Path, run_tag: str) -> Path:
+def run_harness(predictions: Path, run_tag: str, dataset: str) -> Path:
     """Invoke the official SWE-bench harness. Returns its results JSON path."""
     cmd = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
-        "--dataset_name", "princeton-nlp/SWE-bench_Verified",
+        "--dataset_name", dataset,
         "--predictions_path", str(predictions),
         "--run_id", run_tag,
         "--max_workers", "4",
     ]
     print("  " + " ".join(cmd))
     subprocess.run(cmd, check=True)
-    # the harness writes <model_name>.<run_id>.json in CWD; with mixed
-    # model_name_or_path it writes per-prediction reports under logs/run_evaluation.
+    # the harness writes <model_name>.<run_id>.json in CWD.
     candidates = sorted(Path(".").glob(f"*{run_tag}*.json"))
     return candidates[-1] if candidates else Path("logs/run_evaluation")
 
 
-def apply_results(records: list, results_path: Path) -> None:
-    """Read the harness verdict and write `resolved` back into each run JSON.
-
-    The harness report maps instance keys -> resolved bool. Exact schema varies
-    by swebench version; this reads the common {"resolved_ids": [...]} shape and
-    falls back to a per-instance scan. VALIDATE the shape on-box once.
-    """
-    resolved_ids: set = set()
+def _resolved_task_ids(results_path: Path) -> set:
+    """Parse the harness report → set of resolved instance_ids (task_ids)."""
     try:
         data = json.loads(Path(results_path).read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            resolved_ids = set(data.get("resolved_ids", [])
-                               or data.get("resolved", []))
     except Exception as e:
         print(f"  WARN: could not parse {results_path}: {e}")
         print("  Inspect logs/run_evaluation/ and set `resolved` manually, or "
-              "adjust apply_results() to the harness version's schema.")
+              "adjust _resolved_task_ids() to the harness version's schema.")
+        return set()
+    if isinstance(data, dict):
+        return set(data.get("resolved_ids", []) or data.get("resolved", []))
+    return set()
 
+
+def apply_results(records: list, resolved_ids: set) -> None:
+    """Write `resolved` back into each run JSON for ONE arm's records.
+
+    resolved_ids are task_ids resolved BY THIS ARM (the harness ran on a
+    single-arm predictions file), so matching by task_id is now correct —
+    different arms no longer share a verdict.
+    """
     for r in records:
-        key_run = r["run_id"]
-        key_task = r["task_id"]
-        resolved = key_run in resolved_ids or key_task in resolved_ids
-        r["resolved"] = bool(resolved)
+        r["resolved"] = bool(r["task_id"] in resolved_ids)
         r.pop("_path", None)
         Path(config.RUNS_DIR / f"{r['run_id']}.json").write_text(
             json.dumps(r, indent=2), encoding="utf-8")
@@ -109,6 +110,8 @@ def main() -> None:
     ap.add_argument("--stage", default=None, help="verify one stage's runs")
     ap.add_argument("--all", action="store_true", help="verify every run")
     ap.add_argument("--run-tag", default="sg_eval")
+    ap.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
+                    help="HF dataset the harness scores against")
     args = ap.parse_args()
 
     stage = None if args.all else args.stage
@@ -116,12 +119,28 @@ def main() -> None:
     if not records:
         raise SystemExit("no run JSONs found — run run_stage.py first")
 
-    preds = write_predictions(records, config.RUNS_DIR / "_predictions.jsonl")
-    print(f"Wrote {len(records)} predictions -> {preds}")
-    results = run_harness(preds, args.run_tag)
-    apply_results(records, results)
-    n_ok = sum(1 for r in records if r.get("resolved"))
-    print(f"Verified: {n_ok}/{len(records)} resolved. `resolved` written back.")
+    # Group by arm and verify each arm independently — one harness run per arm,
+    # so each task's verdict is attributed to the correct arm.
+    by_arm: dict = {}
+    for r in records:
+        by_arm.setdefault(r.get("arm", "sg"), []).append(r)
+
+    total_ok = total = 0
+    for arm, arm_recs in sorted(by_arm.items()):
+        preds = write_predictions(arm_recs,
+                                  config.RUNS_DIR / f"_predictions_{arm}.jsonl")
+        tag = f"{args.run_tag}_{arm}"
+        print(f"[{arm}] {len(arm_recs)} predictions -> {preds}")
+        results = run_harness(preds, tag, args.dataset)
+        resolved = _resolved_task_ids(results)
+        apply_results(arm_recs, resolved)
+        n_ok = sum(1 for r in arm_recs if r.get("resolved"))
+        total_ok += n_ok
+        total += len(arm_recs)
+        print(f"[{arm}] resolved {n_ok}/{len(arm_recs)}")
+
+    print(f"\nVerified: {total_ok}/{total} resolved across "
+          f"{len(by_arm)} arms. `resolved` written back. Run aggregate for pass@1.")
 
 
 if __name__ == "__main__":
