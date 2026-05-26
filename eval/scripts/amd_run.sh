@@ -284,18 +284,18 @@ push_results "stage 1 all arms + single-shot complete — WORKSHOP/CONFERENCE DO
 # BLOCK 4 — PASS@1 VERIFICATION (needs SWE-bench Docker harness)
 # This is the REAL accuracy metric. Local eval only gives retrieval + efficiency.
 # Requires: Docker installed + SWE-bench eval Docker images.
+# verify.py runs the harness ONCE PER ARM (one predictions file per arm) so each
+# task's verdict is attributed to the correct arm, then writes `resolved` back.
 # ==================================================================================
 
-# Install SWE-bench eval:
 pip3 install swebench -q
 
-# Run verify.py on all completed runs (writes verdict=1/0 into each run JSON):
-# $PY eval/verify.py --run-dir eval/results/agent/qwen32b_swebench
-# NOTE: verify.py resets each repo to base commit, applies the model's patch,
-#       runs the FAIL_TO_PASS tests, and writes pass/fail. Can run in parallel.
-# Check progress:
-# $PY -m eval.agent.aggregate --run-dir eval/results/agent/qwen32b_swebench
-push_results "post-verify pass@1 written"
+# Per-arm pass@1 for each stage's arms (writes `resolved` into each run JSON):
+$PY -m eval.agent.verify --stage 1a-workshop   --run-tag qwen32b
+$PY -m eval.agent.verify --stage 1b-conference --run-tag qwen32b
+# aggregate now fills the pass@1 column + McNemar (sg vs each baseline):
+$PY -m eval.agent.aggregate --run-dir eval/results/agent/qwen32b_swebench
+push_results "post-verify pass@1 + McNemar written"
 
 
 # ==================================================================================
