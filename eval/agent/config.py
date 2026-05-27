@@ -94,6 +94,11 @@ def set_thread_api_key(key: Optional[str]) -> None:
 
 TEMPERATURE = 0.0          # deterministic — pin this, never change mid-study
 SEED = 42
+# Disable chain-of-thought/thinking for models that support the toggle (Qwen3,
+# DeepSeek, etc.). Thinking mode buffers the full reasoning trace before sending
+# content chunks, making streaming as slow as non-streaming for our harness.
+# Set SG_EVAL_DISABLE_THINKING=0 to re-enable (e.g. to study reasoning models).
+DISABLE_THINKING: bool = os.environ.get("SG_EVAL_DISABLE_THINKING", "1") != "0"
 MAX_TURNS = 40             # ReAct step ceiling; tasks hitting it = a failure mode
 REQUEST_TIMEOUT = 300      # seconds per model call
 
@@ -320,6 +325,42 @@ STAGES: Dict[str, Stage] = {
         "STAGE 3 (FURTHER / TOP-TIER) — 3x variance (mean±std + McNemar/CIs), "
         "the learned curator (sg-learned, see docs/CURATOR.md), and a 2nd "
         "language. Spend only if 1-2 warrant the push.",
+        repeats=3,
+    ),
+    # ── AMD smoke pre-check (single most important pre-stage) ────────────────
+    # Same 7 arms as `full`, but ONLY the first N tasks of the 150-task pool.
+    # Run this FIRST on the MI300X; if 1a-arms look sane and verify works,
+    # proceed to the real stages; if not, abort before burning budget.
+    # Use --limit 10 on the run_stage call to scope to 10 tasks; the stage
+    # itself stays open-ended so you can re-run with --limit 25 if needed.
+    "0-smoke": Stage(
+        "0-smoke",
+        ["sg", "bm25", "grep", "none", "hybrid", "cbmem", "graphify"],
+        SWEBENCH_N, "swebench",
+        "AMD SMOKE — first N tasks across ALL arms (baseline + cbmem + "
+        "graphify). Use `run_stage --stage 0-smoke --limit 10` to scope.",
+    ),
+    # ── ContextBench stage with graph competitors included ───────────────────
+    # The ContextBench pass becomes the 2nd benchmark in the paper. We include
+    # cbmem and graphify here too so the graph-competitor comparison spans
+    # BOTH SWE-bench and ContextBench (the reviewer ask: "does the result
+    # generalise?"). Dataset is set via --dataset eval/datasets/contextbench.jsonl
+    # at the run_stage call site.
+    "contextbench": Stage(
+        "contextbench",
+        ["sg", "bm25", "grep", "none", "hybrid", "cbmem", "graphify"],
+        60, "contextbench",
+        "ContextBench (2nd benchmark) — baseline + cbmem + graphify. "
+        "Run with --dataset eval/datasets/contextbench.jsonl.",
+    ),
+    # ── 3-seed variance appendix ─────────────────────────────────────────────
+    # 4 core arms × 20 tasks × 3 seeds = 240 runs. Quantifies serving-level
+    # non-determinism (NIM/vLLM kernel-reduction non-bitwise reproducibility).
+    # The reviewer-defensible "we know how noisy our numbers are" appendix.
+    "variance": Stage(
+        "variance", ["sg", "bm25", "hybrid", "cbmem"], 20, "swebench",
+        "VARIANCE APPENDIX — 4 arms × 20 tasks × 3 seeds. Single most "
+        "compact way to quantify NIM/vLLM non-determinism for the paper.",
         repeats=3,
     ),
 }

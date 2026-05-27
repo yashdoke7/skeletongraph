@@ -25,15 +25,32 @@ _VALID_TOOLS = {s["function"]["name"] for s in TOOL_SCHEMAS}
 # API call robustness — retry transient failures so one blip doesn't drop a task
 # (which would unpair the arm comparison). Substring match on the error string.
 _MAX_API_ATTEMPTS = 6
+# Substring tokens that indicate a transient failure worth retrying.
+# Auth failures (401/403/404) are NOT retryable — they will never succeed.
+# Status codes are matched as " 4xx " / " 5xx " with spaces so "500" in a
+# PermissionDenied 403 message or "503" inside "Authorization" can't false-match.
 _RETRYABLE_TOKENS = (
-    "429", "RateLimit", "Timeout", "timed out", "Connection", "APIConnection",
+    "429", "RateLimit", "Timeout", "timed out", "APIConnection",
     "ServiceUnavailable", "InternalServer", "overloaded", "Overloaded",
-    "500", "502", "503", "504", "Gateway", "temporarily",
+    "Gateway", "temporarily",
 )
+# Exact HTTP status codes to retry (server-side transient errors only).
+_RETRYABLE_STATUS = {"500", "502", "503", "504"}
+# Auth / not-found errors — NEVER retry, fail immediately.
+_FATAL_TOKENS = ("401", "403", "404", "Forbidden", "Unauthorized", "NotFound",
+                 "PermissionDenied", "AuthenticationError")
 
 
 def _is_retryable(err_msg: str) -> bool:
-    return any(tok in err_msg for tok in _RETRYABLE_TOKENS)
+    # Fatal errors short-circuit first — never retry auth/not-found failures.
+    if any(tok in err_msg for tok in _FATAL_TOKENS):
+        return False
+    if any(tok in err_msg for tok in _RETRYABLE_TOKENS):
+        return True
+    # Match status codes only when surrounded by non-digit chars (avoids
+    # "500" matching inside "Error code: 4500" etc.)
+    import re
+    return any(re.search(r'\b' + s + r'\b', err_msg) for s in _RETRYABLE_STATUS)
 
 SYSTEM_PROMPT = """You are an autonomous software engineer fixing a bug in a \
 repository. You can only see the code through your tools.
@@ -130,19 +147,119 @@ def _client():
                   timeout=config.REQUEST_TIMEOUT)
 
 
-def _usage(resp) -> dict:
-    u = getattr(resp, "usage", None)
-    if not u:
-        return {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
-    cached = 0
-    details = getattr(u, "prompt_tokens_details", None)
-    if details is not None:
-        cached = getattr(details, "cached_tokens", 0) or 0
+def _usage_from_dict(d: dict) -> dict:
     return {
-        "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
-        "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
-        "cached_tokens": cached,
+        "prompt_tokens": d.get("prompt_tokens", 0) or 0,
+        "completion_tokens": d.get("completion_tokens", 0) or 0,
+        "cached_tokens": d.get("cached_tokens", 0) or 0,
     }
+
+
+def _stream_completion(client, messages: list):
+    """Stream a chat completion and reassemble into (content, tool_calls, usage).
+
+    Streaming is critical for reasoning models (DeepSeek V4 Flash, etc.) that
+    do chain-of-thought internally: in non-streaming mode the client waits for
+    the COMPLETE response (including all hidden thinking tokens) before the first
+    byte arrives, causing timeouts. Streaming starts delivering tokens immediately
+    (low TTFT) so the full 300s REQUEST_TIMEOUT budget covers actual generation.
+
+    Returns:
+        content    – str, the assistant's text reply (may be empty if only tool calls)
+        tool_calls – list of SimpleNamespace(id, function=SimpleNamespace(name, arguments))
+                     Compatible with the native_calls processing path downstream.
+        usage      – dict(prompt_tokens, completion_tokens, cached_tokens)
+    """
+    from types import SimpleNamespace
+
+    content_parts: List[str] = []
+    tc_acc: dict = {}   # chunk index → {"id": str, "name": str, "arguments": str}
+    usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+
+    # stream_options={"include_usage": True} requests a final usage chunk.
+    # Not all NIM endpoints honour it — fall back silently if it errors.
+    for use_usage_opt in (True, False):
+        kwargs: dict = dict(
+            model=config.MODEL_NAME,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=config.TEMPERATURE,
+            seed=config.SEED,
+            stream=True,
+        )
+        if use_usage_opt:
+            kwargs["stream_options"] = {"include_usage": True}
+        # Disable chain-of-thought for models that support the toggle.
+        # Reasoning/thinking mode causes the model to buffer its full internal
+        # chain before sending content chunks, making streaming no faster than
+        # non-streaming for our purposes. SG_EVAL_DISABLE_THINKING=0 to re-enable.
+        if getattr(config, "DISABLE_THINKING", True):
+            kwargs.setdefault("extra_body", {})
+            kwargs["extra_body"]["chat_template_kwargs"] = {"enable_thinking": False}
+        try:
+            stream = client.chat.completions.create(**kwargs)
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+
+                # Usage-only final chunk (from stream_options)
+                if not choices:
+                    u = getattr(chunk, "usage", None)
+                    if u:
+                        usage["prompt_tokens"] = getattr(u, "prompt_tokens", 0) or 0
+                        usage["completion_tokens"] = getattr(u, "completion_tokens", 0) or 0
+                        details = getattr(u, "prompt_tokens_details", None)
+                        if details:
+                            usage["cached_tokens"] = getattr(details, "cached_tokens", 0) or 0
+                    continue
+
+                delta = choices[0].delta
+
+                # Text content (skip reasoning_content — internal thinking tokens)
+                if getattr(delta, "content", None):
+                    content_parts.append(delta.content)
+
+                # Incremental tool_call deltas — accumulate by index
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    i = tc.index
+                    if i not in tc_acc:
+                        tc_acc[i] = {"id": "", "name": "", "arguments": ""}
+                    if tc.id:
+                        tc_acc[i]["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn:
+                        if getattr(fn, "name", None):
+                            tc_acc[i]["name"] += fn.name
+                        if getattr(fn, "arguments", None):
+                            tc_acc[i]["arguments"] += fn.arguments
+
+                # Usage sometimes comes on the last choice chunk instead
+                u = getattr(chunk, "usage", None)
+                if u and (getattr(u, "prompt_tokens", 0) or 0) > 0:
+                    usage["prompt_tokens"] = getattr(u, "prompt_tokens", 0) or 0
+                    usage["completion_tokens"] = getattr(u, "completion_tokens", 0) or 0
+            break   # stream consumed successfully — exit the retry loop
+        except Exception as e:
+            if use_usage_opt and "stream_options" in str(e).lower():
+                continue   # endpoint rejected stream_options — retry without it
+            raise          # real error — propagate to the caller's retry logic
+
+    content = "".join(content_parts)
+
+    # Reconstruct tool_calls as SimpleNamespace objects so downstream code
+    # (tc.id, tc.function.name, tc.function.arguments) works unchanged.
+    tool_calls = [
+        SimpleNamespace(
+            id=tc_acc[i]["id"] or f"call_{i}",
+            function=SimpleNamespace(
+                name=tc_acc[i]["name"],
+                arguments=tc_acc[i]["arguments"],
+            ),
+        )
+        for i in sorted(tc_acc.keys())
+        if tc_acc[i]["name"]   # skip malformed empty-name entries
+    ]
+    return content, tool_calls, usage
 
 
 def _parse_text_tool_calls(content: str) -> List[dict]:
@@ -248,22 +365,15 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
         # as retryable keeps the task set complete and the comparison paired.
         for attempt in range(_MAX_API_ATTEMPTS):
             try:
-                resp = client.chat.completions.create(
-                    model=config.MODEL_NAME,
-                    messages=messages,
-                    tools=TOOL_SCHEMAS,
-                    tool_choice="auto",
-                    temperature=config.TEMPERATURE,
-                    seed=config.SEED,
-                )
+                content, native_calls, usage_dict = _stream_completion(client, messages)
                 break  # success
             except Exception as e:
-                msg = f"{type(e).__name__}: {e}"
+                err_msg = f"{type(e).__name__}: {e}"
                 last_attempt = attempt >= _MAX_API_ATTEMPTS - 1
-                if _is_retryable(msg) and not last_attempt:
+                if _is_retryable(err_msg) and not last_attempt:
                     time.sleep(min(60, 5 * (2 ** attempt)))  # 5,10,20,40,60,60...
                     continue
-                traj.stopped, traj.error = "error", msg
+                traj.stopped, traj.error = "error", err_msg
                 break
         else:
             traj.stopped, traj.error = "error", "exhausted retries (transient)"
@@ -271,21 +381,18 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
         if traj.stopped == "error":
             break
 
-        choice = resp.choices[0]
-        msg = choice.message
-        turn = Turn(index=step, usage=_usage(resp),
-                    text=msg.content or "", latency_s=time.time() - ts)
+        turn = Turn(index=step, usage=_usage_from_dict(usage_dict),
+                    text=content, latency_s=time.time() - ts)
 
-        native_calls = msg.tool_calls or []
         # Fallback: model emitted the call as text JSON, not structured tool_calls.
         text_calls = ([] if native_calls
-                      else _parse_text_tool_calls(msg.content or ""))
+                      else _parse_text_tool_calls(content))
 
         if not native_calls and not text_calls:
             # model answered without acting — nudge once, else stop
             turn.tool_calls = []
             traj.turns.append(turn)
-            messages.append({"role": "assistant", "content": msg.content or ""})
+            messages.append({"role": "assistant", "content": content})
             if step > 0 and not traj.turns[step - 1].tool_calls:
                 traj.stopped = "no_tool"
                 break
@@ -297,7 +404,7 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
             # ── structured tool_calls path ──────────────────────────────────
             messages.append({
                 "role": "assistant",
-                "content": msg.content or "",
+                "content": content,
                 "tool_calls": [
                     {"id": tc.id, "type": "function",
                      "function": {"name": tc.function.name,
@@ -320,7 +427,7 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
             # ── text-form tool calls (fallback) ─────────────────────────────
             # Feed results back as user messages — robust across endpoints that
             # reject synthetic tool_calls / tool-role pairing.
-            messages.append({"role": "assistant", "content": msg.content or ""})
+            messages.append({"role": "assistant", "content": content})
             for call in text_calls:
                 name, args = call["name"], call["arguments"]
                 result = executor.run(name, args)

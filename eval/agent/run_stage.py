@@ -41,13 +41,19 @@ def _run_one_with_key(task: dict, arm: str, repeat: int, model: str,
 
 
 def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0,
-                dataset: str = "") -> list:
+                dataset: str = "",
+                only_arms: set | None = None,
+                skip_arms: set | None = None) -> list:
     """Expand a stage into a flat list of (task, arm, model, repeat) jobs.
 
     probe → first 5 tasks; limit>0 → first N tasks (overrides probe); else the
     stage's n_tasks. Tasks are deterministic (dataset order) so a 10-task 14B
     run hits the SAME first 10 tasks as the 7B run for a clean comparison.
     dataset → load tasks from a non-default jsonl (e.g. contextbench.jsonl).
+    only_arms / skip_arms → narrow the stage's arm list at the CLI without
+    redefining the stage. Useful when an arm has different concurrency needs
+    (cbmem/graphify are CPU-bound; the rest GPU-bound) and you want to fire
+    them with different --workers.
     """
     from pathlib import Path
     tasks = load_tasks(Path(dataset)) if dataset else load_tasks()
@@ -58,11 +64,18 @@ def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0,
     else:
         n = stage.n_tasks
     tasks = tasks[:n]
+    arms = stage.arms
+    if only_arms:
+        arms = [a for a in arms if a in only_arms]
+    if skip_arms:
+        arms = [a for a in arms if a not in skip_arms]
+    if not arms:
+        return []
     jobs = []
     for model in stage.models:
         for repeat in range(stage.repeats):
             for task in tasks:
-                for arm in stage.arms:
+                for arm in arms:
                     jobs.append((task, arm, model, repeat))
     return jobs
 
@@ -85,17 +98,19 @@ def _already_done(task: dict, arm: str, model: str, repeat: int) -> bool:
 
 
 def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
-              force: bool = False, limit: int = 0, dataset: str = "") -> None:
+              force: bool = False, limit: int = 0, dataset: str = "",
+              only_arms: set | None = None,
+              skip_arms: set | None = None) -> None:
     if stage_name not in config.STAGES:
         raise SystemExit(f"unknown stage {stage_name}; "
                          f"choose from {list(config.STAGES)}")
     stage = config.STAGES[stage_name]
-    if stage.benchmark != "swebench":
+    if stage.benchmark != "swebench" and not dataset:
         print(f"NOTE: stage {stage_name} uses benchmark '{stage.benchmark}'. "
-              f"This harness currently drives SWE-bench. Wire the {stage.benchmark} "
-              f"loader before running it (see STAGES.md).")
+              f"Pass --dataset eval/datasets/{stage.benchmark}.jsonl if not "
+              f"already overridden.")
 
-    jobs = _stage_jobs(stage, probe, limit, dataset)
+    jobs = _stage_jobs(stage, probe, limit, dataset, only_arms, skip_arms)
     if not force:
         jobs = [j for j in jobs if not _already_done(j[0], j[1], j[2], j[3])]
 
@@ -150,9 +165,17 @@ def main() -> None:
     ap.add_argument("--dataset", default="",
                     help="tasks jsonl to use instead of the default (e.g. "
                          "eval/datasets/contextbench.jsonl)")
+    ap.add_argument("--only-arms", default="",
+                    help="comma-separated arm names; restrict to these arms "
+                         "(e.g. cbmem,graphify to run only CPU-bound arms)")
+    ap.add_argument("--skip-arms", default="",
+                    help="comma-separated arm names; exclude these arms "
+                         "(complement of --only-arms)")
     args = ap.parse_args()
+    only = {a.strip() for a in args.only_arms.split(",") if a.strip()} or None
+    skip = {a.strip() for a in args.skip_arms.split(",") if a.strip()} or None
     run_stage(args.stage, args.workers, args.probe, args.force, args.limit,
-              args.dataset)
+              args.dataset, only, skip)
 
 
 if __name__ == "__main__":

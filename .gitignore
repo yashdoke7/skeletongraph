@@ -98,3 +98,6 @@ hybrid.*.json
 none.*.json
 sg.*.json
 logs/
+
+eval/scripts/set_nim_env.bat
+eval/scripts/set_nim_env.ps1
