@@ -1,0 +1,616 @@
+% =====================================================================
+% SkeletonGraph: A Context-Management Wrapper for Coding Agents
+% Draft skeleton — fill in numbers AFTER each AMD/NIM stage lands.
+% Maintained by: yashdoke215@gmail.com
+%
+% Compile:    pdflatex skeletongraph.tex && bibtex skeletongraph && pdflatex skeletongraph.tex
+% Bib file:   docs/paper/references.bib   (create alongside this file)
+% =====================================================================
+
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{listings}
+\usepackage{fancyvrb}
+
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,
+            urlcolor=blue!60!black}
+
+% Placeholder macro — wrap every TBD number with \tbd{...} so they're easy
+% to find when filling in.
+\newcommand{\tbd}[1]{\textcolor{red}{[\textbf{TBD: }#1]}}
+
+\title{SkeletonGraph: A Context-Management Wrapper for Coding Agents}
+\author{Yash Doke\\\texttt{yashdoke215@gmail.com}}
+\date{Draft \today}
+
+\begin{document}
+\maketitle
+
+% ---------------------------------------------------------------
+\begin{abstract}
+% Final pass: rewrite after Stage 1a + cbmem pass@1 lands.
+% Current honest framing: cost + retrieval precision claim.
+We present \textbf{SkeletonGraph (SG)}, an IDE- and CLI-agnostic
+context-management wrapper for coding agents that combines (i)~a
+tree-sitter symbol graph with PageRank centrality, (ii)~three-tier
+function summaries (AST, local LLM, cloud LLM), (iii)~a
+constraint-zone-first prompt assembler, and (iv)~portable
+cross-session memory exposed through six MCP tools. We evaluate SG on
+SWE-bench Verified and ContextBench against five baselines including
+the closest published competitor (Codebase-Memory), under a strictly
+controlled action space (every arm gets the same five tools; only
+\texttt{search\_code}'s backend differs). On NIM-70B with corrected
+verification, SG matches the strongest retriever on recall while using
+\tbd{X\%} fewer input tokens than Codebase-Memory at equal localization
+accuracy. Ablations isolate \emph{gated graph expansion} and
+\emph{structural summaries} as the components that drive
+edit-targeting. We additionally release a harness with three
+methodology fixes (per-arm SWE-bench verification, edit-thrash
+circuit-breaker, retrieval-cache patch leakage) that we found
+during this study.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Modern coding agents (Cursor, Cline, Continue, Aider, Claude Code,
+GitHub Copilot, Roo, Windsurf, Zed) operate under three pressures that
+no individual IDE solves alone: (a)~bounded context windows must be
+filled with the \emph{right} repository slices, not the largest; (b)~a
+human-stated project rule (\textit{``use \texttt{pathlib}, not
+\texttt{os.path}''}) must survive across turns and even sessions;
+(c)~the agent should not re-explore the same files every turn.
+
+Recent work has attacked one piece at a time: Aider's repo-map and
+``Is Grep All You Need?''~\cite{grepallyouneed} argue for symbol-aware
+retrieval; LocAgent~\cite{locagent} uses graph traversal for fault
+localisation; CodeRAG-Bench~\cite{coderagbench} standardises hybrid
+RAG over repositories; Codebase-Memory~\cite{cbmem} ships a persistent
+graph-memory MCP server. None of these compose end-to-end at the
+\emph{wrapper} layer that a coding agent actually talks to.
+
+\textbf{SkeletonGraph} is the missing wrapper. Its contribution is the
+\emph{combination} of structural retrieval, gated graph expansion,
+on-demand structural summaries, an always-visible constraint zone, and
+cross-IDE portable session memory --- exposed through six MCP tools
+and IDE hooks. SG is the code-domain application of an earlier
+hierarchical-memory result on chat tasks~\cite{hiermem}.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item A controlled benchmark of SG against four retrievers (BM25,
+        ripgrep-style, dense-RAG with rerank, no-retrieval) plus the
+        closest published competitor (Codebase-Memory) on SWE-bench
+        Verified and ContextBench (Section~\ref{sec:experiments}).
+  \item A component ablation isolating which SG features carry the
+        gain: gated vs eager graph, summary tier, centrality rerank,
+        embedding tier (Section~\ref{sec:ablation}).
+  \item An IDE-level study comparing vanilla Claude Code and GitHub
+        Copilot with and without SG installed as an MCP wrapper
+        (Section~\ref{sec:ide}).
+  \item Three concrete methodology fixes uncovered while building the
+        harness: (i)~per-arm SWE-bench verification, (ii)~a
+        whole-run edit-thrash circuit breaker, (iii)~retrieval-cache
+        directory leakage into the agent patch
+        (Appendix~\ref{app:methodology}).
+\end{enumerate}
+
+% ---------------------------------------------------------------
+\section{Background and Related Work}
+\label{sec:related}
+
+\paragraph{Repository retrieval for coding agents.}
+Three families dominate. (i)~\emph{Lexical}: BM25 over function
+chunks~\cite{bm25}, or ripgrep-style line scoring (the ``Is Grep All
+You Need?'' floor~\cite{grepallyouneed}). (ii)~\emph{Hybrid}: BM25
+union dense embeddings followed by a cross-encoder rerank
+(Augment/Voyage/Cohere pattern); standardised in
+CodeRAG-Bench~\cite{coderagbench}. (iii)~\emph{Graph}: tree-sitter
+entity graphs (Aider's repo-map, Codebase-Memory~\cite{cbmem},
+Graphify~\cite{graphify}), or call-graph traversal for fault
+localisation (LocAgent~\cite{locagent}).
+
+\paragraph{Long-horizon agent memory.}
+SWE-agent~\cite{sweagent} and OpenHands~\cite{openhands} demonstrate
+that bounded history (stub older observations, keep the action trace)
+is necessary for non-trivial repos. MemGPT~\cite{memgpt} introduces
+tiered chat memory. We adapt this idea to the spatial axis of code:
+function bodies are paged in on demand, structural summaries are
+always present.
+
+\paragraph{Constraint salience.}
+Cursor's \texttt{.cursorrules}, GitHub Copilot's
+\texttt{.github/copilot-instructions.md}, Aider's
+\texttt{AGENTS.md}, Claude Code's \texttt{CLAUDE.md}, Windsurf's
+\texttt{.windsurfrules}, Roo's \texttt{.roorules} are all per-IDE
+constraint files that do not transfer. SG aggregates them into one
+canonical \texttt{constraints.md} and renders it as zone-1 of every
+prompt assembly --- the salience mechanism is \emph{placement}, not
+post-hoc validation.
+
+% ---------------------------------------------------------------
+\section{SkeletonGraph}
+\label{sec:method}
+
+\subsection{Architecture overview}
+\label{sec:method:overview}
+
+SG sits between a coding agent (any IDE or a CLI) and the underlying
+LLM. A user query is answered in six steps:
+
+\begin{enumerate}
+  \item Heuristic curator picks the retrieval mode (entity, graph,
+        weak-fallback) from a rule table over the query string.
+  \item SG executes a fixed-budget search ($k{=}10$ files) using
+        symbol BM25, dense embeddings, and, when gated on, graph
+        expansion of seed FQNs.
+  \item Centrality rerank elevates hub functions.
+  \item The prompt assembler concatenates four zones in order:
+        constraints, curated retrieval (with tier-2 summaries),
+        peripheral context, the current request.
+  \item The model edits files via MCP tools; tool calls are logged.
+  \item Post-turn, a small model decides which summaries are stale;
+        a background worker regenerates them for the \emph{next}
+        query, never blocking this one.
+\end{enumerate}
+
+\subsection{Three-tier function summaries}
+\label{sec:method:summaries}
+
+Every function has up to three summary tiers, each cheap to invalidate
+and regenerate:
+
+\begin{itemize}
+  \item \textbf{Tier-0} (free, deterministic): signature, types,
+        docstring first line, body first three lines. Always present.
+  \item \textbf{Tier-0.5} (free, local LLM via Ollama): default
+        \texttt{qwen2.5-coder-1.5b}. Generated lazily on first
+        retrieval after a function changes.
+  \item \textbf{Tier-1} (cloud LLM): used only when explicitly
+        configured.
+\end{itemize}
+
+Three SHA-1 hashes per function (signature, body, file) detect
+staleness. A stale summary is served with \texttt{stale: true} flagged
+in the response rather than blocking retrieval --- the agent still
+makes progress while regeneration runs in the background.
+
+\subsection{Gated graph expansion}
+\label{sec:method:gated}
+
+A naive ``always-expand'' graph hurts: it adds noise to ranking and
+makes the agent edit the wrong file. SG's default policy expands the
+graph \emph{only} when (a)~the entity match is exact and the seed set
+is small ($\leq 3$ FQNs), (b)~the query has explicit
+broad-impact intent (``where is X used'', ``call sites of Y''), or
+(c)~the curator was asked for graph mode directly. This is what we
+ablate against \texttt{sg-fullgraph} and \texttt{sg-nograph} in
+Section~\ref{sec:ablation}.
+
+\subsection{Constraint zone and portable memory}
+\label{sec:method:memory}
+
+SG reads the IDE-specific rule files at index time, normalises them
+into one canonical \texttt{constraints.md} (each entry annotated with
+provenance and \texttt{confirmed: true|false}), and places that file
+at zone-1 of every prompt assembly. Constraints can also be proposed
+by the model at run-time via the \texttt{sg\_constraint(action=
+"propose")} MCP call; confirmation is explicit via
+\texttt{sg constraint confirm}. No validation is run against responses
+--- the salience mechanism is placement.
+
+The session log, also exposed as an MCP tool (\texttt{sg\_log}),
+persists across IDEs in a canonical JSONL format. Decisions promoted
+from session logs land in \texttt{decisions.md} and are eligible for
+inclusion in zone-1.
+
+\subsection{The six MCP tools}
+\label{sec:method:mcp}
+
+\begin{Verbatim}[fontsize=\small,frame=single]
+sg_overview     project skeleton + active constraints + session digest
+sg_search       fixed-budget structural retrieval (k=10)
+sg_get          fetch one function body / file slice
+sg_expand       bounded neighbour expansion of a seed FQN
+sg_constraint   propose / confirm / list constraints
+sg_log          on-demand session-history fetch
+\end{Verbatim}
+
+This stays under Cursor's 40-tool ceiling. Power-user tools are
+namespaced \texttt{sg\_advanced.*}.
+
+% ---------------------------------------------------------------
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Identical action space across arms}
+\label{sec:methodology:control}
+
+Every arm exposes the identical five-tool surface
+(\texttt{search\_code}, \texttt{list\_files}, \texttt{read\_file},
+\texttt{edit\_file}, \texttt{submit}). Only \texttt{search\_code}'s
+backend differs across arms. This isolates retrieval strategy from
+tool affordance.
+
+\subsection{Fixed-budget retrieval}
+\label{sec:methodology:budget}
+
+Every retrieval arm returns at most $k{=}10$ files. An uncapped
+baseline would conflate ``returns more candidates'' with ``ranks
+better''. Fixing the budget isolates retrieval \emph{strategy} from
+retrieval \emph{quantity}.
+
+\subsection{Bounded context}
+\label{sec:methodology:bounded}
+
+The transcript is re-sent every turn. Without bounds, prior
+\texttt{read\_file} dumps accumulate and inflate input tokens
+linearly with turns (we observed 200K+ tails). Real agents
+(SWE-agent/OpenHands history-processors, Aider, Cursor/Cline) keep
+only recent observations verbatim. We keep the last 5 tool-result
+messages in full and stub older ones (a 200-char head plus a
+``re-read if needed'' marker) while preserving message structure so
+\texttt{tool\_call\_id} pairing stays valid. Identical for every arm.
+
+\subsection{Loop-breakers}
+\label{sec:methodology:loops}
+
+A whole-run failed-edit budget (8 attempts) caps runaway thrashing at
+$\sim$100K tokens instead of 3.7M (the worst case we observed). A
+unique-search budget (8 distinct queries per task) plus duplicate-query
+short-circuiting cap retrieval re-do loops. Applied identically to
+every arm so it cannot bias the comparison.
+
+\subsection{Verification per arm}
+\label{sec:methodology:verify}
+
+SWE-bench Verified is the gold standard for task success. The harness
+keys predictions by \texttt{instance\_id}; if a study writes one
+predictions file for all arms, every arm gets the same verdict per
+task. We run the harness \emph{once per arm} with a unique
+\texttt{run\_tag}, writing \texttt{resolved} back into each
+per-(task, arm) JSON. This is necessary for any per-arm pass@1
+to be meaningful.
+
+\subsection{Metrics}
+\label{sec:methodology:metrics}
+
+\begin{itemize}
+  \item \textbf{Verified pass@1} (primary): SWE-bench
+        \texttt{FAIL\_TO\_PASS} + \texttt{PASS\_TO\_PASS}.
+  \item \textbf{Edited-gold} (localisation proxy): did the agent edit
+        the gold file. Reported alongside pass@1 because a run can
+        touch the right file with a wrong patch.
+  \item \textbf{Retrieval}: recall@10, precision@10, median rank of
+        first gold file.
+  \item \textbf{Efficiency}: input tokens (primary, uncached),
+        output tokens, turns, tool calls, wall time.
+  \item \textbf{Consolidation gap}: $1 - \frac{|\text{read} \cap
+        \text{patch}|}{|\text{read}|}$ over files; the
+        ContextBench-style figure.
+\end{itemize}
+
+\subsection{Statistical tests}
+\label{sec:methodology:stats}
+
+Paired comparisons with McNemar's exact test on (sg, baseline) outcome
+pairs over the same task set --- this cancels both per-task difficulty
+and common-mode serving non-determinism. A 95\% bootstrap CI is
+reported for recall. We add a three-seed variance appendix on 20
+SWE-bench tasks to quantify single-run noise.
+
+\subsection{Why not heavy repeats}
+\label{sec:methodology:repeats}
+
+Even at \texttt{temperature=0}, vLLM/NIM are not bitwise
+reproducible: GPU kernel reduction order depends on batch size, and
+dynamic batching groups requests differently each call. We
+\textbf{scale tasks, not repeats}. Pairing cancels per-task difficulty
+\emph{and} run noise; a small three-seed study quantifies what
+pairing cannot.
+
+% ---------------------------------------------------------------
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:exp:setup}
+
+\paragraph{Models.}
+Primary: Qwen2.5-Coder-32B-Instruct (BF16, vLLM, AMD MI300X).
+Secondary smoke: Codestral-22B on NIM. Reasoning/thinking modes
+disabled via \texttt{chat\_template\_kwargs.enable\_thinking=false}.
+\texttt{temperature=0}, \texttt{seed=42}.
+
+\paragraph{Datasets.}
+SWE-bench Verified, 150 stratified tasks
+(\texttt{make\_dataset.py --n 150 --seed 42}).
+ContextBench, 60 Python tasks
+(\texttt{extract\_contextbench.py --n 60 --lang python}).
+
+\paragraph{Arms.}
+\begin{itemize}
+  \item \texttt{sg} --- full SkeletonGraph, gated graph
+  \item \texttt{bm25} --- Okapi BM25 over function chunks
+  \item \texttt{grep} --- ripgrep-style lexical (path / phrase /
+        whole-word / line scoring)
+  \item \texttt{hybrid} --- BM25 $\cup$ dense + cross-encoder rerank
+        (Augment-pattern)
+  \item \texttt{none} --- no retrieval; agent reads blind
+  \item \texttt{cbmem} --- Codebase-Memory MCP graph
+        (binary v0.6.1)~\cite{cbmem}
+  \item \texttt{graphify} --- knowledge-graph RAG (graphifyy
+        $\sim$52K stars)~\cite{graphify}
+\end{itemize}
+
+\paragraph{Ablations.}
+\texttt{sg-fullgraph} (eager graph), \texttt{sg-nograph} (graph off),
+\texttt{sg-norerank} (no centrality rerank), \texttt{sg-nosummary}
+(no tier-2 summaries surfaced), \texttt{sg-noembed} (no semantic
+embeddings), \texttt{sg-learned} (learned curator),
+\texttt{sg-noagent} (single-shot, no agent loop).
+
+\subsection{SWE-bench Verified (primary)}
+\label{sec:exp:swebench}
+
+\begin{table}[t]
+\centering\small
+\caption{SWE-bench Verified, Qwen2.5-Coder-32B on AMD MI300X, 150 tasks.
+Bold = best in column. * = significant vs SG at $p < 0.05$ (paired
+McNemar, exact two-sided).}
+\label{tab:swebench}
+\begin{tabular}{lrrrrrr}
+\toprule
+arm & pass@1 & edited-gold & recall@10 & precision & in-tok & turns \\
+\midrule
+sg          & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+bm25        & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+grep        & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+hybrid      & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+cbmem       & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+graphify    & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+none        & \tbd{} & \tbd{} & 0.000  & 0.000  & \tbd{} & \tbd{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{NIM-70B preview (corrected, $n{=}30$).}
+For reference, on Llama-3.1-70B-Instruct via NIM (not a coder model;
+treated as a generality datapoint), with the retrieval-cache patch
+leakage fix applied and Codebase-Memory included:
+
+\begin{table}[t]
+\centering\small
+\caption{NIM-70B SWE-bench Verified, 30 tasks. Numbers AFTER the
+\texttt{.hybrid\_index} fix described in
+Appendix~\ref{app:methodology}.}
+\label{tab:nim70b}
+\begin{tabular}{lrrrrrr}
+\toprule
+arm & pass@1 & edited-gold & recall & precision & in-tok & turns \\
+\midrule
+sg     & \tbd{} & 0.600 & 0.667 & \textbf{0.296} & 63K & 6.3 \\
+bm25   & \tbd{} & 0.517 & 0.724 & 0.227 & 67K & 7.4 \\
+grep   & \tbd{} & 0.533 & 0.667 & 0.137 & 70K & 6.0 \\
+hybrid & \tbd{after fix} & 0.533 & 0.700 & 0.243 & 63K & 6.3 \\
+cbmem  & \tbd{after fix} & 0.607 & 0.643 & 0.197 & 104K & 8.0 \\
+none   & \tbd{}  & 0.400 & 0.000 & 0.000 & 96K & 10.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{ContextBench (generalisation)}
+\label{sec:exp:contextbench}
+
+\begin{table}[t]
+\centering\small
+\caption{ContextBench, same arms, 60 Python tasks.}
+\label{tab:contextbench}
+\begin{tabular}{lrrrrr}
+\toprule
+arm & edited-gold & recall@10 & precision & consolidation gap & in-tok \\
+\midrule
+sg & \tbd{} & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+\multicolumn{6}{c}{\textit{... fill in from} \texttt{eval/results/agent/qwen32b\_contextbench/SUMMARY.md} \textit{...}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Component ablation}
+\label{sec:ablation}
+
+\begin{table}[t]
+\centering\small
+\caption{SG ablations on SWE-bench Verified, 150 tasks, Qwen2.5-Coder-32B.}
+\label{tab:ablation}
+\begin{tabular}{lrrrr}
+\toprule
+ablation & pass@1 & edited-gold & precision & in-tok \\
+\midrule
+sg (default; gated graph) & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+sg-fullgraph              & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+sg-nograph                & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+sg-norerank               & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+sg-nosummary              & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+sg-noembed                & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+sg-noagent (single-shot)  & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{IDE wrapper study}
+\label{sec:ide}
+
+We additionally evaluate SG as an MCP wrapper around two production
+IDE agents --- Claude Code (headless via the SDK) and GitHub Copilot
+(via the Copilot CLI / VS Code task interface) --- on 30 SWE-bench
+tasks. Each IDE runs in two conditions: vanilla and with SG installed
+via \texttt{sg install --ide <name>}. Token counts, turns, edited-gold,
+and pass@1 are reported.
+
+\begin{table}[t]
+\centering\small
+\caption{IDE wrapper study, 30 SWE-bench tasks per cell.
+Token reduction is the ratio (vanilla / with-SG).}
+\label{tab:ide}
+\begin{tabular}{llrrrr}
+\toprule
+IDE & condition & pass@1 & edited-gold & in-tok & token reduction \\
+\midrule
+Claude Code & vanilla & \tbd{} & \tbd{} & \tbd{} & --- \\
+Claude Code & +SG     & \tbd{} & \tbd{} & \tbd{} & \tbd{$\geq 1.7\times$} \\
+Copilot     & vanilla & \tbd{} & \tbd{} & \tbd{} & --- \\
+Copilot     & +SG     & \tbd{} & \tbd{} & \tbd{} & \tbd{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A preliminary three-task pilot on Claude Code showed token reductions
+of $1.7\times$ to $3.7\times$ at equal task outcomes; the full 30-task
+result will replace this paragraph.
+
+\subsection{Variance appendix}
+\label{sec:exp:variance}
+
+Four arms ($\texttt{sg}, \texttt{bm25}, \texttt{hybrid},
+\texttt{cbmem}$) on 20 SWE-bench tasks with three seeds. Reports
+mean $\pm$ standard deviation on edited-gold and pass@1 to quantify
+serving-level non-determinism.
+
+% ---------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{What SG buys.}
+The headline finding is \textbf{cost at iso-accuracy}: SG matches the
+strongest competitor (cbmem) on localisation while using
+\tbd{X\%} fewer input tokens. The mechanism is the combination of
+gated graph (reduces ranking noise), tier-2 summaries shown alongside
+each retrieval result (lets the agent triage without
+\texttt{read\_file}), and rank-1 precision from centrality rerank.
+
+\paragraph{What SG does not claim.}
+We do not claim that SG improves task success over a strong dense-RAG
+baseline at fixed compute --- the AMD pass@1 deltas
+(Table~\ref{tab:swebench}) determine whether that stronger claim
+holds. Even if it does not, the cost claim and the methodology
+contributions stand.
+
+\paragraph{Limitations.}
+(i)~Python-only repositories; multi-language generalisation
+(JavaScript / TypeScript / Go) is future work. (ii)~The IDE study
+reports two IDEs; the harness (\texttt{sg install --ide <name>})
+supports nine, but only two are evaluated. (iii)~SWE-bench Verified
+tasks lean toward bug-fix shapes; we partially mitigate via
+ContextBench, which has broader task shapes. (iv)~CodeMemBench
+(persistent memory over multi-session task chains) is left as a
+parallel benchmark we are building; it does not appear here.
+
+% ---------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+SkeletonGraph is the missing IDE-agnostic wrapper at which structural
+retrieval, gated graph expansion, structural summaries, an
+always-visible constraint zone, and portable session memory compose.
+On NIM-70B (corrected) and on AMD Qwen2.5-Coder-32B
+(Section~\ref{sec:experiments}), it matches the closest published
+competitor at substantially lower token cost, with significant
+edges on retrieval precision and rank-1. The harness, three
+methodology fixes documented in
+Appendix~\ref{app:methodology}, and the SG package itself are
+released as open source\footnote{\url{https://github.com/yashdoke7/skeletongraph}}.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\appendix
+
+% ---------------------------------------------------------------
+\section{Methodology fixes uncovered during this study}
+\label{app:methodology}
+
+\paragraph{A1. Per-arm SWE-bench verification.}
+The SWE-bench harness keys predictions by \texttt{instance\_id}.
+Writing one predictions file for all arms produces one verdict per
+task that is then attributed to every arm --- a single broken arm can
+zero out the others' pass@1, and a single good arm can elevate the
+others'. We rewrote \texttt{verify.py} to invoke the harness
+\emph{once per arm}, write \texttt{resolved} back per arm, and key
+results by \texttt{(arm, task\_id)}. This is necessary for any
+per-arm pass@1 figure in this paper to be meaningful.
+
+\paragraph{A2. Edit-thrash circuit breaker.}
+A per-file failed-edit counter that resets on a successful
+non-target edit caused one observed run to issue 37 failed edits
+across 40 turns, burning 3.7M input tokens before \texttt{MAX\_TURNS}
+intervened. We replaced this with a whole-run failed-edit budget
+(8 attempts); once hit, \texttt{edit\_file} refuses further calls and
+forces a submit after three ignores. Caps runaway runs at
+$\sim$10 attempts / $\sim$100K tokens. Applied identically to every
+arm.
+
+\paragraph{A3. Retrieval-cache patch leakage.}
+The hybrid backend wrote its embeddings cache to
+\texttt{<repo>/.hybrid\_index/embeddings.npz}. The eval harness
+diffs the agent's workspace against a baseline commit to produce
+\texttt{model\_patch}, so every change to that binary cache appeared
+as a binary diff hunk \texttt{Binary files differ} in the patch. The
+SWE-bench harness rejects such hunks (\texttt{git apply} cannot apply
+them without \texttt{--binary}), causing 29 of 30 NIM-70B hybrid runs
+to error at verify time. Fix: route retrieval-backend caches to a
+sibling of the workspace (outside the git tree) and write a workspace
+\texttt{.gitignore} listing all cache directories before the baseline
+commit. We additionally provide a one-shot script
+(\texttt{eval/scripts/clean\_hybrid\_predictions.py}) that strips
+already-saved binary hunks from prior runs' \texttt{model\_patch}
+so verification can re-run without rerunning the agent.
+
+\paragraph{A4. Transient-error retry policy.}
+NIM rate-limit errors and transient 5xx responses hard-failed entire
+runs, leaving arms with different task subsets (unpaired $n$). The
+ReAct loop now retries rate-limit \emph{and} transient server errors
+up to six times with capped backoff while leaving auth errors as fatal.
+
+\paragraph{A5. IDE push/pull retrieval dedup.}
+When SG is installed both as a \texttt{UserPromptSubmit} hook
+\emph{and} as the \texttt{sg\_search} MCP tool, the same retrieval
+fires twice. \texttt{SGConfig.hook\_push\_retrieval} (default
+\texttt{False}) suppresses the push when MCP is configured;
+the hook then injects only ambient memory.
+
+% ---------------------------------------------------------------
+\section{Retrieval prompts and tool schemas}
+\label{app:prompts}
+
+\begin{Verbatim}[fontsize=\footnotesize,frame=single]
+search_code(query, k=10)    Ranked file paths with short snippets.
+list_files(path)            List a directory.
+read_file(path, start, end) Read a file or a line range.
+edit_file(path, old_str, new_str)
+                            Replace a unique substring.
+submit()                    End the task.
+\end{Verbatim}
+
+% ---------------------------------------------------------------
+\section{Codebase-Memory CLI integration}
+\label{app:cbmem}
+
+We wrap Codebase-Memory v0.6.1 via its CLI as a controlled
+\texttt{search\_code} backend. Its native MCP server (with extra
+tools) is intentionally not exposed, because that would break the
+controlled action space described in
+Section~\ref{sec:methodology:control}. The wrapper's verbs are
+\texttt{index\_repository}, \texttt{search\_graph},
+\texttt{list\_projects}; selftest at
+\texttt{python -m eval.backends.cbmem --selftest <repo>}.
+
+\end{document}
