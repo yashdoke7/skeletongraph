@@ -123,7 +123,18 @@ def _get_cross_encoder():
 # ── per-repo index ─────────────────────────────────────────────────────────────
 
 class _HybridIndex:
-    """Lazy per-repo hybrid index (BM25 + dense embeddings)."""
+    """Lazy per-repo hybrid index (BM25 + dense embeddings).
+
+    CACHE LOCATION: the index is written to `<repo>.parent / .hybrid_index/`,
+    i.e. a SIBLING of the repo directory, NOT inside the repo itself.
+    Writing inside the repo (the original design) caused `git diff HEAD` to
+    capture the binary embeddings.npz and corrupt every SWE-bench
+    `model_patch` with a "Binary files differ" hunk that the harness rejects
+    (29/30 hybrid runs erred on NIM v2 for exactly this reason). The
+    eval/agent/isolation.py workspace `.gitignore` also lists this path as a
+    second line of defence — but the proper fix is to never write inside the
+    repo to begin with.
+    """
 
     INDEX_DIR = ".hybrid_index"
     FILES_JSON = "doc_ids.json"
@@ -131,7 +142,10 @@ class _HybridIndex:
 
     def __init__(self, repo: Path) -> None:
         self.repo = repo
-        self._idx_dir = repo / self.INDEX_DIR
+        # SIBLING of the repo — outside the git workspace so it never enters
+        # the agent's patch. Cleaned up automatically when the workspace
+        # parent directory is rm'd by isolation.cleanup_workspace().
+        self._idx_dir = repo.parent / self.INDEX_DIR
         self._file_paths: List[str] = []       # FQNs or relative file paths
         self._file_texts: List[str] = []       # chunk text
         self._bm25: Optional[_BM25] = None

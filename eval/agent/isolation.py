@@ -24,7 +24,14 @@ from .config import WORKSPACE_ROOT
 # returned by shutil.which bypasses that lookup entirely.
 _GIT = shutil.which("git") or "git"
 
-# SG state that must NOT survive into a fresh run.
+# SG + retrieval-backend state that must NOT survive into a fresh run.
+#
+# A backend cache committed at baseline and rewritten by retrieval will appear
+# in `git diff HEAD` and corrupt the SWE-bench `model_patch` with binary hunks
+# (`Binary files differ`) that `git apply` rejects → "error" verify verdicts.
+# Hybrid's `.hybrid_index/embeddings.npz` caused this on 29/30 NIM v2 runs.
+# Every backend that caches to disk gets listed here AND in the workspace
+# .gitignore (see _init_clean_git) — belt and braces.
 _SG_ARTIFACTS = [
     ".skeletongraph",
     ".mcp.json",
@@ -32,7 +39,26 @@ _SG_ARTIFACTS = [
     "summary_queue.jsonl",
     "summary_drain.lock",
     "SG_EVAL_RUNBOOK.md",   # per-repo IDE prompt sheet — must not leak into eval
+    ".hybrid_index",        # eval/backends/hybrid.py BM25+dense cache
+    ".graphify",            # eval/backends/graphify.py knowledge-graph cache
+    ".bm25_cache",          # eval/backends/bm25_flat.py (if ever persists)
 ]
+
+# Files written into the workspace's `.gitignore` before the baseline commit.
+# Anything matching here is invisible to `git diff HEAD`, so retrieval backends
+# can cache wherever they want without polluting the agent's patch.
+_WORKSPACE_GITIGNORE = """\
+# CodeMemBench / SG eval — keep retrieval-backend caches out of the patch
+.skeletongraph/
+.hybrid_index/
+.graphify/
+.bm25_cache/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+"""
 
 
 def _rmtree_safe(path: Path) -> None:
@@ -120,6 +146,16 @@ def _init_clean_git(repo: Path) -> None:
            # Prevent git from reading system/user .gitconfig — avoids broken
            # config files or safeDirectory complaints in the subprocess env.
            "GIT_CONFIG_NOSYSTEM": "1"}
+
+    # Write a workspace .gitignore BEFORE `git add -A` so retrieval-backend
+    # caches never enter the baseline (and therefore never appear in
+    # `git diff HEAD` later). If the repo already has a .gitignore, append.
+    gi = repo / ".gitignore"
+    existing = gi.read_text(encoding="utf-8", errors="replace") if gi.exists() else ""
+    if "# CodeMemBench / SG eval" not in existing:
+        gi.write_text(existing + ("\n" if existing and not existing.endswith("\n") else "")
+                      + _WORKSPACE_GITIGNORE, encoding="utf-8")
+
     for cmd in (
         [_GIT, "init", "-q"],
         # core.longpaths: Windows `git add` fails with exit 128 on paths >260
