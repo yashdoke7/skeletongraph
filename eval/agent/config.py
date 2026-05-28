@@ -202,6 +202,13 @@ ARMS: Dict[str, Arm] = {
     # Wrapping its CLI as a controlled search_code backend would require fragile
     # subcommand stitching that isn't directly comparable to library-form
     # retrievers. The graph-competitor slot is filled by cbmem.
+
+    # Aider RepoMap — tree-sitter + PageRank, the design philosophy closest
+    # to SG. Aider is the most-used CLI coding agent on PyPI. Beating its
+    # repo-map is the strongest "we beat the prior art" claim available.
+    # pip install aider-chat
+    "aider":   Arm("aider",   "aider",   "Aider RepoMap (tree-sitter+PageRank)",
+                   strong=True),
 }
 
 

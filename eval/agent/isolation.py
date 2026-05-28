@@ -42,6 +42,9 @@ _SG_ARTIFACTS = [
     ".hybrid_index",        # eval/backends/hybrid.py BM25+dense cache
     ".graphify",            # eval/backends/graphify.py knowledge-graph cache
     ".bm25_cache",          # eval/backends/bm25_flat.py (if ever persists)
+    ".aider_cache",         # eval/backends/aider_repomap.py override target
+    ".aider.tags.cache.v3", # aider default cache (current major version)
+    ".aider.tags.cache.v4", # future-proof — aider may bump the version
 ]
 
 # Files written into the workspace's `.gitignore` before the baseline commit.
@@ -53,6 +56,8 @@ _WORKSPACE_GITIGNORE = """\
 .hybrid_index/
 .graphify/
 .bm25_cache/
+.aider_cache/
+.aider.tags.cache.v*/
 __pycache__/
 *.pyc
 *.pyo

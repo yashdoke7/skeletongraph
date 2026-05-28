@@ -484,4 +484,8 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
             "graphify backend was removed (CLI-only; not a fair "
             "programmable retrieval lib). The graph competitor is cbmem.")
 
+    if backend == "aider":
+        from backends.aider_repomap import retrieve         # tree-sitter+PageRank
+        return retrieve(query, repo, k)
+
     raise ValueError(f"unknown backend: {backend}")
