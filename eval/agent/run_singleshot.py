@@ -26,7 +26,29 @@ from typing import List
 
 from . import config
 from .isolation import cleanup_workspace, diff_patch, prepare_workspace, run_id
-from .react import _client, _usage
+from .react import _client
+
+
+def _usage(resp) -> dict:
+    """Extract usage dict from a NON-STREAMED chat completion response.
+
+    react.py's _usage_from_dict() takes a dict (from streamed-chunk parsing);
+    single-shot here is a one-call non-streamed completion so we pull
+    fields off resp.usage directly. Falls back to zeros if the field is
+    missing (some endpoints omit it on cached-only responses).
+    """
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+    cached = 0
+    details = getattr(u, "prompt_tokens_details", None)
+    if details is not None:
+        cached = getattr(details, "cached_tokens", 0) or 0
+    return {
+        "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
+        "cached_tokens": cached,
+    }
 from .run_agent import (_consolidation_metrics, _edit_metrics, _edited_gold,
                         _file_access_metrics, _patch_metrics, _retrieval_metrics,
                         _search_call_metrics, load_tasks)

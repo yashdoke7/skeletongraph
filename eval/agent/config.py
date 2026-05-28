@@ -285,90 +285,121 @@ STAGES: Dict[str, Stage] = {
         "Test the gated weak-entity recall booster vs the `sg` baseline — does it "
         "recover semantic-mismatch misses WITHOUT diluting precision? (default off)"
     ),
-    # ── Named tiers (paper-facing names for tables/CLI) ──────────────────────
-    # `baseline` = the five core comparison arms. Functionally identical to
-    # 0-full; the old name is preserved for backward compat with existing results.
+    # ──────────────────────────────────────────────────────────────────────
+    # ── PAPER-FACING STAGES (canonical names, consistent arm sets) ────────
+    # ──────────────────────────────────────────────────────────────────────
+    #
+    # The seven main arms span four retrieval families plus the closest prior
+    # art and the closest published competitor:
+    #
+    #   sg        — SkeletonGraph (ours)
+    #   bm25      — Flat BM25 (lexical, function-level)
+    #   grep      — Ripgrep-style lexical (file-level)
+    #   hybrid    — Dense+Rerank (BM25 ∪ SBert + cross-encoder rerank, file-level)
+    #   none      — No-Retrieval (control)
+    #   cbmem     — Codebase-Memory (closest published graph competitor)
+    #   aider     — Aider RepoMap (closest prior art: tree-sitter+PageRank)
+    #
+    # The five SG ablations isolate which component carries the gain:
+    #
+    #   sg-fullgraph  — eager graph expansion (no gating)
+    #   sg-nograph    — graph expansion fully off
+    #   sg-norerank   — no centrality rerank
+    #   sg-nosummary  — no tier-2 summaries surfaced
+    #   sg-noembed    — no semantic embeddings (lexical+graph only)
+    #
+    # sg-noagent (single-shot, no agent loop) is its own ablation but uses
+    # run_singleshot.py instead of run_stage.py — handled outside the stage
+    # system so it can't be passed as --stage. See docstring of that script.
+
     "baseline": Stage(
-        "baseline", ["sg", "bm25", "grep", "none", "hybrid"], 30, "swebench",
-        "Baseline tier — SG vs lexical (bm25/grep) vs no-retrieval (none) vs "
-        "dense-RAG (hybrid). Same arms as 0-full; cleaner name for paper tables.",
-    ),
-    # `full` = baseline + Graphify (knowledge-graph RAG) + cbmem (MCP graph).
-    # Three different graph strategies side-by-side with lexical/dense floors.
-    # Requires both external tools to be set up first (see their backends).
-    "full": Stage(
-        "full",
-        ["sg", "bm25", "grep", "none", "hybrid", "cbmem"],
+        "baseline",
+        ["sg", "bm25", "grep", "hybrid", "none", "cbmem", "aider"],
         30, "swebench",
-        "Full comparison — 5 baseline arms + Graphify knowledge-graph RAG "
-        "+ cbmem (Codebase-Memory MCP). External tools must be set up first.",
+        "BASELINE — 7-arm headline comparison: SG vs 4 retrieval families "
+        "(BM25, grep, Dense+Rerank, No-Retrieval) + closest prior art "
+        "(Aider RepoMap) + closest published competitor (cbmem). The paper's "
+        "main table.",
     ),
-    # ── AMD staged plan (the real spend) ────────────────────────────────────
-    # Stage 1 = 1a + 1b, run in PARALLEL on the MI300X (192 GB → many isolated
-    # tasks concurrently; --workers 16-32). pass@1 via verify.py (Docker) after.
-    # Full rationale, budget, and decisions: docs/PLAN.md.  Stage 0 (local
-    # 7B/14B) is done; it gives the retrieval/efficiency baseline without pass@1.
-    "1a-workshop": Stage(
-        "1a-workshop", ["sg", "bm25", "grep", "none", "hybrid"], SWEBENCH_N,
-        "swebench",
-        "STAGE 1a (WORKSHOP) — SG vs floors (bm25/grep/none) + dense-RAG "
-        "(hybrid). pass@1 + retrieval + efficiency. The defensible workshop core.",
-    ),
-    "1b-conference": Stage(
-        "1b-conference",
+
+    "ablation": Stage(
+        "ablation",
         ["sg-fullgraph", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
-        SWEBENCH_N, "swebench",
-        "STAGE 1b (CONFERENCE) — SG component ablations (eager-graph; C2 "
-        "summaries; C3 graph/rerank/embed) vs the default gated `sg`. Run in "
-        "PARALLEL with 1a. Agent-vs-no-agent (sg-noagent) via run_singleshot.",
+        30, "swebench",
+        "SG ABLATION — five SG variants with exactly one component disabled. "
+        "Compare against the `sg` arm in `baseline`. sg-noagent (single-shot, "
+        "no agent loop) is run separately via `run_singleshot.py --all`.",
     ),
-    "2-competitor": Stage(
-        "2-competitor", ["cbmem"], SWEBENCH_N, "swebench",
-        "STAGE 2 — closest published graph competitor (cbmem / CodeCompass). "
-        "Plus ContextBench: re-run 1a arms with "
-        "--dataset eval/datasets/contextbench.jsonl (2nd benchmark).",
+
+    "smoke": Stage(
+        "smoke",
+        ["sg", "bm25", "grep", "hybrid", "none", "cbmem", "aider"],
+        SWEBENCH_N, "swebench",
+        "SMOKE GATE — same 7 arms as `baseline`, but scoped to first N tasks "
+        "via `--limit 10`. Run BEFORE any big AMD spend; abort + fix if any "
+        "arm is wedged. ~$1 on MI300X.",
+    ),
+
+    "contextbench": Stage(
+        "contextbench",
+        ["sg", "bm25", "grep", "hybrid", "none", "cbmem", "aider"],
+        60, "contextbench",
+        "CONTEXTBENCH — 2nd benchmark, same 7 arms × 60 Python tasks. Run "
+        "with `--dataset eval/datasets/contextbench.jsonl`. Confirms the "
+        "SG win isn't SWE-bench-specific.",
+    ),
+
+    "variance": Stage(
+        "variance",
+        ["sg", "bm25", "hybrid", "cbmem", "aider"],
+        20, "swebench",
+        "VARIANCE APPENDIX — 5 arms × 20 tasks × 3 seeds. Quantifies "
+        "vLLM/NIM serving non-determinism for the paper's noise-floor "
+        "appendix. Spend only after baseline + ablation land.",
+        repeats=3,
+    ),
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ── LEGACY ALIASES (kept for backward compatibility with old commands) ─
+    # ──────────────────────────────────────────────────────────────────────
+    # Old runbooks reference these names. New work should use the canonical
+    # stages above.
+
+    "0-smoke":        None,   # alias → smoke   (set below)
+    "0-full":         None,   # alias → baseline
+    "0-assess":       None,   # alias → baseline with --limit 15
+    "0-ablation":     None,   # alias → ablation
+    "0-cbmem":        None,   # narrow cbmem-only runs
+    "1a-workshop":    None,   # alias → baseline at full N
+    "1b-conference":  None,   # alias → ablation at full N
+    "2-competitor":   None,   # alias → cbmem-only at full N
+
+    # Legacy specialized arms (rarely used)
+    "0-learned": Stage(
+        "0-learned", ["sg-learned"], 30, "swebench",
+        "Learned curator ablation. Needs eval/curator/curator_model.pkl."
+    ),
+    "0-weakfallback": Stage(
+        "0-weakfallback", ["sg-weakfallback"], 30, "swebench",
+        "Gated weak-entity recall booster (default off in `sg`)."
     ),
     "3-further": Stage(
         "3-further", ["sg", "bm25", "hybrid", "sg-learned"], 60, "swebench",
-        "STAGE 3 (FURTHER / TOP-TIER) — 3x variance (mean±std + McNemar/CIs), "
-        "the learned curator (sg-learned, see docs/CURATOR.md), and a 2nd "
-        "language. Spend only if 1-2 warrant the push.",
-        repeats=3,
-    ),
-    # ── AMD smoke pre-check (single most important pre-stage) ────────────────
-    # Same 7 arms as `full`, but ONLY the first N tasks of the 150-task pool.
-    # Run this FIRST on the MI300X; if 1a-arms look sane and verify works,
-    # proceed to the real stages; if not, abort before burning budget.
-    # Use --limit 10 on the run_stage call to scope to 10 tasks; the stage
-    # itself stays open-ended so you can re-run with --limit 25 if needed.
-    "0-smoke": Stage(
-        "0-smoke",
-        ["sg", "bm25", "grep", "none", "hybrid", "cbmem"],
-        SWEBENCH_N, "swebench",
-        "AMD SMOKE — first N tasks across ALL arms (baseline + cbmem + "
-        "graphify). Use `run_stage --stage 0-smoke --limit 10` to scope.",
-    ),
-    # ── ContextBench stage with graph competitors included ───────────────────
-    # The ContextBench pass becomes the 2nd benchmark in the paper. We include
-    # cbmem and graphify here too so the graph-competitor comparison spans
-    # BOTH SWE-bench and ContextBench (the reviewer ask: "does the result
-    # generalise?"). Dataset is set via --dataset eval/datasets/contextbench.jsonl
-    # at the run_stage call site.
-    "contextbench": Stage(
-        "contextbench",
-        ["sg", "bm25", "grep", "none", "hybrid", "cbmem"],
-        60, "contextbench",
-        "ContextBench (2nd benchmark) — baseline + cbmem + graphify. "
-        "Run with --dataset eval/datasets/contextbench.jsonl.",
-    ),
-    # ── 3-seed variance appendix ─────────────────────────────────────────────
-    # 4 core arms × 20 tasks × 3 seeds = 240 runs. Quantifies serving-level
-    # non-determinism (NIM/vLLM kernel-reduction non-bitwise reproducibility).
-    # The reviewer-defensible "we know how noisy our numbers are" appendix.
-    "variance": Stage(
-        "variance", ["sg", "bm25", "hybrid", "cbmem"], 20, "swebench",
-        "VARIANCE APPENDIX — 4 arms × 20 tasks × 3 seeds. Single most "
-        "compact way to quantify NIM/vLLM non-determinism for the paper.",
+        "Top-tier 3x variance + learned curator. Spend only if 1-2 warrant.",
         repeats=3,
     ),
 }
+
+# Resolve legacy aliases to canonical stages.
+STAGES["0-smoke"]        = STAGES["smoke"]
+STAGES["0-full"]         = STAGES["baseline"]
+STAGES["0-assess"]       = STAGES["baseline"]
+STAGES["0-ablation"]     = STAGES["ablation"]
+STAGES["1a-workshop"]    = STAGES["baseline"]
+STAGES["1b-conference"]  = STAGES["ablation"]
+STAGES["0-cbmem"] = Stage(
+    "0-cbmem", ["cbmem"], 30, "swebench",
+    "cbmem-only — useful when the cbmem binary changes and you want to "
+    "refresh just this arm without re-running the others.",
+)
+STAGES["2-competitor"] = STAGES["0-cbmem"]
