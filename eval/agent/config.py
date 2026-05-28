@@ -196,11 +196,12 @@ ARMS: Dict[str, Arm] = {
     # run_singleshot.py, not run_stage; recorded as this arm so it lands in the
     # same aggregate/plots tables next to `sg`.
     "sg-noagent":   Arm("sg-noagent",   "sg",           "SG single-shot (no agent)"),
-    # Graphify — knowledge-graph RAG. Builds an entity/relationship graph of the
-    # codebase using tree-sitter + LLM extraction + NetworkX/Leiden clustering.
-    # pip install graphifyy  (https://github.com/safishamsi/graphify)
-    # Backend stub: eval/backends/graphify.py — implement before running this arm.
-    "graphify":     Arm("graphify",     "graphify",     "Graphify (knowledge-graph RAG)", strong=True),
+    # NOTE: graphify (graphifyy v0.8.17, https://github.com/safishamsi/graphify)
+    # was considered but DROPPED — it is packaged as a CLI-only AI-coding-assistant
+    # skill with 0 public python symbols, not a programmable retrieval library.
+    # Wrapping its CLI as a controlled search_code backend would require fragile
+    # subcommand stitching that isn't directly comparable to library-form
+    # retrievers. The graph-competitor slot is filled by cbmem.
 }
 
 
@@ -290,7 +291,7 @@ STAGES: Dict[str, Stage] = {
     # Requires both external tools to be set up first (see their backends).
     "full": Stage(
         "full",
-        ["sg", "bm25", "grep", "none", "hybrid", "graphify", "cbmem"],
+        ["sg", "bm25", "grep", "none", "hybrid", "cbmem"],
         30, "swebench",
         "Full comparison — 5 baseline arms + Graphify knowledge-graph RAG "
         "+ cbmem (Codebase-Memory MCP). External tools must be set up first.",
@@ -335,7 +336,7 @@ STAGES: Dict[str, Stage] = {
     # itself stays open-ended so you can re-run with --limit 25 if needed.
     "0-smoke": Stage(
         "0-smoke",
-        ["sg", "bm25", "grep", "none", "hybrid", "cbmem", "graphify"],
+        ["sg", "bm25", "grep", "none", "hybrid", "cbmem"],
         SWEBENCH_N, "swebench",
         "AMD SMOKE — first N tasks across ALL arms (baseline + cbmem + "
         "graphify). Use `run_stage --stage 0-smoke --limit 10` to scope.",
@@ -348,7 +349,7 @@ STAGES: Dict[str, Stage] = {
     # at the run_stage call site.
     "contextbench": Stage(
         "contextbench",
-        ["sg", "bm25", "grep", "none", "hybrid", "cbmem", "graphify"],
+        ["sg", "bm25", "grep", "none", "hybrid", "cbmem"],
         60, "contextbench",
         "ContextBench (2nd benchmark) — baseline + cbmem + graphify. "
         "Run with --dataset eval/datasets/contextbench.jsonl.",

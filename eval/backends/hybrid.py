@@ -312,13 +312,25 @@ _NOISE_DIRS: Set[str] = {
 def _collect_file_texts(repo: Path) -> Tuple[List[str], List[str]]:
     """Walk repo and build (file_paths, file_texts) lists.
 
-    Tries to use the SG index (for structured function text). Falls back to
-    raw file content if SG index isn't available.
+    DEFAULT (production-RAG parity): file-level documents collected by walking
+    the repo with rglob.  This is the standard "BM25 + dense + cross-encoder
+    rerank" baseline (Cohere/Voyage/Pinecone tutorial pattern) — it does NOT
+    depend on SkeletonGraph's parser, so the comparison is strictly
+    SG-with-graph vs an off-the-shelf RAG stack.
+
+    OPT-IN (legacy / appendix): set SG_HYBRID_USE_SG_CHUNKS=1 to use SG's
+    function-level chunks instead.  This produces a stronger hybrid baseline
+    (because it gets SG's tree-sitter parsing for free), useful for an
+    ablation that asks "how much of SG's edge survives if hybrid sees the
+    same chunks?" but NOT a fair vs-industry baseline.  See RESEARCH.md.
     """
-    try:
-        return _collect_via_sg(repo)
-    except Exception:
-        return _collect_raw(repo)
+    import os
+    if os.environ.get("SG_HYBRID_USE_SG_CHUNKS") == "1":
+        try:
+            return _collect_via_sg(repo)
+        except Exception:
+            return _collect_raw(repo)
+    return _collect_raw(repo)
 
 
 def _collect_via_sg(repo: Path) -> Tuple[List[str], List[str]]:

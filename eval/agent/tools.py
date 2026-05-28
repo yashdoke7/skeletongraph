@@ -164,6 +164,14 @@ class ToolExecutor:
     # ── search_code — the arm under test ───────────────────────────────────
 
     def _search(self, query: str, k: int) -> str:
+        # ── reject empty / whitespace-only queries ──────────────────────────
+        # Observed: the model occasionally calls search_code(query="") (1/30
+        # llama33 SG runs hit this). Silently returning "No results." wastes
+        # a turn and pollutes recall metrics. A short rejection nudges the
+        # model to formulate a real query without consuming a search budget.
+        if not (query or "").strip():
+            return ("ERROR: search_code requires a non-empty query. "
+                    "Describe the symptom or name a symbol you want to find.")
         # ── loop-breaker: block identical re-searches & cap unique searches ──
         # The first call always runs (counts start empty), so first_search_hits
         # and recall metrics are never affected. Only wasteful 2nd+ identical
@@ -203,6 +211,24 @@ class ToolExecutor:
                 if f not in seen:
                     seen.append(f)
             self.first_search_hits = seen
+            # Loud warning if a NON-`none` backend returned zero hits on the
+            # first call: this is the failure mode that made cbmem/graphify
+            # silently report recall=0 on llama33_70b v3 even though both
+            # binaries existed but were misconfigured. recall=0 across an
+            # entire arm is almost always a wiring bug, not a real result —
+            # flag it so the user notices BEFORE writing it into the paper.
+            if not seen and self.backend != "none":
+                import sys, os
+                if not os.environ.get("SG_EVAL_QUIET"):
+                    # workspace layout: WORKSPACE_ROOT/<run_id>/repo
+                    # so self.repo.parent.name is the run_id (informative);
+                    # self.repo.name is always literally "repo" (useless).
+                    rid = self.repo.parent.name
+                    sys.stderr.write(
+                        f"[{self.backend}] first search returned 0 file paths "
+                        f"(run={rid}, query={query!r:.60}). "
+                        f"If every task hits this, the backend is wedged.\n"
+                    )
             # SG arms only: did the semantic embedding index actually build?
             # If embeddings.npz is absent the run is SG-minus-embeddings — flag
             # it so aggregate.py never reports a degraded run as real SG.
@@ -452,7 +478,10 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         return retrieve(query, repo, k)
 
     if backend == "graphify":
-        from backends.graphify import retrieve           # knowledge-graph RAG
-        return retrieve(query, repo, k)
+        # graphify dropped — see config.py for context. Raise loudly if anyone
+        # still has stale runbook commands referencing this backend.
+        raise ValueError(
+            "graphify backend was removed (CLI-only; not a fair "
+            "programmable retrieval lib). The graph competitor is cbmem.")
 
     raise ValueError(f"unknown backend: {backend}")

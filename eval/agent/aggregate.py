@@ -102,15 +102,21 @@ def aggregate(stage: str | None) -> None:
         lines.append(f"Stage: **{stage}**  ·  {config.STAGES[stage].note}")
     lines += [f"Runs: {len(recs)} ({n_excluded} incomplete excluded from metrics)"
               f"  ·  arms: {sorted(by_arm)}", "",
-              "## Axes 1/2/3/5 by arm", "",
-              "retrieval-hit = recall (gameable by noise dumps) · "
-              "precision = gold/returned · rank = median rank of first gold file",
+              "## Headline results",
               "",
-              "| Arm | n | pass@1 | retrieval-hit | precision | rank | "
-              "edited-gold | avg turns | avg in-tok | avg out-tok | avg cost$ |",
-              "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+              "**pass@1** (SWE-bench resolved %) is the primary metric. "
+              "Retrieval recall/precision/rank measure retrieval quality "
+              "independent of task success. Tokens / turns / cost measure "
+              "efficiency (paper headline is cost-at-iso-accuracy).",
+              "",
+              "edited-gold is a localization proxy — kept for diagnosis but "
+              "NOT a primary metric (model-dependent and noisy).",
+              ""]
 
+    # Column-aligned monospace table (easier to read than pipe-separated).
+    # The two-line header makes copy-paste into a paper Markdown clean.
     arm_pass: dict = {}
+    rows = []
     for arm in sorted(by_arm):
         rs = by_arm[arm]
         resolved = [1 if r.get("resolved") else 0 for r in rs
@@ -119,20 +125,54 @@ def aggregate(stage: str | None) -> None:
         p1 = _mean(resolved) if resolved else None
         ranks = [r.get("retrieval_rank") for r in rs
                  if r.get("retrieval_rank")]          # nonzero = found
-        med_rank = round(statistics.median(ranks), 1) if ranks else "n/a"
+        med_rank = round(statistics.median(ranks), 1) if ranks else None
+        label = config.ARMS.get(arm, arm).label if arm in config.ARMS else arm
+        rows.append({
+            "arm": label,
+            "n": len(rs),
+            "pass1": p1,
+            "recall": _mean([1 if r.get('retrieval_hit') else 0 for r in rs]),
+            "prec": _mean([r.get('retrieval_precision') for r in rs]),
+            "rank": med_rank,
+            "egold": _mean([1 if r.get('edited_gold_file') else 0 for r in rs]),
+            "turns": _mean([r.get('n_turns') for r in rs]),
+            "intok": round(_mean([r.get('billed_input') for r in rs])),
+            "outtok": round(_mean([r.get('billed_output') for r in rs])),
+            "cost": _mean([r.get('imputed_cost') for r in rs]),
+        })
+
+    # Markdown table (pipe form) — for paste-into-paper compatibility
+    lines += [
+        "| arm | n | pass@1 | recall | prec | rank | tokens | turns | cost$ | (egold) |",
+        "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:|",
+    ]
+    for r in rows:
+        p1 = f"{r['pass1']*100:.1f}%" if r['pass1'] is not None else "n/a"
+        rank = f"{r['rank']:.1f}" if r['rank'] is not None else "—"
         lines.append(
-            f"| {config.ARMS.get(arm, arm).label if arm in config.ARMS else arm} "
-            f"| {len(rs)} "
-            f"| {p1 if p1 is not None else 'n/a (run verify.py)'} "
-            f"| {_mean([1 if r.get('retrieval_hit') else 0 for r in rs])} "
-            f"| {_mean([r.get('retrieval_precision') for r in rs])} "
-            f"| {med_rank} "
-            f"| {_mean([1 if r.get('edited_gold_file') else 0 for r in rs])} "
-            f"| {_mean([r.get('n_turns') for r in rs])} "
-            f"| {round(_mean([r.get('billed_input') for r in rs]))} "
-            f"| {round(_mean([r.get('billed_output') for r in rs]))} "
-            f"| {_mean([r.get('imputed_cost') for r in rs])} |"
+            f"| {r['arm']} | {r['n']} | {p1} | "
+            f"{r['recall']:.3f} | {r['prec']:.3f} | {rank} | "
+            f"{r['intok']:>6,} | {r['turns']:.1f} | "
+            f"${r['cost']:.4f} | _{r['egold']:.2f}_ |"
         )
+
+    # Console-friendly monospace echo (printed below the Markdown table).
+    lines += ["", "```", "Compact view (sorted by pass@1):", ""]
+    sorted_rows = sorted(rows, key=lambda r: -(r['pass1'] or 0))
+    lines.append(
+        f"{'arm':<28} {'n':>3} {'pass@1':>7} {'recall':>7} "
+        f"{'prec':>6} {'rank':>5} {'tok':>7} {'turns':>5} {'$':>7}"
+    )
+    lines.append("-" * 90)
+    for r in sorted_rows:
+        p1 = f"{r['pass1']*100:5.1f}%" if r['pass1'] is not None else "  n/a "
+        rank = f"{r['rank']:.1f}" if r['rank'] is not None else "  — "
+        lines.append(
+            f"{r['arm']:<28} {r['n']:>3} {p1:>7} {r['recall']:>7.3f} "
+            f"{r['prec']:>6.3f} {rank:>5} {r['intok']:>7,} "
+            f"{r['turns']:>5.1f} ${r['cost']:>6.4f}"
+        )
+    lines.append("```")
 
     # ── data integrity — SG runs that silently lost their embedding index ───
     lines += ["", "## Data integrity", ""]

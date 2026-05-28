@@ -88,14 +88,31 @@ def _run(bin_path: str, args: List[str], timeout: int = 300) -> str:
 
     stderr (level=info log lines) is discarded — only the JSON on stdout matters.
     timeout is generous because index_repository on a large repo can take ~30s.
+
+    On failure prints a one-line warning to stderr so a wedged binary / wrong
+    args / missing index doesn't silently turn into recall=0 across an entire
+    eval stage (the failure mode that caused cbmem to look broken on the
+    llama33_70b v3 run).  Set SG_EVAL_QUIET=1 to suppress the warnings.
     """
+    import os
+    import sys
     try:
         r = subprocess.run(
             [bin_path, *args],
             capture_output=True, text=True, timeout=timeout,
         )
+        if r.returncode != 0 and not os.environ.get("SG_EVAL_QUIET"):
+            sys.stderr.write(
+                f"[cbmem] non-zero exit {r.returncode} for `{args[0] if args else '?'}`: "
+                f"{(r.stderr or '').strip()[:200]}\n"
+            )
         return r.stdout or ""
-    except (subprocess.SubprocessError, OSError):
+    except (subprocess.SubprocessError, OSError) as e:
+        if not os.environ.get("SG_EVAL_QUIET"):
+            sys.stderr.write(
+                f"[cbmem] subprocess failed ({type(e).__name__}: {e}) "
+                f"args={args[:2]}\n"
+            )
         return ""
 
 
