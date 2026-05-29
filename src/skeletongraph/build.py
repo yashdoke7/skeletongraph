@@ -336,7 +336,12 @@ def build_index(
                 import logging
                 logging.getLogger(__name__).warning(f"Auto-summarize failed: {e}")
 
-    # Embeddings (optional — requires sentence-transformers)
+    # Embeddings (optional — requires sentence-transformers).
+    # When the user has enable_embeddings=True but the dep is missing, we
+    # SURFACE that explicitly instead of silently skipping. The most common
+    # support question on the IDE side is "why does .skeletongraph/ have no
+    # embeddings.npz?" — answer is always "sentence-transformers not in the
+    # Python that ran sg index"; this warning makes that visible at build time.
     if cfg.enable_embeddings and embeddings_available():
         emb_entries = []
         for fqn, sk in store.skeleton_table.items():
@@ -357,6 +362,21 @@ def build_index(
         store.embeddings.build(emb_entries)
     else:
         store.embeddings = EmbeddingStore()
+        if cfg.enable_embeddings and not embeddings_available():
+            import logging
+            logging.getLogger(__name__).warning(
+                "Embeddings requested (cfg.enable_embeddings=True) but "
+                "sentence-transformers is not importable in this Python "
+                "environment. SG will use BM25+graph retrieval only "
+                "(semantic search disabled). To enable: "
+                "`pip install sentence-transformers` then re-run `sg index --force`."
+            )
+            if on_progress:
+                on_progress(
+                    "WARNING: sentence-transformers missing — embeddings skipped. "
+                    "pip install sentence-transformers; sg index --force",
+                    0, 0,
+                )
 
     # BM25 model (lazy-built on first fallback use, but can be eager-built now)
     # Disabled by default for build speed; will be built on-demand in resolver

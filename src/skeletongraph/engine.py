@@ -435,7 +435,14 @@ class SGEngine:
             enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
             graph_expansion_policy=getattr(self._config, "graph_expansion_policy", "gated"),
             enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
-            enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", False),
+            # Default MUST match SGConfig dataclass default (True). Prior False
+            # default here caused a silent regression where the engine would
+            # disable the fallback whenever the config object lacked the
+            # attribute (older serialized configs, partial dicts, some MCP
+            # paths). Observed effect: queries like "ScalarFormatter" on
+            # seaborn returned 0 hits across all ablation arms because the
+            # fallback that would have caught lexical-only matches never fired.
+            enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", True),
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -744,7 +751,14 @@ class SGEngine:
                 graph_policy or getattr(self._config, "graph_expansion_policy", "gated")
             ),
             enable_centrality_rerank=getattr(self._config, "enable_centrality_rerank", True),
-            enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", False),
+            # Default MUST match SGConfig dataclass default (True). Prior False
+            # default here caused a silent regression where the engine would
+            # disable the fallback whenever the config object lacked the
+            # attribute (older serialized configs, partial dicts, some MCP
+            # paths). Observed effect: queries like "ScalarFormatter" on
+            # seaborn returned 0 hits across all ablation arms because the
+            # fallback that would have caught lexical-only matches never fired.
+            enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", True),
         )
 
         # Apply file filter post-hoc
