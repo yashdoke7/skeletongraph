@@ -189,6 +189,32 @@ ARMS: Dict[str, Arm] = {
     # retrieval mode per query instead of the rule-based router. Same SG index;
     # only the mode selection changes (passed via heuristic_query mode_hint).
     "sg-learned":   Arm("sg-learned",   "sg-learned",   "SG (learned curator)"),
+
+    # ── Experimental / trial arms (synthesized from the ablation findings) ──
+    # The v3 ablations suggested SG is OVER-engineered for the agent loop:
+    # tier-2 summaries and centrality rerank in the search path appear to cost
+    # more than they return (sg-nosummary / sg-norerank trended ABOVE plain sg),
+    # while lazy graph expansion and embeddings earn their keep. These three
+    # arms operationalize three different responses to that finding. All share
+    # the same "lean" defaults (no summaries, no centrality rerank surfaced to
+    # the agent) and run in sg-env alongside `baseline`.
+    #
+    #   sg-lean   — STATIC trim: SG minus summaries minus centrality rerank.
+    #               Embeddings on, lazy (gated) graph on. The ship-simpler
+    #               product candidate: "what the ablations say is optimal."
+    #   sg-router — ADAPTIVE: a deterministic per-query router reads the query
+    #               SHAPE (precise symbol lookup vs relational vs conceptual)
+    #               and spends retrieval effort only where it helps — graph OFF
+    #               for symbol lookups, graph ALWAYS for relational queries,
+    #               gated for conceptual. Conditional computation; lean defaults.
+    #   sg-fusion — ENSEMBLE: reciprocal-rank fusion (RRF) of SG-structural +
+    #               flat BM25, no learned reranker, no summaries. "Combine
+    #               cheaply" instead of selecting one retriever — a different
+    #               philosophy from routing, robust to either signal missing.
+    "sg-lean":   Arm("sg-lean",   "sg-lean",   "SG-lean (no summary/rerank)"),
+    "sg-router": Arm("sg-router", "sg-router", "SG-router (adaptive per-query)"),
+    "sg-fusion": Arm("sg-fusion", "sg-fusion", "SG-fusion (RRF structural+BM25)"),
+
     # Single-shot SG (no agent loop): retrieve once → one generation → patch.
     # This is the "is the agent worth it" measure (agent vs no-agent) — which is
     # also where SG's internal query routing would matter, since with no agent
@@ -312,14 +338,36 @@ STAGES: Dict[str, Stage] = {
     # run_singleshot.py instead of run_stage.py — handled outside the stage
     # system so it can't be passed as --stage. See docstring of that script.
 
+    # IMPORTANT — env split. Arms are grouped by what env they need so a run
+    # never silently degrades because a backend's dependency is missing:
+    #   • baseline / ablation / trial / singleshot → sg-env (sentence-
+    #     transformers + skeletongraph). Pure-Python, no external binaries.
+    #   • comparators → each needs its OWN env: cbmem needs the codebase-memory
+    #     binary on PATH (CBMEM_BIN); aider needs aider-chat installed (its
+    #     huggingface_hub pin conflicts with ours — use a SEPARATE venv).
+    # Mixing cbmem/aider into `baseline` is exactly what bricked them on
+    # ContextBench (binary/lib missing → silent recall=0). Keep them separate.
+
     "baseline": Stage(
         "baseline",
-        ["sg", "bm25", "grep", "hybrid", "none", "cbmem", "aider"],
+        ["sg", "bm25", "grep", "hybrid", "none"],
         30, "swebench",
-        "BASELINE — 7-arm headline comparison: SG vs 4 retrieval families "
-        "(BM25, grep, Dense+Rerank, No-Retrieval) + closest prior art "
-        "(Aider RepoMap) + closest published competitor (cbmem). The paper's "
-        "main table.",
+        "BASELINE — 5-arm core comparison: SG vs 4 retrieval families "
+        "(BM25, grep, Dense+Rerank, No-Retrieval). All run in the SAME env "
+        "(sg-env); no external binaries. The paper's main table. Run the "
+        "closest published systems via the `comparators` stage.",
+    ),
+
+    "comparators": Stage(
+        "comparators",
+        ["cbmem", "aider"],
+        30, "swebench",
+        "COMPARATORS — closest published systems. Run SEPARATELY because each "
+        "needs its own env: cbmem needs the binary on PATH (set $env:CBMEM_BIN); "
+        "aider needs aider-chat installed (separate venv — its huggingface_hub "
+        "pin conflicts with ours). Compare against `sg` from `baseline`. "
+        "Preflight each backend (selftest) BEFORE launching or you get silent "
+        "recall=0.",
     ),
 
     "ablation": Stage(
@@ -327,35 +375,49 @@ STAGES: Dict[str, Stage] = {
         ["sg-fullgraph", "sg-nograph", "sg-norerank", "sg-nosummary", "sg-noembed"],
         30, "swebench",
         "SG ABLATION — five SG variants with exactly one component disabled. "
-        "Compare against the `sg` arm in `baseline`. sg-noagent (single-shot, "
-        "no agent loop) is run separately via `run_singleshot.py --all`.",
+        "Compare against the `sg` arm in `baseline`. Single-shot (no agent "
+        "loop) is run separately via `run_singleshot.py --all` (arm sg-noagent).",
+    ),
+
+    "trial": Stage(
+        "trial",
+        ["sg-lean", "sg-router", "sg-fusion"],
+        30, "swebench",
+        "TRIAL — three experimental retrieval policies synthesized from the "
+        "ablation findings: sg-lean (static trim: no summary/rerank), "
+        "sg-router (adaptive per-query routing), sg-fusion (RRF of "
+        "structural+BM25). All share lean defaults and run in sg-env. "
+        "Compared against `sg` from `baseline` — does trimming / routing / "
+        "fusing beat the full default pipeline?",
     ),
 
     "smoke": Stage(
         "smoke",
-        ["sg", "bm25", "grep", "hybrid", "none", "cbmem", "aider"],
+        ["sg", "bm25", "grep", "hybrid", "none"],
         SWEBENCH_N, "swebench",
-        "SMOKE GATE — same 7 arms as `baseline`, but scoped to first N tasks "
-        "via `--limit 10`. Run BEFORE any big AMD spend; abort + fix if any "
-        "arm is wedged. ~$1 on MI300X.",
+        "SMOKE GATE — same 5 arms as `baseline`, scoped to first N tasks via "
+        "`--limit 10`. Run BEFORE any big AMD spend; abort + fix if any arm is "
+        "wedged. ~$1 on MI300X. (Comparators have their own preflight.)",
     ),
 
     "contextbench": Stage(
         "contextbench",
-        ["sg", "bm25", "grep", "hybrid", "none", "cbmem", "aider"],
+        ["sg", "bm25", "grep", "hybrid", "none"],
         60, "contextbench",
-        "CONTEXTBENCH — 2nd benchmark, same 7 arms × 60 Python tasks. Run "
-        "with `--dataset eval/datasets/contextbench.jsonl`. Confirms the "
-        "SG win isn't SWE-bench-specific.",
+        "CONTEXTBENCH — 2nd benchmark, same 5 baseline arms × 60 Python tasks. "
+        "Run with `--dataset eval/datasets/contextbench.jsonl`. Confirms the "
+        "SG win isn't SWE-bench-specific. Run cbmem/aider here via the "
+        "`comparators` stage + the same `--dataset` flag, in their own envs.",
     ),
 
     "variance": Stage(
         "variance",
-        ["sg", "bm25", "hybrid", "cbmem", "aider"],
+        ["sg", "bm25", "hybrid"],
         20, "swebench",
-        "VARIANCE APPENDIX — 5 arms × 20 tasks × 3 seeds. Quantifies "
+        "VARIANCE APPENDIX — 3 sg-env arms × 20 tasks × 3 seeds. Quantifies "
         "vLLM/NIM serving non-determinism for the paper's noise-floor "
-        "appendix. Spend only after baseline + ablation land.",
+        "appendix. (cbmem/aider excluded — own env; add them manually if "
+        "needed.) Spend only after baseline + ablation land.",
         repeats=3,
     ),
 

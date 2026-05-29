@@ -9,6 +9,7 @@ Tool set: search_code, list_files, read_file, edit_file, submit.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List
@@ -219,16 +220,29 @@ class ToolExecutor:
             # flag it so the user notices BEFORE writing it into the paper.
             if not seen and self.backend != "none":
                 import sys, os
+                # ── rate-limited diagnostic ─────────────────────────────────
+                # Originally one stderr line per missing first-search. With
+                # 5 ablation arms × N tasks where the model picks the same
+                # bad query (e.g. "ScalarFormatter" on seaborn-3187, where
+                # the symbol is in matplotlib), this floods the console with
+                # duplicate warnings. We now emit one line per (arm, query)
+                # tuple per process; further hits are silent. Set
+                # SG_EVAL_VERBOSE_EMPTY=1 to restore per-call warnings.
                 if not os.environ.get("SG_EVAL_QUIET"):
-                    # workspace layout: WORKSPACE_ROOT/<run_id>/repo
-                    # so self.repo.parent.name is the run_id (informative);
-                    # self.repo.name is always literally "repo" (useless).
-                    rid = self.repo.parent.name
-                    sys.stderr.write(
-                        f"[{self.backend}] first search returned 0 file paths "
-                        f"(run={rid}, query={query!r:.60}). "
-                        f"If every task hits this, the backend is wedged.\n"
-                    )
+                    verbose = os.environ.get("SG_EVAL_VERBOSE_EMPTY") == "1"
+                    cls = type(self)
+                    seen_set = getattr(cls, "_empty_warned", None)
+                    if seen_set is None:
+                        seen_set = set()
+                        cls._empty_warned = seen_set
+                    key = (self.backend, (query or "").strip().lower()[:80])
+                    if verbose or key not in seen_set:
+                        rid = self.repo.parent.name
+                        sys.stderr.write(
+                            f"[{self.backend}] first search returned 0 file paths "
+                            f"(run={rid}, query={query!r:.60}).\n"
+                        )
+                        seen_set.add(key)
             # SG arms only: did the semantic embedding index actually build?
             # If embeddings.npz is absent the run is SG-minus-embeddings — flag
             # it so aggregate.py never reports a degraded run as real SG.
@@ -350,11 +364,106 @@ class ToolExecutor:
 
 # ── retrieval backends ─────────────────────────────────────────────────────
 
-# Every SkeletonGraph variant (full + ablations). These route through the
-# summary-aware path so the agent receives tier-2 previews (the C2 mechanism).
+# Every SkeletonGraph variant (full + ablations + experimental trials). These
+# route through the summary-aware path so the agent can receive tier-2 previews
+# (the C2 mechanism). The three trial arms (sg-lean, sg-router, sg-fusion) run
+# leaner: they drop summaries/rerank and, for fusion, ensemble with BM25.
 _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
                 "sg-norerank", "sg-nosummary", "sg-noembed", "sg-learned",
-                "sg-weakfallback"}
+                "sg-weakfallback",
+                "sg-lean", "sg-router", "sg-fusion"}
+
+
+# ── experimental-arm helpers: adaptive routing + rank fusion ─────────────────
+# These power the three trial arms. They are deliberately small and dependency-
+# free (regex + arithmetic) so the routing decision is fully inspectable for the
+# paper and adds ~zero latency vs a learned classifier.
+
+# A bare identifier or dotted path ("ScalarFormatter", "np.linalg.norm",
+# "Foo.bar") — the signal that the user already knows the symbol's name.
+_SYMBOL_RE = re.compile(r"^[A-Za-z_][\w.]*$")
+# Relational / impact-analysis intent: who calls this, what does it touch, blast
+# radius. These are exactly the queries graph traversal exists to serve.
+_RELATION_RE = re.compile(
+    r"\b(calls?|caller|callers|callee|invoke[sd]?|use[sd]?|used by|depend\w*|"
+    r"reference\w*|refer|impact\w*|affect\w*|blast radius|propagat\w*|"
+    r"downstream|upstream|trace\w*|ripple)\b",
+    re.I,
+)
+# Whitespace ⇒ the query is a phrase / description, not a single symbol.
+_NL_RE = re.compile(r"\s")
+
+
+def _route(query: str) -> dict:
+    """Adaptive per-query plan for sg-router (conditional computation).
+
+    Returns {"graph_policy", "mode_hint"}:
+      • relational/impact query → graph "always" + debug_investigate (traverse
+        the dependency graph hard; that is the whole point of the query)
+      • bare symbol, no whitespace → graph "off" + retrieval_fast (a direct
+        lexical/embedding hit is enough; graph expansion only adds noise/cost)
+      • natural-language description → graph "gated" + explain (let the gate
+        decide; description queries benefit from a little neighborhood)
+      • fallback → graph "gated", no mode override (use SG's own classifier)
+
+    graph_policy "off" is applied by the caller as enable_graph_expansion=False;
+    "gated"/"always" map straight onto SGConfig.graph_expansion_policy.
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"graph_policy": "gated", "mode_hint": None}
+    if _RELATION_RE.search(q):
+        return {"graph_policy": "always", "mode_hint": "debug_investigate"}
+    if not _NL_RE.search(q) and _SYMBOL_RE.match(q):
+        return {"graph_policy": "off", "mode_hint": "retrieval_fast"}
+    if _NL_RE.search(q):
+        return {"graph_policy": "gated", "mode_hint": "explain"}
+    return {"graph_policy": "gated", "mode_hint": None}
+
+
+def _rrf(rank_lists: List[List[str]], k_rrf: int = 60) -> List[str]:
+    """Reciprocal Rank Fusion (Cormack et al. 2009, k=60).
+
+    score(item) = Σ_lists 1 / (k_rrf + rank + 1).  Robust, score-free fusion:
+    it needs only the ordering from each retriever, so a structural ranker and a
+    BM25 ranker (whose raw scores are not comparable) can be combined directly.
+    Returns items sorted by fused score, descending.
+    """
+    scores: Dict[str, float] = {}
+    for lst in rank_lists:
+        for rank, item in enumerate(lst):
+            scores[item] = scores.get(item, 0.0) + 1.0 / (k_rrf + rank + 1)
+    return sorted(scores, key=lambda it: -scores[it])
+
+
+def _retrieve_fusion(query: str, repo: Path, k: int):
+    """sg-fusion: RRF ensemble of structural (SG-lean) + lexical (BM25-flat),
+    fused at FILE granularity.
+
+    Rationale from the ablations: BM25 has the best raw file recall (0.90) while
+    SG has the best precision/rank; fusing their orderings should keep SG's
+    precision near the top while inheriting BM25's recall tail. Lean (no
+    summaries) → returns (file, "") pairs to honor the _retrieve_sg contract.
+    """
+    _ensure_sg_on_path()
+
+    def _files(fqns: List[str]) -> List[str]:
+        seen: List[str] = []
+        for fqn in fqns:
+            f = fqn.split("::")[0]
+            if f not in seen:
+                seen.append(f)
+        return seen
+
+    # structural ranker — SG-lean (graph on, no summary/rerank overhead).
+    # Pull deeper than k so the fusion has a tail to draw recall from.
+    sg_files = _files([fqn for fqn, _ in _retrieve_sg("sg-lean", query, repo, k * 2)])
+    # lexical ranker — flat BM25 over function text.
+    from backends.bm25_flat import retrieve as bm25_retrieve
+    bm_files = _files(bm25_retrieve(query, repo, k * 2))
+
+    fused = _rrf([sg_files, bm_files])
+    return [(f, "") for f in fused[:k]]
 
 
 def _ensure_sg_on_path() -> None:
@@ -397,6 +506,15 @@ def _sg_config(backend: str):
         # fires when the entity match is ambiguous, so precise-match precision is
         # preserved. Tests whether it recovers the semantic-mismatch misses.
         cfg.enable_weak_entity_fallback = True
+    elif backend in ("sg-lean", "sg-router", "sg-fusion"):
+        # Trial arms share a LEAN base: drop the two components the ablations
+        # flagged as low marginal value on this workload — tier-2 summaries
+        # (C2) and centrality rerank (PageRank) — while keeping graph + embeddings
+        # (which earned their keep). sg-router additionally rewrites
+        # graph_policy/mode per query in _retrieve_sg; sg-fusion ensembles this
+        # lean retriever with BM25 via RRF in _retrieve_fusion.
+        cfg.enable_summaries = False
+        cfg.enable_centrality_rerank = False
     return cfg
 
 
@@ -410,23 +528,43 @@ def _retrieve_sg(backend: str, query: str, repo: Path, k: int):
     local tier needs no LLM and is fully reproducible, which matters because the
     async summary worker never runs inside an isolated eval workspace.
     """
+    # sg-fusion is an ensemble, not a single SGEngine pass — handle separately.
+    if backend == "sg-fusion":
+        return _retrieve_fusion(query, repo, k)
+
     _ensure_sg_on_path()
     from skeletongraph.engine import SGEngine
     from skeletongraph.summary.local import build_local_summary
 
-    engine = SGEngine(project_root=repo, config=_sg_config(backend))  # auto-builds
-    # sg-learned: a trained classifier picks the retrieval mode for this query
-    # (the learned curator), passed via mode_hint. Same index, only mode changes.
+    cfg = _sg_config(backend)
+    # mode_hint / graph_policy may be overridden per query below.
     mode_hint = None
     if backend == "sg-learned":
+        # A trained classifier picks the retrieval mode for this query (the
+        # learned curator), passed via mode_hint. Same index, only mode changes.
         try:
             from curator.curator import predict_mode   # eval/ is on sys.path
             mode_hint = predict_mode(query)
         except Exception:
             mode_hint = None                            # no model → rule-based
+    elif backend == "sg-router":
+        # Adaptive conditional computation: inspect the query and rewrite the
+        # graph policy + mode for THIS call only. "off" disables graph expansion
+        # outright; "gated"/"always" set the policy the gate honors.
+        route = _route(query)
+        mode_hint = route["mode_hint"]
+        if route["graph_policy"] == "off":
+            cfg.enable_graph_expansion = False
+        else:
+            cfg.graph_expansion_policy = route["graph_policy"]
+
+    engine = SGEngine(project_root=repo, config=cfg)    # auto-builds
     res = engine.heuristic_query(query, top_n=k, mode_hint=mode_hint)
     store = engine.get_store()
-    include = backend != "sg-nosummary"
+    # Summaries are delivered iff the config left them on (off for sg-nosummary
+    # and the lean trial arms). Reading the flag keeps this in lockstep with
+    # _sg_config rather than re-listing arm names here.
+    include = getattr(cfg, "enable_summaries", True)
 
     out = []
     for c in res.candidates:

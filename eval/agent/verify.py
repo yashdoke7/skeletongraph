@@ -25,19 +25,41 @@ from pathlib import Path
 from . import config
 
 
-def _run_records(stage: str | None) -> list:
-    """Load run JSONs, optionally filtered to one stage's arms/models."""
+def _run_records(stage: str | None,
+                 only_arms: set | None = None,
+                 skip_arms: set | None = None,
+                 only_completed: bool = True,
+                 only_unverified: bool = False) -> list:
+    """Load run JSONs, optionally filtered by stage / arm allowlist / state.
+
+    only_completed=True (default): drop records where stopped != submit / max_turns.
+        Pass=False if you intentionally want to verify error-state records too
+        (the harness will mark them unresolved, but it lets you see the full set).
+    only_unverified=True: drop records that already have `resolved` set.
+        Use this for incremental verify — skips arms/tasks already scored.
+    """
     records = []
     for p in sorted(config.RUNS_DIR.glob("*.json")):
+        if p.name.startswith("_") or p.name == "summary.json":
+            continue
         try:
             r = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
         r["_path"] = str(p)
+        arm = r.get("arm")
         if stage and stage in config.STAGES:
             st = config.STAGES[stage]
-            if r.get("arm") not in st.arms or r.get("model") not in st.models:
+            if arm not in st.arms or r.get("model") not in st.models:
                 continue
+        if only_arms and arm not in only_arms:
+            continue
+        if skip_arms and arm in skip_arms:
+            continue
+        if only_completed and r.get("stopped") not in ("submit", "max_turns"):
+            continue
+        if only_unverified and ("resolved" in r):
+            continue
         records.append(r)
     return records
 
@@ -109,15 +131,33 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default=None, help="verify one stage's runs")
     ap.add_argument("--all", action="store_true", help="verify every run")
+    ap.add_argument("--only-arms", default="",
+                    help="comma-separated arm names; verify only these arms "
+                         "(e.g. cbmem,aider). Lets you re-verify one arm "
+                         "while others are still running.")
+    ap.add_argument("--skip-arms", default="",
+                    help="comma-separated arm names; exclude these arms "
+                         "(complement of --only-arms).")
+    ap.add_argument("--incremental", action="store_true",
+                    help="skip records that already have `resolved` set; "
+                         "verify only newly-completed runs. Cheap re-runs "
+                         "as more tasks finish.")
     ap.add_argument("--run-tag", default="sg_eval")
     ap.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
                     help="HF dataset the harness scores against")
     args = ap.parse_args()
 
     stage = None if args.all else args.stage
-    records = _run_records(stage)
+    only = {a.strip() for a in args.only_arms.split(",") if a.strip()} or None
+    skip = {a.strip() for a in args.skip_arms.split(",") if a.strip()} or None
+    records = _run_records(stage, only, skip,
+                           only_completed=True,
+                           only_unverified=args.incremental)
     if not records:
-        raise SystemExit("no run JSONs found — run run_stage.py first")
+        msg = "no run JSONs match the filter"
+        if args.incremental:
+            msg += " (incremental: every matching run is already verified)"
+        raise SystemExit(msg)
 
     # Group by arm and verify each arm independently — one harness run per arm,
     # so each task's verdict is attributed to the correct arm.
