@@ -151,8 +151,12 @@ _TOOL_SCHEMAS = [
             },
             "max_tokens": {
                 "type": "integer",
-                "description": "Token budget for the whole response (default: 5000)",
-                "default": 5000,
+                "description": "ADVANCED — usually omit. Response budget; "
+                               "default (2000) is tuned to stay inline in "
+                               "VS Code Copilot (which offloads larger "
+                               "responses to disk and re-reads them each "
+                               "turn, multiplying token cost). Hard cap 4000.",
+                "default": 2000,
             },
         },
         ["query"],
@@ -199,8 +203,13 @@ _TOOL_SCHEMAS = [
             },
             "max_tokens": {
                 "type": "integer",
-                "description": "Token budget (default: 5000)",
-                "default": 5000,
+                "description": "ADVANCED — usually omit. Function body "
+                               "budget; default (2500) holds one typical "
+                               "body inline. For larger functions, request "
+                               "specific line ranges in separate calls "
+                               "rather than raising max_tokens (avoids the "
+                               "IDE content-cache offload). Hard cap 4000.",
+                "default": 2500,
             },
         },
         ["target"],
@@ -464,7 +473,11 @@ class MCPServer:
     # ── Tool: sg_overview ────────────────────────────────────────────────
 
     def _tool_overview(self, args: Dict) -> str:
-        top_n = int(args.get("top_n", 20))
+        # Default lowered 20 → 10. Most signal lives in the first 5-7 hub
+        # functions by PageRank; entries 11-20 are usually noise that pads
+        # the overview without changing which functions the agent searches.
+        # Callers can still request more via top_n=20 explicitly.
+        top_n = int(args.get("top_n", 10))
         include_session = bool(args.get("include_session", True))
 
         parts = [_USE_SG_REMINDER, ""]
@@ -554,11 +567,12 @@ class MCPServer:
         top_n = min(max(int(args.get("top_n", 10)), 1), 20)
         requested_expand_top = min(max(int(args.get("expand_top", 3)), 1), 7)
         file_filter = str(args.get("file_filter", "")).strip()
-        # Default kept modest: large bodies make some IDE clients spill the
-        # result into a separate content.txt resource (which the agent is told
-        # not to read), so it falls back to native grep/read. A tighter budget
-        # keeps the result inline and self-sufficient.
-        max_tokens = min(max(int(args.get("max_tokens", 3000)), 1000), 12000)
+        # Default 2000 / CAP 4000 (char budget 16K → 16K capped). Cap matters
+        # as much as default — without it, the model overrides max_tokens to
+        # 5000+ and trips VS Code Copilot's content.txt offload, where the
+        # response is saved to a workspace file and re-loaded each turn
+        # (amplifying token cost across all subsequent turns).
+        max_tokens = min(max(int(args.get("max_tokens", 2000)), 1000), 4000)
         intent_arg = str(args.get("intent", "")).strip() or None
         graph_arg = str(args.get("graph", "auto")).strip().lower()
         graph_policy = {"on": "always", "off": "off", "auto": None}.get(graph_arg)
@@ -686,6 +700,12 @@ class MCPServer:
                     lines.append(entry)
             lines.append("")
 
+            # Task bundle (likely tests + likely callers) — kept always-on.
+            # Copilot's v3 review explicitly cited needing test neighbors as
+            # the reason for falling back to native grep; removing the bundle
+            # on MEDIUM confidence would make that worse. The bundle already
+            # respects the tightened max_tokens budget (remaining_chars below),
+            # so it naturally shrinks without being gated off.
             bundle = self._render_task_bundle(
                 query=query,
                 candidates=candidates[:expand_top],
@@ -1621,7 +1641,16 @@ class MCPServer:
 
     def _tool_expand(self, args: Dict) -> str:
         target = str(args.get("target", "")).strip()
-        max_tokens = int(args.get("max_tokens", 5000))
+        # Default 2500 / CAP 4000. The cap matters as much as the default:
+        # observed regression where the model passed max_tokens=5000 to
+        # override the default — putting the response back above VS Code
+        # Copilot's content.txt offload threshold (~4K tokens). Capping at
+        # 4000 forces inline retention even when the caller asks for more.
+        # If the model genuinely needs a >4K body, it can request the
+        # specific line range (e.g. sg_expand('file.py:540-820')) for
+        # multiple small calls — each stays inline.
+        max_tokens = int(args.get("max_tokens", 2500))
+        max_tokens = min(max(max_tokens, 1000), 4000)
 
         if not target:
             return "Error: target is required"

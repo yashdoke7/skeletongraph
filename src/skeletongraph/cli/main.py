@@ -39,6 +39,123 @@ def app():
     pass
 
 
+@app.command(name="doctor")
+@click.option("--path", default=".", help="Project root to check (for index status).")
+def cmd_doctor(path: str) -> None:
+    """Validate the SG install end-to-end.
+
+    Checks every layer that silently failed in the v3 ablation run:
+      - Python version
+      - Core deps (tree-sitter, click, mmh3, rich, tiktoken)
+      - sentence-transformers + huggingface_hub (the silent-failure pair)
+      - tree-sitter language parsers
+      - sg on PATH
+      - .skeletongraph index present (if --path given)
+
+    Exits non-zero if anything's broken so CI can rely on it.
+    """
+    import sys
+    import shutil
+    from pathlib import Path
+
+    ok = True
+    def check(label, cond, fix=""):
+        nonlocal ok
+        mark = "OK " if cond else "FAIL"
+        click.echo(f"  [{mark}] {label}")
+        if not cond:
+            ok = False
+            if fix:
+                click.echo(f"        fix: {fix}")
+
+    click.echo("\nSkeletonGraph — install doctor\n")
+
+    # Python version
+    pv = sys.version_info
+    check(f"Python {pv.major}.{pv.minor}.{pv.micro} >= 3.10",
+          pv >= (3, 10),
+          "use Python 3.10 or newer")
+
+    # Core deps
+    for mod in ("tree_sitter", "click", "mmh3", "rich", "tiktoken", "numpy"):
+        try:
+            __import__(mod)
+            check(f"import {mod}", True)
+        except ImportError as e:
+            check(f"import {mod}", False, f"pip install {mod}  ({e})")
+
+    # sentence-transformers + huggingface_hub (the silent-failure pair)
+    try:
+        import sentence_transformers
+        check(f"sentence-transformers {sentence_transformers.__version__}", True)
+    except ImportError as e:
+        check("sentence-transformers", False,
+              f"pip install 'sentence-transformers>=3.0,<4'  ({e})")
+    except Exception as e:
+        # This is the BucketNotFoundError class — import succeeds at top but
+        # fails on sub-import. Surface it explicitly.
+        check("sentence-transformers load", False,
+              f"transitive import broken: {type(e).__name__}: {e}\n"
+              f"        fix: pip install 'huggingface_hub>=0.20,<0.30'")
+
+    try:
+        import huggingface_hub
+        ver = huggingface_hub.__version__
+        ok_ver = ver.startswith(("0.20", "0.21", "0.22", "0.23", "0.24",
+                                  "0.25", "0.26", "0.27", "0.28", "0.29"))
+        check(f"huggingface_hub {ver} in supported range (>=0.20,<0.30)",
+              ok_ver,
+              f"pip install 'huggingface_hub>=0.20,<0.30'  "
+              f"(newer versions remove BucketNotFoundError → breaks datasets)")
+    except ImportError:
+        check("huggingface_hub", False, "pip install huggingface_hub")
+
+    # Try loading the actual default embedder — catches model-download issues
+    try:
+        from sentence_transformers import SentenceTransformer
+        SentenceTransformer("all-MiniLM-L6-v2", trust_remote_code=False)
+        check("load default embedder (all-MiniLM-L6-v2)", True)
+    except Exception as e:
+        check("load default embedder", False,
+              f"{type(e).__name__}: {str(e)[:200]}\n"
+              f"        fix: check network / HF_HOME cache permissions")
+
+    # tree-sitter language parsers (at least Python — most repos)
+    for lang in ("python", "javascript", "typescript", "java", "go", "rust"):
+        try:
+            __import__(f"tree_sitter_{lang}")
+            check(f"tree-sitter parser: {lang}", True)
+        except ImportError:
+            check(f"tree-sitter parser: {lang}", False,
+                  f"pip install tree-sitter-{lang}")
+
+    # sg on PATH (so IDE installers can use bare `sg` in hook commands)
+    sg = shutil.which("sg")
+    check(f"`sg` on PATH ({sg})" if sg else "`sg` on PATH", bool(sg),
+          "ensure Python Scripts dir is on PATH (otherwise hooks use full python invocation)")
+
+    # Project index status (only if --path is a real project)
+    proj = Path(path).resolve()
+    if (proj / ".skeletongraph").exists():
+        meta = proj / ".skeletongraph" / "meta.json"
+        emb = proj / ".skeletongraph" / "embeddings.npz"
+        check(f"index present at {proj.name}/.skeletongraph", True)
+        check("  → embeddings.npz built", emb.exists(),
+              f"sg index --path '{proj}' --force  "
+              f"(rebuild after fixing sentence-transformers)")
+    else:
+        click.echo(f"  [info] no .skeletongraph index at {proj.name} "
+                   f"(run `sg index --path '{proj}'` to build)")
+
+    click.echo()
+    if ok:
+        click.echo("  All checks passed.")
+        sys.exit(0)
+    else:
+        click.echo("  Fix the FAIL items above, then re-run `sg doctor`.")
+        sys.exit(1)
+
+
 @app.command(name="init")
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--agent", "-a", default=None, help="IDE agent preset name")

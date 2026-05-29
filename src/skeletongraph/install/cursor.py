@@ -53,21 +53,23 @@ MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log
 def install(project_root: Path, verbose: bool = True) -> List[str]:
     """Write Cursor MCP config + hooks + rules for project_root.
 
-    Returns list of files written.
+    Returns list of files written. See claude_code.py for the cross-platform
+    pitfalls (bash strips backslashes, prefer bare `sg` if on PATH).
     """
+    project_root = project_root.resolve()
     written: List[str] = []
     cursor_dir = project_root / ".cursor"
     cursor_dir.mkdir(parents=True, exist_ok=True)
-    sg_exe = _sg_exe()
-    path_arg = str(project_root)
+    sg_cmd, on_path = _resolve_sg_command()
+    path_arg = _posix_path(project_root)
 
     # ── 1. .cursor/mcp.json ───────────────────────────────────────────
     mcp_path = cursor_dir / "mcp.json"
     mcp_config = _load_json(mcp_path)
     mcp_config.setdefault("mcpServers", {})["skeletongraph"] = {
-        "command": sg_exe,
-        "args": ["serve", "--path", path_arg],
         "type": "stdio",
+        "command": sg_cmd,
+        "args": ["serve", "--path", path_arg],
     }
     mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
     written.append(".cursor/mcp.json")
@@ -81,19 +83,24 @@ def install(project_root: Path, verbose: bool = True) -> List[str]:
         written.append(".cursor/rules/skeletongraph.mdc")
 
     # ── 3. .cursor/settings.json — Cursor v1.7 hooks ─────────────────
+    # Same bash-escape concern as Claude Code: use forward-slash path +
+    # single-quote the --path argument.
     settings_path = cursor_dir / "settings.json"
     settings = _load_json(settings_path)
     hooks = settings.setdefault("hooks", {})
 
     _set_hook(hooks, "sessionStart",
-              f'{sg_exe} hook session_start --path "{path_arg}"')
+              f"{sg_cmd} hook session_start --path '{path_arg}'")
     _set_hook(hooks, "beforeSubmitPrompt",
-              f'{sg_exe} hook user_prompt_submit --path "{path_arg}"')
+              f"{sg_cmd} hook user_prompt_submit --path '{path_arg}'")
     _set_hook(hooks, "afterFileEdit",
-              f'{sg_exe} hook file_changed --path "{path_arg}"')
+              f"{sg_cmd} hook file_changed --path '{path_arg}'")
 
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     written.append(".cursor/settings.json")
+
+    if verbose:
+        _print_postinstall_report(sg_cmd, on_path, project_root, written)
 
     return written
 
@@ -101,12 +108,37 @@ def install(project_root: Path, verbose: bool = True) -> List[str]:
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _sg_exe() -> str:
+def _posix_path(p: Path) -> str:
+    """Forward slashes — bash strips backslashes when running hook commands."""
+    return str(p).replace("\\", "/")
+
+
+def _resolve_sg_command():
+    """Bare `sg` if on PATH (cleanest), else absolute python invocation."""
     import shutil
     sg = shutil.which("sg")
     if sg:
-        return sg
-    return f"{sys.executable} -m skeletongraph.cli.main"
+        return ("sg", True)
+    py = _posix_path(Path(sys.executable))
+    return (f"{py} -m skeletongraph.cli.main", False)
+
+
+def _print_postinstall_report(sg_cmd: str, on_path: bool,
+                              project_root: Path, written: List[str]) -> None:
+    out = sys.stderr.write
+    out("\n  SkeletonGraph install — Cursor\n")
+    out(f"  Project: {project_root}\n")
+    out(f"  Files written: {', '.join(written)}\n\n")
+    if not on_path:
+        out(f"  WARNING — `sg` is not on PATH. Using fallback: {sg_cmd}\n\n")
+    try:
+        import sentence_transformers  # noqa: F401
+        out("  Embedder: sentence-transformers detected.\n")
+    except ImportError:
+        out("  WARNING — sentence-transformers not installed (semantic retrieval off).\n")
+        out("  Optional install:  pip install sentence-transformers\n\n")
+    if not (project_root / ".skeletongraph").exists():
+        out(f"  Index: NOT BUILT. Run:  sg index --path '{_posix_path(project_root)}'\n\n")
 
 
 def _load_json(path: Path) -> Dict[str, Any]:

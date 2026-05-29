@@ -59,20 +59,22 @@ _IDE_CONFIGS: Dict[str, tuple] = {
 def install(ide: str, project_root: Path, verbose: bool = True) -> List[str]:
     """Write MCP config + rules block for a no-hooks IDE.
 
-    Returns list of files written.
+    Returns list of files written. Uses forward-slash paths so the config
+    survives any host (Windows + bash, Linux, macOS) without escape issues.
     """
     if ide not in _IDE_CONFIGS:
         return []
 
+    project_root = project_root.resolve()
     rules_file, mcp_path_rel, mcp_key = _IDE_CONFIGS[ide]
     written: List[str] = []
-    sg_exe = _sg_exe()
-    path_arg = str(project_root)
+    sg_cmd, on_path = _resolve_sg_command()
+    path_arg = _posix_path(project_root)
 
     server_entry = {
-        "command": sg_exe,
-        "args": ["serve", "--path", path_arg],
         "type": "stdio",
+        "command": sg_cmd,
+        "args": ["serve", "--path", path_arg],
     }
 
     # ── MCP config ────────────────────────────────────────────────────
@@ -90,7 +92,7 @@ def install(ide: str, project_root: Path, verbose: bool = True) -> List[str]:
         mcp_path.parent.mkdir(parents=True, exist_ok=True)
         zed_config = _load_json(mcp_path)
         zed_config.setdefault("context_servers", {})["skeletongraph"] = {
-            "command": {"path": sg_exe, "args": ["serve", "--path", path_arg]},
+            "command": {"path": sg_cmd, "args": ["serve", "--path", path_arg]},
         }
         mcp_path.write_text(json.dumps(zed_config, indent=2), encoding="utf-8")
         written.append(".zed/settings.json")
@@ -110,18 +112,46 @@ def install(ide: str, project_root: Path, verbose: bool = True) -> List[str]:
             target.write_text(_SG_RULES_BLOCK.lstrip(), encoding="utf-8")
             written.append(rules_file)
 
+    if verbose:
+        _print_postinstall_report(ide, sg_cmd, on_path, project_root, written)
+
     return written
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _sg_exe() -> str:
+def _posix_path(p: Path) -> str:
+    """Forward slashes — survives bash escape stripping on Windows hosts."""
+    return str(p).replace("\\", "/")
+
+
+def _resolve_sg_command():
+    """Bare `sg` if on PATH (cleanest), else absolute python invocation."""
     import shutil
     sg = shutil.which("sg")
     if sg:
-        return sg
-    return f"{sys.executable} -m skeletongraph.cli.main"
+        return ("sg", True)
+    py = _posix_path(Path(sys.executable))
+    return (f"{py} -m skeletongraph.cli.main", False)
+
+
+def _print_postinstall_report(ide: str, sg_cmd: str, on_path: bool,
+                              project_root: Path, written: List[str]) -> None:
+    out = sys.stderr.write
+    out(f"\n  SkeletonGraph install — {ide}\n")
+    out(f"  Project: {project_root}\n")
+    out(f"  Files written: {', '.join(written)}\n\n")
+    if not on_path:
+        out(f"  WARNING — `sg` is not on PATH. Using fallback: {sg_cmd}\n\n")
+    try:
+        import sentence_transformers  # noqa: F401
+        out("  Embedder: sentence-transformers detected.\n")
+    except ImportError:
+        out("  WARNING — sentence-transformers not installed (semantic retrieval off).\n")
+        out("  Optional install:  pip install sentence-transformers\n\n")
+    if not (project_root / ".skeletongraph").exists():
+        out(f"  Index: NOT BUILT. Run:  sg index --path '{_posix_path(project_root)}'\n\n")
 
 
 def _load_json(path: Path) -> Dict[str, Any]:

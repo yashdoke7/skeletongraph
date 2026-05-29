@@ -29,6 +29,7 @@ classifiers = [
     "Environment :: Console",
 ]
 dependencies = [
+    # ── Core parsing (tree-sitter) ─────────────────────────────────────
     "tree-sitter>=0.23",
     "tree-sitter-python>=0.23",
     "tree-sitter-javascript>=0.23",
@@ -40,30 +41,44 @@ dependencies = [
     "tree-sitter-c-sharp>=0.23",
     "tree-sitter-ruby>=0.23",
     "tree-sitter-php>=0.23",
+    # ── Core CLI / formatting / hashing ───────────────────────────────
     "click>=8.0",
     "mmh3>=4.0",
     "rich>=13.0",
     "tiktoken>=0.7.0",
-    # litellm is optional — only needed for sg run --execute / sg summarize --tier cloud
+    # ── Semantic retrieval (HARD dep — was an optional extra; silently
+    # disabling it caused the v3 73-of-103 ablation embeddings regression).
+    # See docs/RESEARCH.md §packaging. ─────────────────────────────────
+    "sentence-transformers>=3.0,<4",
+    "numpy>=1.24",
+    # ── huggingface_hub is pinned because newer versions (>=0.30)
+    # remove BucketNotFoundError, breaking datasets.hf_file_system and
+    # cascading into sentence-transformers model load. Bump only after
+    # validating all imports in `sg doctor`. ───────────────────────────
+    "huggingface_hub>=0.20,<0.30",
+    # ── litellm is optional — only needed for sg run --execute / sg summarize --tier cloud
     # Install with: pip install "skeletongraph[llm]"
 ]
 
 [project.optional-dependencies]
 llm = ["litellm>=1.0"]
-mcp = ["mcp-server-sdk>=0.1"]
-eval = ["pandas", "matplotlib", "seaborn"]
+mcp = ["mcp>=1.0"]
+eval = ["pandas", "matplotlib", "seaborn", "swebench", "openai", "datasets<3"]
 # Strong eval baselines — heavier deps, install separately:
 #   pip install "skeletongraph[eval-strong]"
+# aider-chat pulls a large dependency tree; install in a SEPARATE venv if
+# it conflicts with your main env (`pip install -e .[eval]` then a sibling
+# venv-aider for aider).
 eval-strong = [
-    "aider-chat>=0.82",           # aider repo-map arm
-    "sentence-transformers>=2.2", # hybrid-RAG dense retrieval + cross-encoder
-    "rank-bm25>=0.2",             # hybrid-RAG BM25 (faster than our hand-rolled one)
-    "numpy>=1.24",
+    "aider-chat>=0.82",
+    "rank-bm25>=0.2",
 ]
 daemon = ["watchdog>=3.0"]
-embeddings = ["sentence-transformers>=2.2", "numpy>=1.24"]
+# Kept for back-compat. sentence-transformers is now a hard dep; this
+# extra is a no-op alias.
+embeddings = []
 dev = ["pytest", "pytest-cov", "ruff"]
-all = ["skeletongraph[llm,mcp,eval,daemon,embeddings,dev]"]
+all = ["skeletongraph[llm,mcp,eval,daemon,dev]"]
 
 [project.scripts]
 skeletongraph = "skeletongraph.cli.main:app"
