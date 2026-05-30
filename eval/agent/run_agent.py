@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import List
@@ -22,7 +23,7 @@ from typing import List
 from . import config
 from .isolation import (cleanup_workspace, diff_patch, prepare_workspace, run_id)
 from .react import run_react
-from .tools import ToolExecutor
+from .tools import ToolExecutor, preflight_arm
 
 
 def load_tasks(path: Path = config.DATASET) -> list:
@@ -38,6 +39,27 @@ def run_one(task: dict, arm: str, repeat: int = 0, model: str = "main",
     config.RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
     repo = prepare_workspace(task, arm, repeat, model)
+
+    # ── STRICT preflight (opt-in via SG_EVAL_STRICT=1) ───────────────────────
+    # Verify the arm can run its EXACT intended config (e.g. embeddings actually
+    # built) BEFORE spending agent tokens. On failure, abort with a clean
+    # stopped="error" record — excluded from metrics, auto-retried by run_stage.
+    # This is what makes a re-run trustworthy: no silent BM25-only degradation.
+    if os.environ.get("SG_EVAL_STRICT") == "1":
+        err = preflight_arm(config.ARMS[arm].backend, repo)
+        if err:
+            if not keep_workspace:
+                cleanup_workspace(repo)
+            rec = {
+                "run_id": rid, "task_id": task["task_id"], "arm": arm,
+                "model": model, "repeat": repeat, "stopped": "error",
+                "error": err, "n_turns": 0,
+                "retrieval_hit": False, "edited_gold_file": False,
+            }
+            out_path.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+            print(f"  ABORT {rid}: {err}")
+            return rec
+
     try:
         executor = ToolExecutor(repo, config.ARMS[arm].backend)
         traj = run_react(task, arm, executor, model=model)
