@@ -165,7 +165,14 @@ class SGEngine:
                         self._sg_dir,
                     )
                     from .build import build_index
-                    self._store = build_index(self._root)
+                    # Build with THIS engine's config — not defaults. Without
+                    # passing it, build_index fell back to load_config()/SGConfig
+                    # defaults (embeddings ON), so enable_embeddings=False was
+                    # silently ignored at build time: a "lean"/no-embeddings
+                    # engine still paid the sentence-transformers load + encode
+                    # on every cold build. Honoring the config here is what makes
+                    # the lean profile actually cheap to build.
+                    self._store = build_index(self._root, config=self._config)
                     return self._store
                 raise RuntimeError(
                     "No SkeletonGraph index found. Run `sg build` first "
