@@ -58,8 +58,15 @@ class _BM25:
 def _functions_with_text(repo_path: Path) -> List[Tuple[str, str]]:
     """Enumerate (fqn, indexable_text) for every function in the repo."""
     from skeletongraph.engine import SGEngine
+    from skeletongraph.config import SGConfig
 
-    engine = SGEngine(project_root=repo_path)   # auto-builds index
+    # BM25 only needs the skeleton table to enumerate functions; it never uses
+    # SG's embeddings. Build with embeddings OFF so this baseline doesn't pay the
+    # sentence-transformers load + encode (now honored — engine passes config to
+    # build_index). Keeps the lexical baseline cheap and its timing honest.
+    cfg = SGConfig()
+    cfg.enable_embeddings = False
+    engine = SGEngine(project_root=repo_path, config=cfg)   # auto-builds index
     store = engine.get_store()
 
     by_file: Dict[str, list] = {}
