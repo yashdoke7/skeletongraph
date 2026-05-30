@@ -34,12 +34,22 @@ DATASET = EVAL_DIR / "datasets" / "stage0.jsonl"            # built by make_data
 _RUN_TAG = os.environ.get("SG_EVAL_RUN_TAG", "")
 RUNS_DIR = (EVAL_DIR / "results" / "agent" / _RUN_TAG
             if _RUN_TAG else EVAL_DIR / "results" / "agent")  # per-run trajectories
+
+# ── Heavy IO root (clones + per-run workspaces) ─────────────────────────────
+# The base repos and the transient per-run checkouts are GBs and get copied on
+# every run. Keep them OUT of the SG repo (cleaner git status, no space bloat,
+# clear isolation) by pointing SG_EVAL_DATA_ROOT at a sibling dir, e.g.:
+#   $env:SG_EVAL_DATA_ROOT = "C:\Users\ASUS\Desktop\CS\Projects\swebench-data"
+# Default (unset) = eval/datasets (legacy, in-repo). make_dataset.py honors the
+# same env so clones land there and the jsonl repo_path points there too.
+_DATA_ROOT = Path(os.environ["SG_EVAL_DATA_ROOT"]) if os.environ.get("SG_EVAL_DATA_ROOT") \
+    else EVAL_DIR / "datasets"
 # Workspace root is ALSO tag-namespaced. run_id uses model="main" for every
 # model, so two runs (e.g. 7B + NIM-70B) on the same (task, arm) would otherwise
 # share one checkout dir and clobber each other if run concurrently. Tagging the
 # root lets different SG_EVAL_RUN_TAG runs execute fully in parallel.
-WORKSPACE_ROOT = (EVAL_DIR / "datasets" / "_agent_work" / _RUN_TAG
-                  if _RUN_TAG else EVAL_DIR / "datasets" / "_agent_work")  # isolated per-run checkouts
+WORKSPACE_ROOT = (_DATA_ROOT / "_agent_work" / _RUN_TAG
+                  if _RUN_TAG else _DATA_ROOT / "_agent_work")  # isolated per-run checkouts
 
 
 # ── model endpoint ─────────────────────────────────────────────────────────
@@ -166,15 +176,24 @@ class Arm:
 
 
 ARMS: Dict[str, Arm] = {
-    "sg":     Arm("sg",     "sg",     "SkeletonGraph (structural)"),
+    # `sg` is now the LEAN product default: structural core (gated graph +
+    # centrality rerank + BM25 weak-entity fallback), summaries + embeddings
+    # OFF. See tools._sg_config / _LEAN_SG for the rationale (embeddings are
+    # retrieval-inert in the heuristic path; summaries are agent previews).
+    "sg":     Arm("sg",     "sg",     "SkeletonGraph (lean core)"),
     "bm25":   Arm("bm25",   "bm25",   "Flat BM25"),
     "grep":   Arm("grep",   "grep",   "Ripgrep-style lexical"),
     "none":   Arm("none",   "none",   "No retrieval (long-context)"),
     "hybrid": Arm("hybrid", "hybrid", "Hybrid RAG (BM25+dense+rerank)", strong=True),
     "cbmem":  Arm("cbmem",  "cbmem",  "Codebase-Memory (MCP graph)", strong=True),
+    # ── Ablations AROUND the lean default — each isolates ONE decision.
+    # These are the FINAL-run ablation set (compare every row against lean `sg`).
+    "sg-full":    Arm("sg-full",    "sg-full",    "SG (lean + summaries + embeddings = old full)"),
+    "sg-summary": Arm("sg-summary", "sg-summary", "SG (lean + summaries)"),
+    "sg-embed":   Arm("sg-embed",   "sg-embed",   "SG (lean + embeddings)"),
     # SG ablations — same SG retrieval with exactly one component disabled
     # (wired in tools._sg_config). Each isolates a contribution.
-    "sg-nograph":   Arm("sg-nograph",   "sg-nograph",   "SG (no graph expansion)"),
+    "sg-nograph":   Arm("sg-nograph",   "sg-nograph",   "SG (lean, no graph expansion)"),
     "sg-gatedgraph": Arm("sg-gatedgraph", "sg-gatedgraph", "SG (gated graph expansion)"),
     "sg-fullgraph": Arm("sg-fullgraph", "sg-fullgraph", "SG (eager graph expansion)"),
     "sg-norerank":  Arm("sg-norerank",  "sg-norerank",  "SG (no centrality rerank)"),
@@ -389,6 +408,40 @@ STAGES: Dict[str, Stage] = {
         "structural+BM25). All share lean defaults and run in sg-env. "
         "Compared against `sg` from `baseline` — does trimming / routing / "
         "fusing beat the full default pipeline?",
+    ),
+
+    # ── FINAL run plan (70B NIM @ 100 tasks; later Qwen-32B) ────────────────
+    # `sg` is the LEAN product default. baseline = the definitive headline
+    # table; ablation isolates each design choice around lean `sg` (run at
+    # --limit 30 to save cost — recall/precision are stable there, only pass@1
+    # needs 100); comparators run LATER in their own envs. Use SG_EVAL_STRICT=1
+    # so any arm that wants embeddings (sg-full/sg-embed) aborts rather than
+    # silently degrading.
+    "final": Stage(
+        "final",
+        ["sg", "bm25", "grep", "hybrid", "none"],
+        100, "swebench",
+        "FINAL BASELINE — the definitive 100-task headline: lean SG vs 4 "
+        "retrieval families. Shard across 4 terminals/keys with --shard k/4. "
+        "Compare vs `final-comparators` (cbmem/aider) run separately.",
+    ),
+    "final-ablation": Stage(
+        "final-ablation",
+        ["sg-full", "sg-summary", "sg-embed", "sg-nograph", "sg-fullgraph", "sg-norerank"],
+        100, "swebench",
+        "FINAL ABLATION — six arms, each flips ONE thing vs lean `sg`: +summaries+"
+        "embed (full), +summaries, +embed, −graph, always-graph, −rerank. "
+        "Settles 'is the lean default right?' on recall/precision/tokens. "
+        "Cheap option: --limit 30 (recall/precision stable; only pass@1 needs 100).",
+    ),
+    "final-comparators": Stage(
+        "final-comparators",
+        ["cbmem", "aider"],
+        100, "swebench",
+        "FINAL COMPARATORS — cbmem (CBMEM_BIN on PATH) + aider (separate venv). "
+        "Run LATER, own envs, after preflight --selftest. ALSO verify their "
+        "recall/precision extraction — pass@1 looks fine but retrieval may be "
+        "under-counted by the production-pipeline parser.",
     ),
 
     "smoke": Stage(

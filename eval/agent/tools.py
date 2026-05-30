@@ -243,12 +243,18 @@ class ToolExecutor:
                             f"(run={rid}, query={query!r:.60}).\n"
                         )
                         seen_set.add(key)
-            # SG arms only: did the semantic embedding index actually build?
-            # If embeddings.npz is absent the run is SG-minus-embeddings — flag
-            # it so aggregate.py never reports a degraded run as real SG.
-            if self.backend.startswith("sg"):
+            # SG arms: did the semantic embedding index actually build?
+            # Only meaningful for arms that INTEND embeddings (sg-full, sg-embed,
+            # legacy full-base arms). For the lean default and the no-embed
+            # arms, embeddings are off BY DESIGN — report None (N/A) so
+            # aggregate's contamination warning doesn't fire on every lean run.
+            # For embed-wanting arms, embeddings.npz absent = silent BM25-only
+            # degradation (st missing) → flag it.
+            if self.backend in _SG_BACKENDS:
+                wants_embed = getattr(_sg_config(self.backend), "enable_embeddings", True)
                 self.embeddings_used = (
-                    self.repo / ".skeletongraph" / "embeddings.npz").exists()
+                    (self.repo / ".skeletongraph" / "embeddings.npz").exists()
+                    if wants_embed else None)
         self._search_calls += 1
         if not hits:
             return "No results."
@@ -371,7 +377,17 @@ class ToolExecutor:
 _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
                 "sg-norerank", "sg-nosummary", "sg-noembed", "sg-learned",
                 "sg-weakfallback",
-                "sg-lean", "sg-router", "sg-fusion"}
+                "sg-lean", "sg-router", "sg-fusion",
+                # ablations AROUND the new lean default (final-run stage)
+                "sg-full", "sg-summary", "sg-embed"}
+
+# The lean product default: structural core only. Summaries + embeddings are
+# OFF — in the heuristic_query path (eval + IDE sg_search) embeddings feed only
+# the confidence score, never candidate ranking (see resolver.py), and summaries
+# are agent-facing previews, not a ranking signal. Both cost build/refresh
+# compute + per-result tokens for no measured retrieval gain on one-shot tasks.
+# Gated graph + centrality rerank + BM25 weak-entity fallback stay (recall).
+_LEAN_SG = {"sg", "sg-lean", "sg-router", "sg-fusion", "sg-learned"}
 
 
 # ── experimental-arm helpers: adaptive routing + rank fusion ─────────────────
@@ -466,6 +482,46 @@ def _retrieve_fusion(query: str, repo: Path, k: int):
     return [(f, "") for f in fused[:k]]
 
 
+def preflight_arm(backend: str, repo: Path) -> str:
+    """STRICT mode (SG_EVAL_STRICT=1): confirm an arm can run its EXACT intended
+    config before the agent loop burns any tokens. Returns "" if OK, else a
+    human-readable error string; the caller aborts the run with stopped="error"
+    (excluded from metrics, auto-retried by run_stage).
+
+    Today this guards the embeddings invariant that silently produced the v3
+    BM25-only ablation runs: an arm whose config wants embeddings MUST have a
+    built embeddings.npz, otherwise we ABORT instead of degrading. sg-noembed is
+    the deliberate exception (it ablates embeddings, so nothing to assert).
+
+    NOTE: in the heuristic_query path embeddings feed only the confidence score,
+    not candidate ranking (see resolver.py) — so this guard is about run
+    *determinism and honesty* (the arm did what its name claims), not about a
+    large expected ranking delta. Keeping it strict means the `embeddings_used`
+    flag can never silently flip a result's meaning again.
+    """
+    if backend not in _SG_BACKENDS:
+        # Baselines own their deps; cbmem/aider preflight via `--selftest`.
+        return ""
+    _ensure_sg_on_path()
+    cfg = _sg_config(backend)
+    # sg-fusion drives sg-lean internally; both keep embeddings on by default.
+    if not getattr(cfg, "enable_embeddings", True):
+        return ""   # sg-noembed: embeddings intentionally absent.
+    try:
+        from skeletongraph.engine import SGEngine
+        SGEngine(project_root=repo, config=cfg).get_store()   # build or load index
+    except Exception as e:
+        return (f"STRICT preflight: index build failed for {backend}: "
+                f"{type(e).__name__}: {e}")
+    if not (repo / ".skeletongraph" / "embeddings.npz").exists():
+        return (f"STRICT preflight: arm '{backend}' requires embeddings "
+                f"(enable_embeddings=True) but embeddings.npz was not built — "
+                f"sentence-transformers is likely missing in this env. Aborting "
+                f"instead of silently degrading to BM25-only. Fix: "
+                f"pip install 'sentence-transformers>=3.0,<4' then re-run.")
+    return ""
+
+
 def _ensure_sg_on_path() -> None:
     """Put eval/ and the repo root on sys.path so backends + skeletongraph import."""
     eval_dir = str(Path(__file__).resolve().parent.parent)
@@ -477,44 +533,82 @@ def _ensure_sg_on_path() -> None:
 
 
 def _sg_config(backend: str):
-    """Build the SGConfig for an SG arm, flipping off the ablated component."""
+    """Build the SGConfig for an SG arm.
+
+    SGConfig() dataclass defaults = FULL SG (summaries ON, embeddings ON, gated
+    graph, centrality rerank ON). The product default `sg` is now LEAN (see
+    _LEAN_SG) — summaries + embeddings OFF. Ablations isolate one decision each
+    around that lean default; a few legacy arms keep their old full-base meaning
+    so re-running an old stage still means what it used to.
+    """
     from skeletongraph.config import SGConfig
     cfg = SGConfig()
-    if backend == "sg-nograph":
-        # Direct entity matches only — tests whether graph traversal drives gain.
-        cfg.enable_graph_expansion = False
-    elif backend == "sg-gatedgraph":
-        # Proposed policy: graph only for exact/small seed sets, broad-impact
-        # intents, or explicit graph/blast-radius requests.
-        cfg.graph_expansion_policy = "gated"
-    elif backend == "sg-fullgraph":
-        # Historical policy: expand whenever the query mode permits graph
-        # traversal. Useful as an ablation against the gated policy.
-        cfg.graph_expansion_policy = "always"
-    elif backend == "sg-norerank":
-        # Same candidates, no hub/centrality reweight — tests PageRank's value.
-        cfg.enable_centrality_rerank = False
-    elif backend == "sg-nosummary":
-        # No tier-2 summary text delivered to the agent — the C2 ablation.
+
+    # ── the lean product default (sg + trial/learned arms) ──────────────────
+    if backend in _LEAN_SG:
         cfg.enable_summaries = False
-    elif backend == "sg-noembed":
-        # No semantic embeddings (lexical + graph only) — the embedding part of
-        # the C3 ablation.
         cfg.enable_embeddings = False
-    elif backend == "sg-weakfallback":
-        # Full SG + the gated weak-entity recall booster (ablation arm). Only
-        # fires when the entity match is ambiguous, so precise-match precision is
-        # preserved. Tests whether it recovers the semantic-mismatch misses.
-        cfg.enable_weak_entity_fallback = True
-    elif backend in ("sg-lean", "sg-router", "sg-fusion"):
-        # Trial arms share a LEAN base: drop the two components the ablations
-        # flagged as low marginal value on this workload — tier-2 summaries
-        # (C2) and centrality rerank (PageRank) — while keeping graph + embeddings
-        # (which earned their keep). sg-router additionally rewrites
-        # graph_policy/mode per query in _retrieve_sg; sg-fusion ensembles this
-        # lean retriever with BM25 via RRF in _retrieve_fusion.
+        # router/fusion add per-query routing / RRF ensemble in _retrieve_sg;
+        # learned picks the mode via curator. Config is identical lean otherwise.
+        return cfg
+
+    # ── ablations AROUND the lean default (final-run ablation stage) ─────────
+    if backend == "sg-full":
+        # Lean + BOTH add-ons = the OLD full SG. Reference point: "did going
+        # lean cost us anything on recall/precision/pass@1?" (defaults = full).
+        return cfg
+    if backend == "sg-summary":
+        # Lean + tier-2 summaries only. Isolates the summary contribution
+        # (expected: no recall change, +tokens — summaries are previews).
+        cfg.enable_embeddings = False
+        return cfg
+    if backend == "sg-embed":
+        # Lean + embeddings only. Confirms embeddings are retrieval-inert in the
+        # heuristic path (expected: recall/precision ≈ lean sg).
         cfg.enable_summaries = False
+        return cfg
+    if backend == "sg-nograph":
+        # Lean − graph expansion. Direct entity matches only — does gated graph
+        # earn its keep on recall?
+        cfg.enable_summaries = False
+        cfg.enable_embeddings = False
+        cfg.enable_graph_expansion = False
+        return cfg
+    if backend == "sg-fullgraph":
+        # Lean, always-expand instead of gated — is gating better than always?
+        cfg.enable_summaries = False
+        cfg.enable_embeddings = False
+        cfg.graph_expansion_policy = "always"
+        return cfg
+    if backend == "sg-norerank":
+        # Lean − hub/centrality reweight — PageRank's marginal value.
+        cfg.enable_summaries = False
+        cfg.enable_embeddings = False
         cfg.enable_centrality_rerank = False
+        return cfg
+    if backend == "sg-gatedgraph":
+        # Lean, explicit gated policy (== default). Kept for completeness.
+        cfg.enable_summaries = False
+        cfg.enable_embeddings = False
+        cfg.graph_expansion_policy = "gated"
+        return cfg
+    if backend == "sg-weakfallback":
+        # Lean + gated weak-entity recall booster (only fires on ambiguous
+        # matches, so precise-match precision is preserved).
+        cfg.enable_summaries = False
+        cfg.enable_embeddings = False
+        cfg.enable_weak_entity_fallback = True
+        return cfg
+
+    # ── legacy ablation arms (OLD semantics: FULL base minus one component) ──
+    # Kept so re-running a historical stage reproduces its original meaning.
+    # New work should use the lean-based arms above.
+    if backend == "sg-nosummary":
+        cfg.enable_summaries = False        # full − summaries
+        return cfg
+    if backend == "sg-noembed":
+        cfg.enable_embeddings = False       # full − embeddings
+        return cfg
     return cfg
 
 
