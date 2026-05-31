@@ -97,6 +97,9 @@ grep.*.json
 hybrid.*.json
 none.*.json
 sg.*.json
+sg-*.json
+cbmem.*.json
+aider.*.json
 logs/
 
 eval/scripts/set_nim_env.bat
