@@ -83,14 +83,24 @@ def write_predictions(records: list, out: Path) -> Path:
     return out
 
 
-def run_harness(predictions: Path, run_tag: str, dataset: str) -> Path:
-    """Invoke the official SWE-bench harness. Returns its results JSON path."""
+def run_harness(predictions: Path, run_tag: str, dataset: str,
+                cache_level: str = "env", max_workers: int = 4) -> Path:
+    """Invoke the official SWE-bench harness. Returns its results JSON path.
+
+    cache_level controls Docker image RETENTION (disk vs rebuild trade-off):
+      instance — keep per-task instance images (max reuse, max disk; best for
+                 offline re-verifies of the same task set — no rebuild/clone)
+      env      — keep base+env images, drop instance images after each task
+                 (bounded disk; rebuilds instance on demand — may re-clone)
+      base/none— minimal disk, rebuilds more (online only).
+    """
     cmd = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
         "--dataset_name", dataset,
         "--predictions_path", str(predictions),
         "--run_id", run_tag,
-        "--max_workers", "4",
+        "--max_workers", str(max_workers),
+        "--cache_level", cache_level,
     ]
     print("  " + " ".join(cmd))
     subprocess.run(cmd, check=True)
@@ -145,6 +155,15 @@ def main() -> None:
     ap.add_argument("--run-tag", default="sg_eval")
     ap.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
                     help="HF dataset the harness scores against")
+    ap.add_argument("--cache-level", default="env",
+                    choices=["none", "base", "env", "instance"],
+                    help="Docker image retention. Use 'instance' to KEEP per-task "
+                         "images (offline-safe reuse, max disk); 'env' (default) "
+                         "bounds disk but may rebuild/re-clone instances.")
+    ap.add_argument("--max-workers", type=int, default=4,
+                    help="Parallel harness workers. Raise (e.g. 8-12) on an "
+                         "unlimited-data/fast window to fetch+build all images "
+                         "faster; lower if Docker/CPU thrash.")
     args = ap.parse_args()
 
     stage = None if args.all else args.stage
@@ -167,17 +186,32 @@ def main() -> None:
 
     total_ok = total = 0
     for arm, arm_recs in sorted(by_arm.items()):
-        preds = write_predictions(arm_recs,
+        # Empty patches change nothing → they can NEVER resolve (FAIL_TO_PASS
+        # stays failing). Mark them False directly and skip the harness — no
+        # image pull, no test run. This saves both compute and (for tasks where
+        # every arm is empty) a download, which matters on a metered connection.
+        empty = [r for r in arm_recs if not (r.get("model_patch") or "").strip()]
+        nonempty = [r for r in arm_recs if (r.get("model_patch") or "").strip()]
+        if empty:
+            apply_results(empty, set())          # resolved=False, no harness
+            print(f"[{arm}] {len(empty)} empty-patch runs -> resolved=False "
+                  f"(skipped harness)")
+        total += len(arm_recs)
+        if not nonempty:
+            print(f"[{arm}] resolved 0/{len(arm_recs)} (all empty)")
+            continue
+        preds = write_predictions(nonempty,
                                   config.RUNS_DIR / f"_predictions_{arm}.jsonl")
         tag = f"{args.run_tag}_{arm}"
-        print(f"[{arm}] {len(arm_recs)} predictions -> {preds}")
-        results = run_harness(preds, tag, args.dataset)
+        print(f"[{arm}] {len(nonempty)} non-empty predictions -> {preds}")
+        results = run_harness(preds, tag, args.dataset, args.cache_level,
+                              args.max_workers)
         resolved = _resolved_task_ids(results)
-        apply_results(arm_recs, resolved)
-        n_ok = sum(1 for r in arm_recs if r.get("resolved"))
+        apply_results(nonempty, resolved)
+        n_ok = sum(1 for r in nonempty if r.get("resolved"))
         total_ok += n_ok
-        total += len(arm_recs)
-        print(f"[{arm}] resolved {n_ok}/{len(arm_recs)}")
+        print(f"[{arm}] resolved {n_ok}/{len(nonempty)} non-empty "
+              f"({len(empty)} empty skipped)")
 
     print(f"\nVerified: {total_ok}/{total} resolved across "
           f"{len(by_arm)} arms. `resolved` written back. Run aggregate for pass@1.")
