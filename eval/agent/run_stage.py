@@ -40,10 +40,25 @@ def _run_one_with_key(task: dict, arm: str, repeat: int, model: str,
         config.set_thread_api_key(None)   # release so no stale key lingers
 
 
+def _parse_shard(shard: str) -> tuple | None:
+    """Parse a '--shard k/N' spec into (k, N), 1-based. Returns None if empty."""
+    if not shard:
+        return None
+    try:
+        ks, ts = shard.split("/")
+        k, total = int(ks), int(ts)
+        if not (1 <= k <= total):
+            raise ValueError
+        return (k, total)
+    except Exception:
+        raise SystemExit(f"--shard must be 'k/N' with 1<=k<=N (got {shard!r})")
+
+
 def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0,
                 dataset: str = "",
                 only_arms: set | None = None,
-                skip_arms: set | None = None) -> list:
+                skip_arms: set | None = None,
+                shard: tuple | None = None) -> list:
     """Expand a stage into a flat list of (task, arm, model, repeat) jobs.
 
     probe → first 5 tasks; limit>0 → first N tasks (overrides probe); else the
@@ -54,6 +69,11 @@ def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0,
     redefining the stage. Useful when an arm has different concurrency needs
     (cbmem/graphify are CPU-bound; the rest GPU-bound) and you want to fire
     them with different --workers.
+    shard=(k,N) → keep only every N-th task starting at offset k-1 (strided, so
+    each shard gets a balanced repo mix). Lets you run the SAME stage in N
+    terminals, each pinned to its own NIM key, with no run_id collisions — the
+    robust alternative to in-process key rotation, and it caps concurrent index
+    builds per machine (CPU-friendly).
     """
     from pathlib import Path
     tasks = load_tasks(Path(dataset)) if dataset else load_tasks()
@@ -64,6 +84,9 @@ def _stage_jobs(stage: config.Stage, probe: bool, limit: int = 0,
     else:
         n = stage.n_tasks
     tasks = tasks[:n]
+    if shard:
+        k, total = shard
+        tasks = tasks[k - 1::total]
     arms = stage.arms
     if only_arms:
         arms = [a for a in arms if a in only_arms]
@@ -100,7 +123,8 @@ def _already_done(task: dict, arm: str, model: str, repeat: int) -> bool:
 def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
               force: bool = False, limit: int = 0, dataset: str = "",
               only_arms: set | None = None,
-              skip_arms: set | None = None) -> None:
+              skip_arms: set | None = None,
+              shard: tuple | None = None) -> None:
     if stage_name not in config.STAGES:
         raise SystemExit(f"unknown stage {stage_name}; "
                          f"choose from {list(config.STAGES)}")
@@ -110,12 +134,14 @@ def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
               f"Pass --dataset eval/datasets/{stage.benchmark}.jsonl if not "
               f"already overridden.")
 
-    jobs = _stage_jobs(stage, probe, limit, dataset, only_arms, skip_arms)
+    jobs = _stage_jobs(stage, probe, limit, dataset, only_arms, skip_arms, shard)
     if not force:
         jobs = [j for j in jobs if not _already_done(j[0], j[1], j[2], j[3])]
 
     print(f"Stage {stage_name}: {stage.note}")
     print(f"  arms={stage.arms} models={stage.models} repeats={stage.repeats}")
+    if shard:
+        print(f"  shard {shard[0]}/{shard[1]} (strided) — one slice of tasks")
     print(f"  {len(jobs)} runs pending  ·  {workers} workers")
     if not jobs:
         print("  nothing to do (all results exist) — run aggregate.py + verify.py")
@@ -171,11 +197,16 @@ def main() -> None:
     ap.add_argument("--skip-arms", default="",
                     help="comma-separated arm names; exclude these arms "
                          "(complement of --only-arms)")
+    ap.add_argument("--shard", default="",
+                    help="'k/N' — run only the k-th of N strided task shards "
+                         "(1-based). Run the SAME stage in N terminals, each "
+                         "with its own NIM key, no collisions (e.g. --shard 1/4).")
     args = ap.parse_args()
     only = {a.strip() for a in args.only_arms.split(",") if a.strip()} or None
     skip = {a.strip() for a in args.skip_arms.split(",") if a.strip()} or None
+    shard = _parse_shard(args.shard)
     run_stage(args.stage, args.workers, args.probe, args.force, args.limit,
-              args.dataset, only, skip)
+              args.dataset, only, skip, shard)
 
 
 if __name__ == "__main__":
