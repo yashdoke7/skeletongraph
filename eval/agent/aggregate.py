@@ -23,19 +23,31 @@ from pathlib import Path
 from . import config
 
 
-def _load(stage: str | None) -> list:
+def _load(stage: str | None, task_ids: set | None = None) -> list:
     recs = []
     for p in sorted(config.RUNS_DIR.glob("*.json")):
-        if p.name.startswith("_") or p.name == "summary.json":
+        # Skip non-record files: leading-underscore artifacts, and the
+        # machine-readable summaries this script writes (summary.json AND
+        # summary_<label>.json — the latter is why the bare name check wasn't
+        # enough and aggregate KeyError'd on its own output).
+        if p.name.startswith("_") or p.name.startswith("summary"):
             continue
         try:
             r = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
+        # A valid run record always has "arm". Anything else (stray/partial
+        # JSON in a shared dir) is skipped rather than crashing the whole run.
+        if not isinstance(r, dict) or "arm" not in r:
+            continue
         if stage and stage in config.STAGES:
             st = config.STAGES[stage]
             if r.get("arm") not in st.arms or r.get("model") not in st.models:
                 continue
+        # task_ids filter → restrict to a task subset (e.g. the first-30 jsonl)
+        # so a single 100-task run yields both a 30-task and a 100-task summary.
+        if task_ids is not None and r.get("task_id") not in task_ids:
+            continue
         recs.append(r)
     return recs
 
@@ -43,6 +55,25 @@ def _load(stage: str | None) -> list:
 def _mean(xs):
     xs = [x for x in xs if x is not None]
     return round(sum(xs) / len(xs), 4) if xs else 0.0
+
+
+def _recall_first(r) -> float | None:
+    """Fractional file-recall after the FIRST search: |gold ∩ first_hits| / |gold|.
+    Rewards getting it right in one shot (SG's efficiency thesis). None if the
+    task has no gold or the agent never searched."""
+    if not (r.get("gold_files")):
+        return None
+    scs = r.get("search_calls") or []
+    return scs[0].get("cumulative_recall", 0.0) if scs else 0.0
+
+
+def _recall_cum(r) -> float | None:
+    """Fractional file-recall across ALL searches (the eventual ceiling).
+    cumulative_recall is monotonic, so the last call's value is the max."""
+    if not (r.get("gold_files")):
+        return None
+    scs = r.get("search_calls") or []
+    return scs[-1].get("cumulative_recall", 0.0) if scs else 0.0
 
 
 # ── significance ────────────────────────────────────────────────────────────
@@ -78,8 +109,9 @@ def bootstrap_ci(values: list, iters: int = 2000) -> tuple:
 # ── main ────────────────────────────────────────────────────────────────────
 
 
-def aggregate(stage: str | None) -> None:
-    recs = _load(stage)
+def aggregate(stage: str | None, task_ids: set | None = None,
+              out_label: str = "") -> None:
+    recs = _load(stage, task_ids)
     if not recs:
         raise SystemExit("no runs found")
 
@@ -131,7 +163,12 @@ def aggregate(stage: str | None) -> None:
             "arm": label,
             "n": len(rs),
             "pass1": p1,
-            "recall": _mean([1 if r.get('retrieval_hit') else 0 for r in rs]),
+            # hit = binary first-search hit-rate (≥1 gold file) — kept for
+            # back-compat, but it rewards dumping many files. rec1/reccum are
+            # the fair fractional recalls.
+            "hit": _mean([1 if r.get('retrieval_hit') else 0 for r in rs]),
+            "rec1": _mean([_recall_first(r) for r in rs]),
+            "reccum": _mean([_recall_cum(r) for r in rs]),
             "prec": _mean([r.get('retrieval_precision') for r in rs]),
             "rank": med_rank,
             "egold": _mean([1 if r.get('edited_gold_file') else 0 for r in rs]),
@@ -143,32 +180,36 @@ def aggregate(stage: str | None) -> None:
 
     # Markdown table (pipe form) — for paste-into-paper compatibility
     lines += [
-        "| arm | n | pass@1 | recall | prec | rank | tokens | turns | cost$ | (egold) |",
-        "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:|",
+        "rec@1 = fractional file-recall after the first search · rec@cum = "
+        "across all searches · hit = binary first-search hit-rate (legacy). "
+        "prec = first-search precision; rank = position of first gold file.",
+        "",
+        "| arm | n | pass@1 | rec@1 | rec@cum | prec | rank | hit | tokens | turns | cost$ |",
+        "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:|",
     ]
     for r in rows:
         p1 = f"{r['pass1']*100:.1f}%" if r['pass1'] is not None else "n/a"
         rank = f"{r['rank']:.1f}" if r['rank'] is not None else "—"
         lines.append(
             f"| {r['arm']} | {r['n']} | {p1} | "
-            f"{r['recall']:.3f} | {r['prec']:.3f} | {rank} | "
-            f"{r['intok']:>6,} | {r['turns']:.1f} | "
-            f"${r['cost']:.4f} | _{r['egold']:.2f}_ |"
+            f"{r['rec1']:.3f} | {r['reccum']:.3f} | {r['prec']:.3f} | {rank} | "
+            f"{r['hit']:.3f} | {r['intok']:>6,} | {r['turns']:.1f} | "
+            f"${r['cost']:.4f} |"
         )
 
     # Console-friendly monospace echo (printed below the Markdown table).
     lines += ["", "```", "Compact view (sorted by pass@1):", ""]
     sorted_rows = sorted(rows, key=lambda r: -(r['pass1'] or 0))
     lines.append(
-        f"{'arm':<28} {'n':>3} {'pass@1':>7} {'recall':>7} "
+        f"{'arm':<28} {'n':>3} {'pass@1':>7} {'rec@1':>6} {'rec@cum':>7} "
         f"{'prec':>6} {'rank':>5} {'tok':>7} {'turns':>5} {'$':>7}"
     )
-    lines.append("-" * 90)
+    lines.append("-" * 96)
     for r in sorted_rows:
         p1 = f"{r['pass1']*100:5.1f}%" if r['pass1'] is not None else "  n/a "
         rank = f"{r['rank']:.1f}" if r['rank'] is not None else "  — "
         lines.append(
-            f"{r['arm']:<28} {r['n']:>3} {p1:>7} {r['recall']:>7.3f} "
+            f"{r['arm']:<28} {r['n']:>3} {p1:>7} {r['rec1']:>6.3f} {r['reccum']:>7.3f} "
             f"{r['prec']:>6.3f} {rank:>5} {r['intok']:>7,} "
             f"{r['turns']:>5.1f} ${r['cost']:>6.4f}"
         )
@@ -303,7 +344,8 @@ def aggregate(stage: str | None) -> None:
         lines.append(f"| {arm} | {cnt['submit']} | {cnt['max_turns']} "
                      f"| {cnt['error']} | {cnt['no_tool']} |")
 
-    out = config.RUNS_DIR / "SUMMARY.md"
+    sfx = f"_{out_label}" if out_label else ""
+    out = config.RUNS_DIR / f"SUMMARY{sfx}.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote {out}")
     print("\n".join(lines[:18]))
@@ -342,9 +384,21 @@ def aggregate(stage: str | None) -> None:
                                         for r in complete), 4),
             "pass1": _mean(pass_vals) if pass_vals else None,
         }
-    jsout = config.RUNS_DIR / "summary.json"
+    jsout = config.RUNS_DIR / f"summary{sfx}.json"
     jsout.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Wrote {jsout}")
+
+
+def _task_ids_from(path: Path) -> set:
+    """Load the task_id set from a dataset jsonl (for the --tasks subset filter)."""
+    ids = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            try:
+                ids.add(json.loads(line)["task_id"])
+            except Exception:
+                pass
+    return ids
 
 
 def main() -> None:
@@ -353,10 +407,21 @@ def main() -> None:
                     help="Filter to a specific stage's arms (e.g. 0-full)")
     ap.add_argument("--run-dir", default=None, type=Path,
                     help="Override RUNS_DIR (e.g. eval/results/agent/qwen7b_swebench)")
+    ap.add_argument("--tasks", default=None, type=Path,
+                    help="Restrict to task_ids in this jsonl (e.g. swebench_30.jsonl) "
+                         "so a 100-task run also yields a 30-task subset summary.")
+    ap.add_argument("--label", default="",
+                    help="Suffix for output files: SUMMARY_<label>.md / "
+                         "summary_<label>.json (e.g. --label n30). Avoids overwrite.")
     args = ap.parse_args()
     if args.run_dir:
         config.RUNS_DIR = Path(args.run_dir).expanduser().resolve()
-    aggregate(args.stage)
+    task_ids = _task_ids_from(args.tasks) if args.tasks else None
+    aggregate(args.stage, task_ids, args.label)
+
+
+# `label` is referenced as a transient inside the headline-row loop, so the
+# public parameter is named out_label to avoid shadowing it.
 
 
 if __name__ == "__main__":
