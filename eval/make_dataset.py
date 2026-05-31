@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import subprocess
@@ -33,8 +34,13 @@ from pathlib import Path
 from typing import List, Tuple
 
 EVAL_DIR = Path(__file__).resolve().parent
-REPOS_DIR = EVAL_DIR / "datasets" / "repos"
-CACHE_DIR = EVAL_DIR / "datasets" / "_repo_cache"
+# Heavy IO (clones + worktrees) lives under SG_EVAL_DATA_ROOT when set, so the
+# GBs of repos stay OUT of the SG repo. config.py honors the same env for the
+# per-run workspaces — set it once and both agree. Default = legacy in-repo.
+_DATA_ROOT = (Path(os.environ["SG_EVAL_DATA_ROOT"]) if os.environ.get("SG_EVAL_DATA_ROOT")
+              else EVAL_DIR / "datasets")
+REPOS_DIR = _DATA_ROOT / "repos"
+CACHE_DIR = _DATA_ROOT / "_repo_cache"
 OUT_PATH = EVAL_DIR / "datasets" / "stage0.jsonl"
 
 _DEF_RE = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
