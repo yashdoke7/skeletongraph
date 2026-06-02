@@ -151,9 +151,21 @@ def aggregate(stage: str | None, task_ids: set | None = None,
     rows = []
     for arm in sorted(by_arm):
         rs = by_arm[arm]
-        resolved = [1 if r.get("resolved") else 0 for r in rs
-                    if "resolved" in r]
-        arm_pass[arm] = {r["task_id"]: bool(r.get("resolved")) for r in rs}
+        # pass@1 denominator consistency: a completed run counts iff we can
+        # decide pass/fail for it. An EMPTY patch is always a fail (it changes
+        # nothing), so it counts even if verify never wrote a verdict. A
+        # NON-empty run only counts once it has a `resolved` verdict (we can't
+        # score an unverified patch). This stops the bug where arms with
+        # unverified empty patches got an inflated pass@1 (smaller denominator).
+        def _verdict(r):
+            if "resolved" in r:
+                return 1 if r.get("resolved") else 0
+            if not (r.get("model_patch") or "").strip():
+                return 0          # empty patch = guaranteed fail
+            return None           # non-empty, unverified → exclude
+        resolved = [v for v in (_verdict(r) for r in rs) if v is not None]
+        arm_pass[arm] = {r["task_id"]: bool(_verdict(r))
+                         for r in rs if _verdict(r) is not None}
         p1 = _mean(resolved) if resolved else None
         ranks = [r.get("retrieval_rank") for r in rs
                  if r.get("retrieval_rank")]          # nonzero = found
@@ -171,6 +183,12 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             "reccum": _mean([_recall_cum(r) for r in rs]),
             "prec": _mean([r.get('retrieval_precision') for r in rs]),
             "rank": med_rank,
+            # patch-rate = fraction of runs that produced ANY non-empty patch.
+            # Empty patches are guaranteed fails; an arm whose retrieval leaves
+            # the agent unable to even attempt a fix more often is worse. This
+            # separates arms that pass@1 (model-bound) cannot.
+            "patchrate": _mean([1 if (r.get("consolidation") or {}).get(
+                "files_in_patch_count", 0) > 0 else 0 for r in rs]),
             "egold": _mean([1 if r.get('edited_gold_file') else 0 for r in rs]),
             "turns": _mean([r.get('n_turns') for r in rs]),
             "intok": round(_mean([r.get('billed_input') for r in rs])),
@@ -184,16 +202,16 @@ def aggregate(stage: str | None, task_ids: set | None = None,
         "across all searches · hit = binary first-search hit-rate (legacy). "
         "prec = first-search precision; rank = position of first gold file.",
         "",
-        "| arm | n | pass@1 | rec@1 | rec@cum | prec | rank | hit | tokens | turns | cost$ |",
+        "| arm | n | pass@1 | patch% | rec@1 | rec@cum | prec | rank | tokens | turns | cost$ |",
         "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:|",
     ]
     for r in rows:
         p1 = f"{r['pass1']*100:.1f}%" if r['pass1'] is not None else "n/a"
         rank = f"{r['rank']:.1f}" if r['rank'] is not None else "—"
         lines.append(
-            f"| {r['arm']} | {r['n']} | {p1} | "
+            f"| {r['arm']} | {r['n']} | {p1} | {r['patchrate']*100:.0f}% | "
             f"{r['rec1']:.3f} | {r['reccum']:.3f} | {r['prec']:.3f} | {rank} | "
-            f"{r['hit']:.3f} | {r['intok']:>6,} | {r['turns']:.1f} | "
+            f"{r['intok']:>6,} | {r['turns']:.1f} | "
             f"${r['cost']:.4f} |"
         )
 
@@ -201,15 +219,16 @@ def aggregate(stage: str | None, task_ids: set | None = None,
     lines += ["", "```", "Compact view (sorted by pass@1):", ""]
     sorted_rows = sorted(rows, key=lambda r: -(r['pass1'] or 0))
     lines.append(
-        f"{'arm':<28} {'n':>3} {'pass@1':>7} {'rec@1':>6} {'rec@cum':>7} "
+        f"{'arm':<28} {'n':>3} {'pass@1':>7} {'patch%':>6} {'rec@1':>6} {'rec@cum':>7} "
         f"{'prec':>6} {'rank':>5} {'tok':>7} {'turns':>5} {'$':>7}"
     )
-    lines.append("-" * 96)
+    lines.append("-" * 104)
     for r in sorted_rows:
         p1 = f"{r['pass1']*100:5.1f}%" if r['pass1'] is not None else "  n/a "
         rank = f"{r['rank']:.1f}" if r['rank'] is not None else "  — "
         lines.append(
-            f"{r['arm']:<28} {r['n']:>3} {p1:>7} {r['rec1']:>6.3f} {r['reccum']:>7.3f} "
+            f"{r['arm']:<28} {r['n']:>3} {p1:>7} {r['patchrate']*100:5.0f}% "
+            f"{r['rec1']:>6.3f} {r['reccum']:>7.3f} "
             f"{r['prec']:>6.3f} {rank:>5} {r['intok']:>7,} "
             f"{r['turns']:>5.1f} ${r['cost']:>6.4f}"
         )
