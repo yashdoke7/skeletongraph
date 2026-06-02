@@ -152,7 +152,7 @@ def main() -> None:
                     help="skip records that already have `resolved` set; "
                          "verify only newly-completed runs. Cheap re-runs "
                          "as more tasks finish.")
-    ap.add_argument("--run-tag", default="sg_eval")
+    ap.add_argument("--run-tag", default=config._RUN_TAG or "sg_eval")
     ap.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
                     help="HF dataset the harness scores against")
     ap.add_argument("--cache-level", default="env",

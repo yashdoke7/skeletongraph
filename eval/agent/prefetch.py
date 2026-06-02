@@ -40,10 +40,15 @@ def main() -> None:
     ap.add_argument("--tag", default="latest", help="instance image tag")
     ap.add_argument("--env-image-tag", default="latest")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--limit", type=int, default=0,
+                    help="pull only the first N tasks (for a size probe before "
+                         "committing the full set)")
     args = ap.parse_args()
 
     ids = [json.loads(l)["task_id"]
            for l in args.tasks.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if args.limit and args.limit > 0:
+        ids = ids[:args.limit]
 
     import docker
     from swebench.harness.utils import load_swebench_dataset
