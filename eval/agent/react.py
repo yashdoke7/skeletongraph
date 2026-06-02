@@ -355,6 +355,15 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
         {"role": "user", "content": USER_TEMPLATE.format(issue=task["query"])},
     ]
 
+    # Some agentic/RL-tuned models (nemotron-3-super, step-3.5-flash) over-edit
+    # and NEVER call submit, running every task to the 40-turn ceiling (slow +
+    # contradictory edits). Once the agent has landed an edit and spent enough
+    # turns, remind it ONCE to submit. Identical for every arm → no retrieval
+    # bias; it only trims the pathological never-submit tail.
+    _SUBMIT_NUDGE_AFTER = 10
+    _FORCE_SUBMIT_AFTER = 25      # hard cap once an edit exists + nudge ignored
+    submit_nudged = False
+
     for step in range(config.MAX_TURNS):
         _compact_history(messages)   # bounded context — elide stale tool dumps
         ts = time.time()
@@ -438,6 +447,22 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
 
         traj.turns.append(turn)
         if executor.submitted:
+            traj.stopped = "submit"
+            break
+
+        # Over-editing models (nemotron-3, step-3.5) never call submit. Once an
+        # edit is in place: nudge once at _SUBMIT_NUDGE_AFTER; if still going by
+        # _FORCE_SUBMIT_AFTER, hard-stop — the accumulated git diff IS the patch,
+        # so nothing is lost; it just caps the 40-turn thrash. Uniform → no bias.
+        if (executor.edits_made > 0 and step >= _SUBMIT_NUDGE_AFTER
+                and not submit_nudged):
+            submit_nudged = True
+            messages.append({"role": "user", "content":
+                "You have already edited the file(s). If the fix is complete, "
+                "call submit NOW to finish. Do NOT keep re-reading or making "
+                "more edits unless the current fix is clearly wrong."})
+        elif (executor.edits_made > 0 and submit_nudged
+                and step >= _FORCE_SUBMIT_AFTER):
             traj.stopped = "submit"
             break
     else:

@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import re
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set, Tuple
 
 # OpenAI-format tool schemas advertised to the model.
 TOOL_SCHEMAS = [
@@ -327,7 +328,8 @@ class ToolExecutor:
             f.write_text(text.replace(old, new, 1), encoding="utf-8")
             self.edits_made += 1
             self._failed_edits[path] = 0          # success resets the fail counter
-            return f"Edited {path}."
+            return (f"Edited {path}. If this completes the fix, call submit "
+                    "to finish.")
 
         # 2. Line-ending normalized match (fixes \r\n vs \n issues on Windows)
         text_norm = text.replace('\r\n', '\n')
@@ -339,7 +341,8 @@ class ToolExecutor:
             f.write_text(text_norm.replace(old_norm, new_norm, 1), encoding="utf-8")
             self.edits_made += 1
             self._failed_edits[path] = 0
-            return f"Edited {path}."
+            return (f"Edited {path}. If this completes the fix, call submit "
+                    "to finish.")
 
         if n > 1 or n_norm > 1:
             return f"ERROR: old_str matches multiple times — make it unique."
@@ -372,12 +375,12 @@ class ToolExecutor:
 
 # Every SkeletonGraph variant (full + ablations + experimental trials). These
 # route through the summary-aware path so the agent can receive tier-2 previews
-# (the C2 mechanism). The three trial arms (sg-lean, sg-router, sg-fusion) run
-# leaner: they drop summaries/rerank and, for fusion, ensemble with BM25.
+# (the C2 mechanism). The trial arms run leaner: they drop summaries/rerank and
+# add routing, fusion, or path-aware selection around the structural core.
 _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
                 "sg-norerank", "sg-nosummary", "sg-noembed", "sg-learned",
                 "sg-weakfallback",
-                "sg-lean", "sg-router", "sg-fusion",
+                "sg-lean", "sg-router", "sg-fusion", "sg-chain", "sg-chain-nopath",
                 # ablations AROUND the new lean default (final-run stage)
                 "sg-full", "sg-summary", "sg-embed"}
 
@@ -387,11 +390,12 @@ _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
 # are agent-facing previews, not a ranking signal. Both cost build/refresh
 # compute + per-result tokens for no measured retrieval gain on one-shot tasks.
 # Gated graph + centrality rerank + BM25 weak-entity fallback stay (recall).
-_LEAN_SG = {"sg", "sg-lean", "sg-router", "sg-fusion", "sg-learned"}
+_LEAN_SG = {"sg", "sg-lean", "sg-router", "sg-fusion", "sg-chain",
+            "sg-chain-nopath", "sg-learned"}
 
 
 # ── experimental-arm helpers: adaptive routing + rank fusion ─────────────────
-# These power the three trial arms. They are deliberately small and dependency-
+# These power the trial arms. They are deliberately small and dependency-
 # free (regex + arithmetic) so the routing decision is fully inspectable for the
 # paper and adds ~zero latency vs a learned classifier.
 
@@ -482,6 +486,170 @@ def _retrieve_fusion(query: str, repo: Path, k: int):
     return [(f, "") for f in fused[:k]]
 
 
+# ── sg-chain: path-aware evidence-chain retrieval ────────────────────────────
+
+_CHAIN_RRF_K = 60
+_CHAIN_PATH_SEEDS = 6
+_CHAIN_PATH_MAX_DEPTH = 3
+_CHAIN_PATH_MAX_PAIRS = 24
+_CHAIN_PER_FILE_LIMIT = 2
+
+
+def _dedupe_ranked(items: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _file_of(fqn: str) -> str:
+    return fqn.split("::", 1)[0]
+
+
+def _path_bridge_counts(
+    graph,
+    left_seeds: List[str],
+    right_seeds: List[str],
+    valid_fqns: Set[str],
+    *,
+    max_depth: int = _CHAIN_PATH_MAX_DEPTH,
+    max_pairs: int = _CHAIN_PATH_MAX_PAIRS,
+) -> Counter:
+    """Count nodes on short graph paths between two seed sets.
+
+    This is the small "evidence chain" step. BM25 often finds the issue-text
+    lexical clue, while SG finds the structural symbol. Nodes that connect both
+    are better evidence than nodes that are merely relevant in isolation.
+    """
+    counts: Counter = Counter()
+    pairs = 0
+    for left in _dedupe_ranked(left_seeds)[:_CHAIN_PATH_SEEDS]:
+        if left not in valid_fqns:
+            continue
+        for right in _dedupe_ranked(right_seeds)[:_CHAIN_PATH_SEEDS]:
+            if right == left or right not in valid_fqns:
+                continue
+            path = graph.shortest_path(left, right, max_depth=max_depth)
+            if not path:
+                continue
+            for node in path:
+                if node in valid_fqns:
+                    counts[node] += 1
+            pairs += 1
+            if pairs >= max_pairs:
+                return counts
+    return counts
+
+
+def _score_chain_candidates(
+    sg_ranked: List[str],
+    bm25_ranked: List[str],
+    path_counts: Counter,
+) -> Tuple[List[str], Dict[str, List[str]]]:
+    """Score candidates as an evidence set, not as isolated documents."""
+    sg_ranked = _dedupe_ranked(sg_ranked)
+    bm25_ranked = _dedupe_ranked(bm25_ranked)
+    scores: Dict[str, float] = defaultdict(float)
+    reasons: Dict[str, Set[str]] = defaultdict(set)
+
+    def add_ranked(items: List[str], label: str, weight: float) -> None:
+        for rank, fqn in enumerate(items):
+            scores[fqn] += weight / (_CHAIN_RRF_K + rank + 1)
+            reasons[fqn].add(label)
+
+    add_ranked(sg_ranked, "structural", 2.4)
+    add_ranked(bm25_ranked, "lexical", 2.0)
+
+    sg_files = {_file_of(fqn) for fqn in sg_ranked[:10]}
+    bm25_files = {_file_of(fqn) for fqn in bm25_ranked[:10]}
+    consensus_files = sg_files & bm25_files
+    both_fqns = set(sg_ranked) & set(bm25_ranked)
+
+    for fqn in set(scores) | set(path_counts):
+        if fqn in both_fqns:
+            scores[fqn] += 0.080
+            reasons[fqn].add("consensus")
+        if _file_of(fqn) in consensus_files:
+            scores[fqn] += 0.035
+            reasons[fqn].add("same-file")
+        if path_counts.get(fqn, 0):
+            scores[fqn] += 0.070 + 0.015 * path_counts[fqn]
+            reasons[fqn].add("graph-path")
+
+    ranked = sorted(scores, key=lambda fqn: (-scores[fqn], _file_of(fqn), fqn))
+    return ranked, {fqn: sorted(labels) for fqn, labels in reasons.items()}
+
+
+def _diverse_top_k(ranked: List[str], k: int, per_file: int = _CHAIN_PER_FILE_LIMIT) -> List[str]:
+    counts: Counter = Counter()
+    out: List[str] = []
+    for fqn in ranked:
+        file_path = _file_of(fqn)
+        if counts[file_path] >= per_file:
+            continue
+        counts[file_path] += 1
+        out.append(fqn)
+        if len(out) >= k:
+            break
+    return out
+
+
+def _chain_reason_summary(fqn: str, reasons: Dict[str, List[str]], store) -> str:
+    labels = ", ".join(reasons.get(fqn, [])) or "ranked"
+    summary = ""
+    sk = store.skeleton_table.get(fqn)
+    if sk is not None:
+        try:
+            from skeletongraph.summary.local import build_local_summary
+            summary = build_local_summary(sk)
+        except Exception:
+            summary = getattr(sk, "docstring", "") or getattr(sk, "signature", "")
+    summary = " ".join((summary or "").split())
+    prefix = f"signals: {labels}"
+    return (prefix + (f"; {summary}" if summary else ""))[:180]
+
+
+def _retrieve_chain(query: str, repo: Path, k: int, use_path: bool = True):
+    """sg-chain: lexical recall + structural precision + graph-path selection.
+
+    Unlike sg-fusion, this keeps function granularity and (when use_path=True)
+    explicitly rewards short paths connecting BM25 issue-text hits with SG
+    structural hits. The agent still receives raw file paths/FQNs and can read
+    the code; the summary string is only a compact navigation hint.
+
+    use_path=False is the sg-chain-nopath ablation: identical BM25+SG fusion and
+    consensus scoring, but NO graph-path bridging — isolates whether the
+    evidence-chain step (the novel contribution) actually beats plain fusion.
+    """
+    _ensure_sg_on_path()
+    from skeletongraph.engine import SGEngine
+
+    depth_k = max(k * 3, 18)
+    cfg = _sg_config("sg-chain")
+    engine = SGEngine(project_root=repo, config=cfg)
+    res = engine.heuristic_query(query, top_n=depth_k)
+    store = engine.get_store()
+    sg_ranked = [c.skeleton.fqn for c in res.candidates]
+
+    from backends.bm25_flat import retrieve as bm25_retrieve
+    bm25_ranked = bm25_retrieve(query, repo, depth_k)
+
+    valid_fqns = set(store.skeleton_table)
+    if use_path:
+        path_counts = _path_bridge_counts(
+            store.graph, sg_ranked, bm25_ranked, valid_fqns,
+        )
+    else:
+        path_counts = Counter()      # ablation: no evidence-chain bridging
+    ranked, reasons = _score_chain_candidates(sg_ranked, bm25_ranked, path_counts)
+    ranked = [fqn for fqn in ranked if fqn in valid_fqns]
+    picked = _diverse_top_k(ranked, k)
+    return [(fqn, _chain_reason_summary(fqn, reasons, store)) for fqn in picked]
+
+
 def preflight_arm(backend: str, repo: Path) -> str:
     """STRICT mode (SG_EVAL_STRICT=1): confirm an arm can run its EXACT intended
     config before the agent loop burns any tokens. Returns "" if OK, else a
@@ -504,7 +672,9 @@ def preflight_arm(backend: str, repo: Path) -> str:
         return ""
     _ensure_sg_on_path()
     cfg = _sg_config(backend)
-    # sg-fusion drives sg-lean internally; both keep embeddings on by default.
+    # sg-fusion / sg-chain drive sg-lean internally; both keep embeddings off
+    # by design because the tested contribution is retrieval policy, not dense
+    # indexing.
     if not getattr(cfg, "enable_embeddings", True):
         return ""   # sg-noembed: embeddings intentionally absent.
     try:
@@ -622,9 +792,14 @@ def _retrieve_sg(backend: str, query: str, repo: Path, k: int):
     local tier needs no LLM and is fully reproducible, which matters because the
     async summary worker never runs inside an isolated eval workspace.
     """
-    # sg-fusion is an ensemble, not a single SGEngine pass — handle separately.
+    # sg-fusion and sg-chain are ensembles, not a single SGEngine pass — handle
+    # separately.
     if backend == "sg-fusion":
         return _retrieve_fusion(query, repo, k)
+    if backend == "sg-chain":
+        return _retrieve_chain(query, repo, k)
+    if backend == "sg-chain-nopath":
+        return _retrieve_chain(query, repo, k, use_path=False)
 
     _ensure_sg_on_path()
     from skeletongraph.engine import SGEngine

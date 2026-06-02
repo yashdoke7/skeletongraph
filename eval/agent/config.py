@@ -183,7 +183,10 @@ ARMS: Dict[str, Arm] = {
     "sg":     Arm("sg",     "sg",     "SkeletonGraph (lean core)"),
     "bm25":   Arm("bm25",   "bm25",   "Flat BM25"),
     "grep":   Arm("grep",   "grep",   "Ripgrep-style lexical"),
-    "none":   Arm("none",   "none",   "No retrieval (long-context)"),
+    # NOTE: `none` returns NO search results — the agent navigates blind via
+    # list_files/read_file. It is NOT a long-context dump (we never paste whole
+    # files/repo into the prompt). Labeled accordingly so the paper isn't wrong.
+    "none":   Arm("none",   "none",   "No retrieval (blind file navigation)"),
     "hybrid": Arm("hybrid", "hybrid", "Hybrid RAG (BM25+dense+rerank)", strong=True),
     "cbmem":  Arm("cbmem",  "cbmem",  "Codebase-Memory (MCP graph)", strong=True),
     # ── Ablations AROUND the lean default — each isolates ONE decision.
@@ -230,9 +233,19 @@ ARMS: Dict[str, Arm] = {
     #               flat BM25, no learned reranker, no summaries. "Combine
     #               cheaply" instead of selecting one retriever — a different
     #               philosophy from routing, robust to either signal missing.
+    #   sg-chain  — PATH-AWARE: full-body BM25 supplies issue-text recall, lean
+    #               SG supplies structural precision, then short graph paths and
+    #               consensus files select the minimal evidence chain. This is
+    #               the transcript-style "summaries navigate, raw code proves"
+    #               candidate without paying for an LLM reranker.
     "sg-lean":   Arm("sg-lean",   "sg-lean",   "SG-lean (no summary/rerank)"),
     "sg-router": Arm("sg-router", "sg-router", "SG-router (adaptive per-query)"),
     "sg-fusion": Arm("sg-fusion", "sg-fusion", "SG-fusion (RRF structural+BM25)"),
+    "sg-chain":  Arm("sg-chain",  "sg-chain",  "SG-chain (path-aware SG+BM25)"),
+    # The decisive ablation: identical SG+BM25 fusion, path-bridge DISABLED.
+    # sg-chain minus sg-chain-nopath = the value of the evidence-chain step.
+    "sg-chain-nopath": Arm("sg-chain-nopath", "sg-chain-nopath",
+                           "SG-chain (no path bridge = fusion only)"),
 
     # Single-shot SG (no agent loop): retrieve once → one generation → patch.
     # This is the "is the agent worth it" measure (agent vs no-agent) — which is
@@ -400,12 +413,13 @@ STAGES: Dict[str, Stage] = {
 
     "trial": Stage(
         "trial",
-        ["sg-lean", "sg-router", "sg-fusion"],
+        ["sg-lean", "sg-router", "sg-fusion", "sg-chain", "sg-chain-nopath"],
         30, "swebench",
-        "TRIAL — three experimental retrieval policies synthesized from the "
+        "TRIAL — four experimental retrieval policies synthesized from the "
         "ablation findings: sg-lean (static trim: no summary/rerank), "
         "sg-router (adaptive per-query routing), sg-fusion (RRF of "
-        "structural+BM25). All share lean defaults and run in sg-env. "
+        "structural+BM25), sg-chain (path-aware evidence-chain selection). "
+        "All share lean defaults and run in sg-env. "
         "Compared against `sg` from `baseline` — does trimming / routing / "
         "fusing beat the full default pipeline?",
     ),
@@ -419,11 +433,13 @@ STAGES: Dict[str, Stage] = {
     # silently degrading.
     "final": Stage(
         "final",
-        ["sg", "bm25", "grep", "hybrid", "none"],
+        ["sg", "bm25", "grep", "hybrid", "none", "sg-chain", "sg-chain-nopath"],
         100, "swebench",
         "FINAL BASELINE — the definitive 100-task headline: lean SG vs 4 "
-        "retrieval families. Shard across 4 terminals/keys with --shard k/4. "
-        "Compare vs `final-comparators` (cbmem/aider) run separately.",
+        "retrieval families, plus sg-chain (path-aware SG+BM25) and its "
+        "sg-chain-nopath ablation (same fusion, path-bridge OFF — isolates the "
+        "evidence-chain contribution). Shard across 4 terminals/keys with "
+        "--shard k/4. Compare vs `final-comparators` (cbmem/aider) separately.",
     ),
     "final-ablation": Stage(
         "final-ablation",
