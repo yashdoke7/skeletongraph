@@ -126,12 +126,42 @@ def backend_grep(query: str, repo_path: Path, top_n: int) -> List[str]:
     return grep_retrieve(query, repo_path, top_n)
 
 
+def backend_sg_chain(query: str, repo_path: Path, top_n: int) -> List[str]:
+    """Current best agent arm — SG+BM25 fusion + graph-path bridging. The bar the
+    summary-search probe must clear on recall. Returns FQNs (drops the summary)."""
+    from eval.agent.tools import _retrieve_chain
+    return [fqn for fqn, _ in _retrieve_chain(query, Path(repo_path), top_n)]
+
+
+def backend_sg_chain_nopath(query: str, repo_path: Path, top_n: int) -> List[str]:
+    """sg-chain without graph-path bridging (plain SG+BM25 fusion)."""
+    from eval.agent.tools import _retrieve_chain
+    return [fqn for fqn, _ in _retrieve_chain(query, Path(repo_path), top_n,
+                                              use_path=False)]
+
+
+def _summary_backend(source: str, method: str) -> RetrieverFn:
+    """Factory: summary-search backend with a fixed (source, method)."""
+    def fn(query: str, repo_path: Path, top_n: int) -> List[str]:
+        from eval.backends.summary_search import retrieve as summ_retrieve
+        return summ_retrieve(query, Path(repo_path), top_n,
+                             source=source, method=method)
+    return fn
+
+
 BACKENDS: Dict[str, RetrieverFn] = {
     "sg": backend_sg,
     "bm25": backend_bm25,
-    "dense": backend_dense,
+    "dense": backend_dense,                  # dense over CODE (control)
     "hybrid": backend_hybrid,
     "grep": backend_grep,
+    "sg-chain": backend_sg_chain,            # the recall bar to beat
+    "sg-chain-nopath": backend_sg_chain_nopath,
+    # ── the probe: summaries × {source, matcher} ──────────────────────────────
+    "summary-bm25-local": _summary_backend("local", "bm25"),
+    "summary-dense-local": _summary_backend("local", "dense"),
+    "summary-bm25-llm": _summary_backend("ollama", "bm25"),
+    "summary-dense-llm": _summary_backend("ollama", "dense"),
 }
 
 
@@ -159,8 +189,11 @@ def run_eval(
     backend: str,
     ks: List[int],
     granularity: str = "fqn",
+    limit: int | None = None,
 ) -> dict:
     tasks = load_dataset(dataset_path)
+    if limit:
+        tasks = tasks[:limit]      # cap tasks — handy for the slow Ollama probe
     retriever = BACKENDS[backend]
     max_k = max(ks)
     # FQN-returning backends (sg, bm25) cluster candidates within files, so
@@ -235,11 +268,14 @@ def main() -> None:
     ap.add_argument("--backend", required=True, choices=list(BACKENDS))
     ap.add_argument("--k", type=int, nargs="+", default=[5, 10, 20])
     ap.add_argument("--granularity", choices=["fqn", "file"], default="fqn")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="cap to first N tasks (use for the slow Ollama probe)")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
     print(f"Running {args.backend} on {args.dataset} ...")
-    report = run_eval(args.dataset, args.backend, sorted(args.k), args.granularity)
+    report = run_eval(args.dataset, args.backend, sorted(args.k), args.granularity,
+                      limit=args.limit)
 
     print("\n=== AGGREGATE ===")
     for k, v in report["aggregate"].items():
