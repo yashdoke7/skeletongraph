@@ -247,6 +247,23 @@ ARMS: Dict[str, Arm] = {
     "sg-chain-nopath": Arm("sg-chain-nopath", "sg-chain-nopath",
                            "SG-chain (no path bridge = fusion only)"),
 
+    # ── Summary-search: rank by function SUMMARIES (purpose), not raw code ───
+    # The "a developer recalls what a function DOES, then fetches it" idea. Same
+    # tree-sitter chunking as `bm25` (fair), and results are presented identically
+    # (bare FQNs, no summary preview) so the ONLY variable is the ranking SOURCE:
+    #   summary-bm25  vs `bm25`         → search summaries vs search code (matcher
+    #                                     held lexical) — does the summary
+    #                                     representation bridge the prose↔identifier gap?
+    #   summary-dense vs summary-bm25   → add semantic matching (the point of summaries).
+    # Summaries are LOCAL/deterministic in the agent loop (the async LLM worker
+    # never runs in an isolated workspace). The local-vs-Ollama summary-quality
+    # delta is measured cheaply by the retrieval-only probe, NOT by an agent arm.
+    # Run in sg-env (summary-dense needs sentence-transformers, like hybrid/sg-embed).
+    "summary-bm25":  Arm("summary-bm25",  "summary-bm25",
+                         "Summary-search (BM25 over summaries)"),
+    "summary-dense": Arm("summary-dense", "summary-dense",
+                         "Summary-search (dense over summaries)", strong=True),
+
     # Single-shot SG (no agent loop): retrieve once → one generation → patch.
     # This is the "is the agent worth it" measure (agent vs no-agent) — which is
     # also where SG's internal query routing would matter, since with no agent
@@ -449,6 +466,18 @@ STAGES: Dict[str, Stage] = {
         "embed (full), +summaries, +embed, −graph, always-graph, −rerank. "
         "Settles 'is the lean default right?' on recall/precision/tokens. "
         "Cheap option: --limit 30 (recall/precision stable; only pass@1 needs 100).",
+    ),
+    "final-summary": Stage(
+        "final-summary",
+        ["summary-bm25", "summary-dense"],
+        100, "swebench",
+        "FINAL SUMMARY-SEARCH — the new contribution: rank by function SUMMARIES "
+        "(purpose) instead of code. summary-bm25 isolates the summary representation "
+        "vs the existing code-`bm25`; summary-dense adds semantic matching. Runs "
+        "into the SAME SG_EVAL_RUN_TAG as `final` so aggregate folds both into one "
+        "table — 100 tasks, fair n=100 vs n=100. Shard with --shard k/4 across "
+        "terminals/keys. Summaries are LOCAL/deterministic in-loop (Ollama quality "
+        "delta = the retrieval probe). Run in sg-env (summary-dense needs SBert).",
     ),
     "final-comparators": Stage(
         "final-comparators",

@@ -328,8 +328,7 @@ class ToolExecutor:
             f.write_text(text.replace(old, new, 1), encoding="utf-8")
             self.edits_made += 1
             self._failed_edits[path] = 0          # success resets the fail counter
-            return (f"Edited {path}. If this completes the fix, call submit "
-                    "to finish.")
+            return f"Edited {path}."
 
         # 2. Line-ending normalized match (fixes \r\n vs \n issues on Windows)
         text_norm = text.replace('\r\n', '\n')
@@ -341,8 +340,7 @@ class ToolExecutor:
             f.write_text(text_norm.replace(old_norm, new_norm, 1), encoding="utf-8")
             self.edits_made += 1
             self._failed_edits[path] = 0
-            return (f"Edited {path}. If this completes the fix, call submit "
-                    "to finish.")
+            return f"Edited {path}."
 
         if n > 1 or n_norm > 1:
             return f"ERROR: old_str matches multiple times — make it unique."
@@ -871,6 +869,13 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
     if backend == "bm25":
         from backends.bm25_flat import retrieve
         return retrieve(query, repo, k)
+
+    if backend in ("summary-bm25", "summary-dense"):
+        # Rank by function SUMMARIES (local/deterministic) instead of raw code.
+        # Same chunking as bm25; bare-FQN output → only the ranking source differs.
+        from backends.summary_search import retrieve
+        method = "dense" if backend == "summary-dense" else "bm25"
+        return retrieve(query, repo, k, source="local", method=method)
 
     if backend == "grep":
         from backends.grep_sim import retrieve
