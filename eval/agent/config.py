@@ -109,7 +109,11 @@ SEED = 42
 # content chunks, making streaming as slow as non-streaming for our harness.
 # Set SG_EVAL_DISABLE_THINKING=0 to re-enable (e.g. to study reasoning models).
 DISABLE_THINKING: bool = os.environ.get("SG_EVAL_DISABLE_THINKING", "1") != "0"
-MAX_TURNS = 40             # ReAct step ceiling; tasks hitting it = a failure mode
+MAX_TURNS = int(os.environ.get("SG_EVAL_MAX_TURNS", "40"))  # ReAct step ceiling.
+# Override via SG_EVAL_MAX_TURNS for a BUDGET SWEEP: at a tight budget the agent
+# cannot brute-force localization, so precise (rank-1) retrieval should separate
+# from none/noisy on pass@1 — the test for "does retrieval matter under pressure".
+# Applied uniformly to every arm → unbiased (a cost-controlled comparison).
 REQUEST_TIMEOUT = 300      # seconds per model call
 
 # ── bounded context (matches how real IDE/agent loops manage history) ────────
@@ -238,14 +242,12 @@ ARMS: Dict[str, Arm] = {
     #               consensus files select the minimal evidence chain. This is
     #               the transcript-style "summaries navigate, raw code proves"
     #               candidate without paying for an LLM reranker.
-    "sg-lean":   Arm("sg-lean",   "sg-lean",   "SG-lean (no summary/rerank)"),
-    "sg-router": Arm("sg-router", "sg-router", "SG-router (adaptive per-query)"),
-    "sg-fusion": Arm("sg-fusion", "sg-fusion", "SG-fusion (RRF structural+BM25)"),
-    "sg-chain":  Arm("sg-chain",  "sg-chain",  "SG-chain (path-aware SG+BM25)"),
-    # The decisive ablation: identical SG+BM25 fusion, path-bridge DISABLED.
-    # sg-chain minus sg-chain-nopath = the value of the evidence-chain step.
-    "sg-chain-nopath": Arm("sg-chain-nopath", "sg-chain-nopath",
-                           "SG-chain (no path bridge = fusion only)"),
+    "sg-chain":  Arm("sg-chain",  "sg-chain",  "SG-chain (path-aware SG+BM25, current best)"),
+    # sg-rerank: bm25 recall pool REORDERED by SG structural confirmation (generate-
+    # then-rerank, NOT RRF, NOT per-file capped). Aims to keep bm25's recall (0.36)
+    # AND inherit sg-chain's rank (1.5) — neither current arm has both.
+    "sg-rerank": Arm("sg-rerank", "sg-rerank", "SG-rerank (bm25 recall + SG rerank)",
+                     strong=True),
 
     # ── Summary-search: rank by function SUMMARIES (purpose), not raw code ───
     # The "a developer recalls what a function DOES, then fetches it" idea. Same
@@ -259,8 +261,6 @@ ARMS: Dict[str, Arm] = {
     # never runs in an isolated workspace). The local-vs-Ollama summary-quality
     # delta is measured cheaply by the retrieval-only probe, NOT by an agent arm.
     # Run in sg-env (summary-dense needs sentence-transformers, like hybrid/sg-embed).
-    "summary-bm25":  Arm("summary-bm25",  "summary-bm25",
-                         "Summary-search (BM25 over summaries)"),
     "summary-dense": Arm("summary-dense", "summary-dense",
                          "Summary-search (dense over summaries)", strong=True),
 
@@ -428,19 +428,6 @@ STAGES: Dict[str, Stage] = {
         "loop) is run separately via `run_singleshot.py --all` (arm sg-noagent).",
     ),
 
-    "trial": Stage(
-        "trial",
-        ["sg-lean", "sg-router", "sg-fusion", "sg-chain", "sg-chain-nopath"],
-        30, "swebench",
-        "TRIAL — four experimental retrieval policies synthesized from the "
-        "ablation findings: sg-lean (static trim: no summary/rerank), "
-        "sg-router (adaptive per-query routing), sg-fusion (RRF of "
-        "structural+BM25), sg-chain (path-aware evidence-chain selection). "
-        "All share lean defaults and run in sg-env. "
-        "Compared against `sg` from `baseline` — does trimming / routing / "
-        "fusing beat the full default pipeline?",
-    ),
-
     # ── FINAL run plan (70B NIM @ 100 tasks; later Qwen-32B) ────────────────
     # `sg` is the LEAN product default. baseline = the definitive headline
     # table; ablation isolates each design choice around lean `sg` (run at
@@ -450,26 +437,25 @@ STAGES: Dict[str, Stage] = {
     # silently degrading.
     "final": Stage(
         "final",
-        ["sg", "bm25", "grep", "hybrid", "none", "sg-chain", "sg-chain-nopath"],
+        ["sg", "bm25", "grep", "hybrid", "none", "sg-chain"],
         100, "swebench",
         "FINAL BASELINE — the definitive 100-task headline: lean SG vs 4 "
-        "retrieval families, plus sg-chain (path-aware SG+BM25) and its "
-        "sg-chain-nopath ablation (same fusion, path-bridge OFF — isolates the "
-        "evidence-chain contribution). Shard across 4 terminals/keys with "
-        "--shard k/4. Compare vs `final-comparators` (cbmem/aider) separately.",
+        "retrieval families, plus sg-chain (path-aware SG+BM25, current best). "
+        "Shard across 4 terminals/keys with --shard k/4. Compare vs "
+        "`final-comparators` (cbmem/aider) separately.",
     ),
     "final-ablation": Stage(
         "final-ablation",
-        ["sg-full", "sg-summary", "sg-embed", "sg-nograph", "sg-fullgraph", "sg-norerank"],
+        ["sg-nograph", "sg-norerank"],
         100, "swebench",
-        "FINAL ABLATION — six arms, each flips ONE thing vs lean `sg`: +summaries+"
-        "embed (full), +summaries, +embed, −graph, always-graph, −rerank. "
-        "Settles 'is the lean default right?' on recall/precision/tokens. "
-        "Cheap option: --limit 30 (recall/precision stable; only pass@1 needs 100).",
+        "FINAL ABLATION — the two ablations kept for further tests: −graph "
+        "(does gated graph earn its keep on recall?) and −rerank (PageRank's "
+        "marginal value). Compare vs lean `sg`. (sg-full/summary/embed/fullgraph "
+        "retired — their question is settled; defs kept for old-tag aggregation.)",
     ),
     "final-summary": Stage(
         "final-summary",
-        ["summary-bm25", "summary-dense"],
+        ["summary-dense"],
         100, "swebench",
         "FINAL SUMMARY-SEARCH — the new contribution: rank by function SUMMARIES "
         "(purpose) instead of code. summary-bm25 isolates the summary representation "
@@ -478,6 +464,14 @@ STAGES: Dict[str, Stage] = {
         "table — 100 tasks, fair n=100 vs n=100. Shard with --shard k/4 across "
         "terminals/keys. Summaries are LOCAL/deterministic in-loop (Ollama quality "
         "delta = the retrieval probe). Run in sg-env (summary-dense needs SBert).",
+    ),
+    "final-rerank": Stage(
+        "final-rerank",
+        ["sg-rerank"],
+        100, "swebench",
+        "FINAL RERANK — sg-rerank (bm25 recall pool reordered by SG structural "
+        "confirmation). Tests whether generate-then-rerank gets bm25's recall AND "
+        "sg-chain's rank. Runs into the same tag as `final`; shard with --shard k/4.",
     ),
     "final-comparators": Stage(
         "final-comparators",

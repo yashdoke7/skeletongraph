@@ -648,6 +648,44 @@ def _retrieve_chain(query: str, repo: Path, k: int, use_path: bool = True):
     return [(fqn, _chain_reason_summary(fqn, reasons, store)) for fqn in picked]
 
 
+def _retrieve_rerank(query: str, repo: Path, k: int) -> List[str]:
+    """sg-rerank: bm25 RECALL pool, REORDERED by SG structural confirmation.
+
+    The sg-chain post-mortem: RRF-blending SG+bm25 and capping 2/file gave the
+    best RANK but LOST bm25's recall (0.31 < 0.36). sg-rerank fixes that — it is
+    NOT a blend and NOT capped:
+      1. take bm25's wide candidate pool (keeps bm25's recall exactly),
+      2. pull to the top the candidates SG structurally confirms (in SG's order)
+         and the ones whose symbol name the issue literally mentions,
+      3. leave the rest in bm25 order.
+    So recall == bm25's pool while rank inherits SG's precision. Generate (bm25)
+    then rerank (SG) — the standard localize-then-rank recipe, not RRF.
+    """
+    _ensure_sg_on_path()
+    from skeletongraph.engine import SGEngine
+    from backends.bm25_flat import retrieve as bm25_retrieve
+
+    pool = bm25_retrieve(query, repo, max(k * 5, 40))     # wide bm25 recall pool, ordered
+    if not pool:
+        return []
+    cfg = _sg_config("sg-chain")                          # lean SG
+    engine = SGEngine(project_root=repo, config=cfg)
+    sg_res = engine.heuristic_query(query, top_n=40)
+    sg_order = {c.skeleton.fqn: i for i, c in enumerate(sg_res.candidates)}
+
+    q_idents = {w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query or "")}
+
+    def _name(fqn: str) -> str:
+        return fqn.split("::")[-1].split(".")[-1].lower()
+
+    confirmed = sorted((f for f in pool if f in sg_order), key=lambda f: sg_order[f])
+    cset = set(confirmed)
+    named = [f for f in pool if f not in cset and _name(f) in q_idents]
+    nset = set(named)
+    rest = [f for f in pool if f not in cset and f not in nset]
+    return (confirmed + named + rest)[:k]
+
+
 def preflight_arm(backend: str, repo: Path) -> str:
     """STRICT mode (SG_EVAL_STRICT=1): confirm an arm can run its EXACT intended
     config before the agent loop burns any tokens. Returns "" if OK, else a
@@ -876,6 +914,11 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         from backends.summary_search import retrieve
         method = "dense" if backend == "summary-dense" else "bm25"
         return retrieve(query, repo, k, source="local", method=method)
+
+    if backend == "sg-rerank":
+        # bm25 recall pool reordered by SG structural confirmation (generate-
+        # then-rerank). Targets bm25's recall AND sg-chain's rank.
+        return _retrieve_rerank(query, repo, k)
 
     if backend == "grep":
         from backends.grep_sim import retrieve
