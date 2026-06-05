@@ -202,6 +202,34 @@ def retrieve(query: str, repo: Path, k: int = 10) -> List[str]:
     return out
 
 
+# ── native aider: the repo-map INJECTED into context (systems comparison) ────
+
+def get_map_text(repo: Path, map_tokens: int = 4096) -> str:
+    """Aider's actual mechanism: a PageRank-ranked repo map (signatures from
+    across the repo, token-budgeted) that gets INJECTED into the prompt — not a
+    search tool. Returns the map text, or '' if aider is unavailable."""
+    RepoMap, _ = _try_import()
+    if RepoMap is None:
+        return ""
+    repo = Path(repo).resolve()
+    cache_root = repo.parent / ".aider_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    rm = RepoMap(map_tokens=map_tokens, root=str(repo), main_model=_StubModel(),
+                 io=_SilentIO(), verbose=False, max_context_window=131072)
+    if hasattr(rm, "TAGS_CACHE_DIR"):
+        rm.TAGS_CACHE_DIR = str(cache_root)
+    other = _walk_source_files(repo)
+    for call in (lambda: rm.get_repo_map([], other),
+                 lambda: rm.get_repo_map(chat_files=[], other_files=other)):
+        try:
+            m = call()
+            if m:
+                return str(m)
+        except Exception:
+            continue
+    return ""
+
+
 # ── selftest CLI ─────────────────────────────────────────────────────────────
 
 def _selftest(repo: str) -> None:

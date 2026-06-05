@@ -473,6 +473,18 @@ STAGES: Dict[str, Stage] = {
         "confirmation). Tests whether generate-then-rerank gets bm25's recall AND "
         "sg-chain's rank. Runs into the same tag as `final`; shard with --shard k/4.",
     ),
+    "final-v2": Stage(
+        "final-v2",
+        ["sg", "bm25", "grep", "hybrid", "none", "cbmem", "aider"],
+        100, "swebench",
+        "FINAL v2 — SYSTEMS comparison: each pipeline uses its NATIVE tools "
+        "(sg: search_code + read_symbol + expand; cbmem: cbmem_search/trace/snippet/"
+        "arch; aider: PageRank repo-map INJECTED into the prompt, no search tool). "
+        "Baselines bm25/grep/hybrid/none keep the standard 5 tools. Common substrate "
+        "= model + tasks + edit/submit/verify. Split by env: sg-env runs "
+        "sg/bm25/grep/hybrid/none/cbmem (set CBMEM_BIN); aider-env runs aider. "
+        "Per-arm tool surface in profiles.py. Fresh tag (e.g. nemotron_v2).",
+    ),
     "final-comparators": Stage(
         "final-comparators",
         ["cbmem", "aider"],
