@@ -248,6 +248,12 @@ ARMS: Dict[str, Arm] = {
     # AND inherit sg-chain's rank (1.5) — neither current arm has both.
     "sg-rerank": Arm("sg-rerank", "sg-rerank", "SG-rerank (bm25 recall + SG rerank)",
                      strong=True),
+    # New concepts (native harness): semantic dense rerank of the pool, and
+    # SG seeded on the issue's tracebacks/code symbols.
+    "sg-embed": Arm("sg-embed", "sg-embed",
+                    "SG-embed (structural pool + dense semantic rerank)", strong=True),
+    "sg-seed":  Arm("sg-seed",  "sg-seed",
+                    "SG-seed (SG seeded on issue tracebacks/symbols)"),
 
     # ── Summary-search: rank by function SUMMARIES (purpose), not raw code ───
     # The "a developer recalls what a function DOES, then fetches it" idea. Same
@@ -284,6 +290,10 @@ ARMS: Dict[str, Arm] = {
     # pip install aider-chat
     "aider":   Arm("aider",   "aider",   "Aider RepoMap (tree-sitter+PageRank)",
                    strong=True),
+    # Graphify — knowledge-graph competitor with a "70x token reduction" claim,
+    # tested END-TO-END via its native graph tools (graphify_search/explain).
+    "graphify": Arm("graphify", "graphify",
+                    "Graphify (knowledge-graph, 70x-token claim)", strong=True),
 }
 
 
@@ -485,9 +495,20 @@ STAGES: Dict[str, Stage] = {
         "sg/bm25/grep/hybrid/none/cbmem (set CBMEM_BIN); aider-env runs aider. "
         "Per-arm tool surface in profiles.py. Fresh tag (e.g. nemotron_v2).",
     ),
+    "sg-concepts": Stage(
+        "sg-concepts",
+        ["sg-chain", "sg-rerank", "summary-dense", "sg-embed", "sg-seed"],
+        100, "swebench",
+        "SG CONCEPTS — re-test the best retrieval CONCEPTS in the NATIVE harness "
+        "(each gets SG's read_symbol/expand): sg-chain (structural+lexical fusion + "
+        "graph-path evidence), sg-rerank (bm25 recall pool -> SG structural rerank), "
+        "summary-dense (intent/purpose-layer search). Run into the SAME tag as "
+        "final-v2 to compare against `sg` + baselines; keep whichever genuinely wins "
+        "on recall + tokens + pass@1 (concept that HELPS, not a metric hack). sg-env.",
+    ),
     "final-comparators": Stage(
         "final-comparators",
-        ["cbmem", "aider"],
+        ["cbmem", "aider", "graphify"],
         100, "swebench",
         "FINAL COMPARATORS — cbmem (CBMEM_BIN on PATH) + aider (separate venv). "
         "Run LATER, own envs, after preflight --selftest. ALSO verify their "

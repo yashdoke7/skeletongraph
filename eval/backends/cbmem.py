@@ -305,7 +305,7 @@ def search_native(query: str, repo: Path, k: int = 10) -> str:
     lines = []
     for i, (name, fp) in enumerate(syms[:k]):
         short = name.split(".")[-1]
-        lines.append(f"{i+1}. {fp}::{short}   (qualified_name: {name})")
+        lines.append(f"{i+1}. {fp}::{short}\n   qualified_name: {name}")
     return "Ranked results (file::symbol):\n" + "\n".join(lines)
 
 
