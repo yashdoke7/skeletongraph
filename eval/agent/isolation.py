@@ -14,6 +14,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 from .config import WORKSPACE_ROOT
@@ -115,10 +116,22 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
     # not exist (common in Linux-native repos for test fixtures).  Without
     # this, copytree raises FileNotFoundError: [WinError 2] for every dangling
     # link it encounters — which was the original failure mode.
-    shutil.copytree(src, repo,
-                    ignore=shutil.ignore_patterns(*_SG_ARTIFACTS, ".git"),
-                    symlinks=False,
-                    ignore_dangling_symlinks=True)
+    #
+    # Retry: on a Defender-scanned Desktop path with many concurrent workers, a
+    # newly-written file can be transiently locked mid-copy ("[WinError 32]" /
+    # partial tree). Retrying the whole copy (after wiping the partial) clears it.
+    for attempt in range(3):
+        try:
+            shutil.copytree(src, repo,
+                            ignore=shutil.ignore_patterns(*_SG_ARTIFACTS, ".git"),
+                            symlinks=False,
+                            ignore_dangling_symlinks=True)
+            break
+        except Exception:
+            _rmtree_safe(repo)
+            if attempt == 2:
+                raise
+            time.sleep(0.6 * (attempt + 1))
 
     _strip_sg_state(repo)
     _init_clean_git(repo)
@@ -161,7 +174,7 @@ def _init_clean_git(repo: Path) -> None:
         gi.write_text(existing + ("\n" if existing and not existing.endswith("\n") else "")
                       + _WORKSPACE_GITIGNORE, encoding="utf-8")
 
-    for cmd in (
+    sequence = (
         [_GIT, "init", "-q"],
         # core.longpaths: Windows `git add` fails with exit 128 on paths >260
         # chars (deeply-nested test fixtures) unless long paths are enabled.
@@ -171,14 +184,31 @@ def _init_clean_git(repo: Path) -> None:
         [_GIT, "config", "core.autocrlf", "false"],
         [_GIT, "add", "-A"],
         [_GIT, "commit", "-q", "-m", "baseline", "--no-verify"],
-    ):
-        r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True,
-                           env={**_os_environ(), **env})
-        if r.returncode != 0:
-            # Surface git's real message (CalledProcessError hides stderr).
-            raise RuntimeError(
-                f"git {' '.join(str(c) for c in cmd[1:])} failed (exit "
-                f"{r.returncode}) in {repo}: {(r.stderr or r.stdout).strip()[:300]}")
+    )
+    # Retry the whole init→add→commit. On a Defender-scanned path under heavy
+    # concurrency, git intermittently can't stat a just-written file ("unable to
+    # stat 'setup.py'") or loses the half-created .git ("not a git repository").
+    # These are transient locks, not corruption — re-init + retry clears them.
+    last = ""
+    for attempt in range(4):
+        err = None
+        for cmd in sequence:
+            r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True,
+                               env={**_os_environ(), **env})
+            if r.returncode != 0:
+                err = (f"git {' '.join(str(c) for c in cmd[1:])} failed (exit "
+                       f"{r.returncode}) in {repo}: {(r.stderr or r.stdout).strip()[:300]}")
+                break
+        if err is None:
+            return                      # baseline committed cleanly
+        last = err
+        gp = repo / ".git"             # wipe the half-built repo before retrying
+        if gp.is_dir():
+            _rmtree_safe(gp)
+        if attempt < 3:
+            time.sleep(0.6 * (attempt + 1))
+    raise RuntimeError(last + "  (after 4 attempts — likely AV/file-lock; "
+                       "lower --workers or exclude the workspace dir from Defender)")
 
 
 def diff_patch(repo: Path) -> str:

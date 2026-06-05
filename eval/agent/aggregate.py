@@ -16,11 +16,18 @@ import argparse
 import json
 import math
 import random
+import re
 import statistics
 from collections import defaultdict
 from pathlib import Path
 
 from . import config
+
+# Default gold-fqn dataset (tightened: true patched function from AST, not hunk
+# headers — see eval/scripts/tighten_gold_fqns.py). Used for the file-vs-function
+# localization table. Skipped gracefully if the file isn't present.
+_DEFAULT_GOLD_FQNS = Path(
+    r"C:/Users/ASUS/Desktop/CS/Projects/swebench-data/swebench_100_fqn.jsonl")
 
 
 def _load(stage: str | None, task_ids: set | None = None) -> list:
@@ -76,6 +83,81 @@ def _recall_cum(r) -> float | None:
     return scs[-1].get("cumulative_recall", 0.0) if scs else 0.0
 
 
+# ── localization re-scoring (file vs function) ──────────────────────────────
+# Re-score each run's FIRST search result (the raw file::symbol list the model
+# saw, stored in turns) against gold_files / gold_fqns. Function match is fuzzy:
+# same file AND last name token equal ('header.py::fromstring' matches
+# 'header.py::Header.fromstring'). Surfaces the file→function gap.
+
+_RANK_LINE = re.compile(r"^\s*\d+\.\s+(.+?)\s*$")
+
+
+def _parse_ranked(result: str) -> list:
+    if not result or result.startswith(("ERROR", "No results")):
+        return []
+    out = []
+    for line in result.splitlines():
+        m = _RANK_LINE.match(line)
+        if m:
+            out.append(m.group(1).strip())
+    return out
+
+
+def _first_search_fqns(rec: dict) -> list:
+    for t in rec.get("turns", []):
+        for call in t.get("tool_calls", []):
+            if call.get("name") == "search_code":
+                return _parse_ranked(call.get("result", "") or "")
+    return []
+
+
+def _all_search_fqns(rec: dict) -> list:
+    seen, out = set(), []
+    for t in rec.get("turns", []):
+        for call in t.get("tool_calls", []):
+            if call.get("name") == "search_code":
+                for fq in _parse_ranked(call.get("result", "") or ""):
+                    if fq not in seen:
+                        seen.add(fq); out.append(fq)
+    return out
+
+
+def _file_of(fqn: str) -> str:
+    return fqn.split("::", 1)[0].replace("\\", "/").strip()
+
+
+def _func_of(fqn: str) -> str:
+    tail = fqn.split("::", 1)[-1] if "::" in fqn else ""
+    return tail.split(".")[-1].strip() if tail else ""
+
+
+def _func_match(r: str, g: str) -> bool:
+    return _file_of(r) == _file_of(g) and _func_of(r) and _func_of(r) == _func_of(g)
+
+
+def _recall_rank(retrieved: list, golds: list, match) -> tuple:
+    """(recall@10, hit, rank-of-first-gold) over the top-10."""
+    if not golds:
+        return (None, None, None)
+    top = retrieved[:10]
+    matched = sum(1 for g in golds if any(match(r, g) for r in top))
+    rank = 0
+    for i, r in enumerate(top, 1):
+        if any(match(r, g) for g in golds):
+            rank = i
+            break
+    return (matched / len(golds), 1 if matched else 0, rank)
+
+
+def _load_gold_fqns(path: Path) -> dict:
+    gold = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            d = json.loads(line)
+            gold[d["task_id"]] = (d.get("gold_files", []), d.get("gold_fqns", []))
+    return gold
+
+
 # ── significance ────────────────────────────────────────────────────────────
 
 
@@ -110,7 +192,7 @@ def bootstrap_ci(values: list, iters: int = 2000) -> tuple:
 
 
 def aggregate(stage: str | None, task_ids: set | None = None,
-              out_label: str = "") -> None:
+              out_label: str = "", gold_fqns_path: Path | None = None) -> None:
     recs = _load(stage, task_ids)
     if not recs:
         raise SystemExit("no runs found")
@@ -129,28 +211,42 @@ def aggregate(stage: str | None, task_ids: set | None = None,
                     for a, rs in by_arm_all.items()}
     n_excluded = len(recs) - sum(len(v) for v in by_arm.values())
 
+    # Gold fqns for the function-level columns (tightened gold; skipped if absent).
+    gpath = gold_fqns_path if gold_fqns_path is not None else _DEFAULT_GOLD_FQNS
+    gold = {}
+    if gpath and Path(gpath).exists():
+        try:
+            gold = _load_gold_fqns(gpath)
+        except Exception:
+            gold = {}
+
+    def _loc(rs):
+        """(funcR@10, funcHit, funcRank) for an arm's runs vs gold_fqns."""
+        rr = [r for r in rs if r.get("task_id") in gold]
+        if not rr:
+            return (None, None, None)
+        fr, fh, rk = [], [], []
+        for r in rr:
+            gq = gold[r["task_id"]][1]
+            a, b, k = _recall_rank(_first_search_fqns(r), gq, _func_match)
+            fr.append(a); fh.append(b)
+            if k:
+                rk.append(k)
+        return (_mean(fr), _mean(fh),
+                round(statistics.median(rk), 1) if rk else None)
+
     lines = ["# Agentic Evaluation — Summary", ""]
     if stage:
         lines.append(f"Stage: **{stage}**  ·  {config.STAGES[stage].note}")
-    lines += [f"Runs: {len(recs)} ({n_excluded} incomplete excluded from metrics)"
-              f"  ·  arms: {sorted(by_arm)}", "",
-              "## Headline results",
-              "",
-              "**pass@1** (SWE-bench resolved %) is the primary metric. "
-              "Retrieval recall/precision/rank measure retrieval quality "
-              "independent of task success. Tokens / turns / cost measure "
-              "efficiency (paper headline is cost-at-iso-accuracy).",
-              "",
-              "edited-gold is a localization proxy — kept for diagnosis but "
-              "NOT a primary metric (model-dependent and noisy).",
-              ""]
+    lines += [f"Runs: {len(recs)}  ·  {n_excluded} incomplete excluded  ·  "
+              f"{len(by_arm)} arms", ""]
 
-    # Column-aligned monospace table (easier to read than pipe-separated).
-    # The two-line header makes copy-paste into a paper Markdown clean.
+    # ── Build row data ───────────────────────────────────────────────────────
     arm_pass: dict = {}
     rows = []
     for arm in sorted(by_arm):
         rs = by_arm[arm]
+        _fr, _fh, _frk = _loc(rs)        # function-level localization (vs gold_fqns)
         # pass@1 denominator consistency: a completed run counts iff we can
         # decide pass/fail for it. An EMPTY patch is always a fail (it changes
         # nothing), so it counts even if verify never wrote a verdict. A
@@ -172,7 +268,8 @@ def aggregate(stage: str | None, task_ids: set | None = None,
         med_rank = round(statistics.median(ranks), 1) if ranks else None
         label = config.ARMS.get(arm, arm).label if arm in config.ARMS else arm
         rows.append({
-            "arm": label,
+            "key": arm,            # short id (e.g. "sg-chain") — for tables
+            "label": label,        # long description — for the legend only
             "n": len(rs),
             "pass1": p1,
             # hit = binary first-search hit-rate (≥1 gold file) — kept for
@@ -183,10 +280,10 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             "reccum": _mean([_recall_cum(r) for r in rs]),
             "prec": _mean([r.get('retrieval_precision') for r in rs]),
             "rank": med_rank,
+            "funcr": _fr,          # function-level recall@10 (first search)
+            "funchit": _fh,        # found gold FUNCTION in top-10
+            "funcrank": _frk,      # median rank of first gold function
             # patch-rate = fraction of runs that produced ANY non-empty patch.
-            # Empty patches are guaranteed fails; an arm whose retrieval leaves
-            # the agent unable to even attempt a fix more often is worse. This
-            # separates arms that pass@1 (model-bound) cannot.
             "patchrate": _mean([1 if (r.get("consolidation") or {}).get(
                 "files_in_patch_count", 0) > 0 else 0 for r in rs]),
             "egold": _mean([1 if r.get('edited_gold_file') else 0 for r in rs]),
@@ -196,45 +293,64 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             "cost": _mean([r.get('imputed_cost') for r in rs]),
         })
 
-    # Markdown table (pipe form) — for paste-into-paper compatibility
-    lines += [
-        "rec@1 = fractional file-recall after the first search · rec@cum = "
-        "across all searches · hit = binary first-search hit-rate (legacy). "
-        "prec = first-search precision; rank = position of first gold file.",
-        "",
-        "| arm | n | pass@1 | patch% | rec@1 | rec@cum | prec | rank | tokens | turns | cost$ |",
-        "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:|",
-    ]
-    for r in rows:
-        p1 = f"{r['pass1']*100:.1f}%" if r['pass1'] is not None else "n/a"
-        rank = f"{r['rank']:.1f}" if r['rank'] is not None else "—"
-        lines.append(
-            f"| {r['arm']} | {r['n']} | {p1} | {r['patchrate']*100:.0f}% | "
-            f"{r['rec1']:.3f} | {r['reccum']:.3f} | {r['prec']:.3f} | {rank} | "
-            f"{r['intok']:>6,} | {r['turns']:.1f} | "
-            f"${r['cost']:.4f} |"
-        )
-
-    # Console-friendly monospace echo (printed below the Markdown table).
-    lines += ["", "```", "Compact view (sorted by pass@1):", ""]
     sorted_rows = sorted(rows, key=lambda r: -(r['pass1'] or 0))
-    lines.append(
-        f"{'arm':<28} {'n':>3} {'pass@1':>7} {'patch%':>6} {'rec@1':>6} {'rec@cum':>7} "
-        f"{'prec':>6} {'rank':>5} {'tok':>7} {'turns':>5} {'$':>7}"
-    )
-    lines.append("-" * 104)
+
+    # Format helpers — consistent across all tables.
+    def _pct(x):   return f"{x*100:.1f}%" if x is not None else "n/a"
+    def _p0(x):    return f"{x*100:.0f}%" if x is not None else "n/a"
+    def _f3(x):    return f"{x:.3f}" if x is not None else "—"
+    def _rk(x):    return f"{x:.1f}" if x is not None else "—"
+
+    # ── Compact monospace table (collapsible) ────────────────────────────────
+    lines += ["```"]
+    hdr = (f"{'arm':<18}{'n':>4}{'pass@1':>8}{'patch%':>8}{'rec@1':>8}"
+           f"{'rec@cum':>9}{'prec':>7}{'fRank':>6}{'funcR@10':>9}{'funcHit':>8}"
+           f"{'fnRank':>7}{'tokens':>9}{'turns':>7}{'cost$':>9}")
+    lines.append(hdr)
+    lines.append("-" * len(hdr))
     for r in sorted_rows:
-        p1 = f"{r['pass1']*100:5.1f}%" if r['pass1'] is not None else "  n/a "
-        rank = f"{r['rank']:.1f}" if r['rank'] is not None else "  — "
         lines.append(
-            f"{r['arm']:<28} {r['n']:>3} {p1:>7} {r['patchrate']*100:5.0f}% "
-            f"{r['rec1']:>6.3f} {r['reccum']:>7.3f} "
-            f"{r['prec']:>6.3f} {rank:>5} {r['intok']:>7,} "
-            f"{r['turns']:>5.1f} ${r['cost']:>6.4f}"
+            f"{r['key']:<18}{r['n']:>4}{_pct(r['pass1']):>8}{_p0(r['patchrate']):>8}"
+            f"{_f3(r['rec1']):>8}{_f3(r['reccum']):>9}{_f3(r['prec']):>7}"
+            f"{_rk(r['rank']):>6}{_f3(r['funcr']):>9}{_p0(r['funchit']):>8}"
+            f"{_rk(r['funcrank']):>7}{r['intok']:>9,}{r['turns']:>7.1f}"
+            f"{('$'+format(r['cost'],'.4f')):>9}"
         )
     lines.append("```")
+    lines += ["",
+              "_pass@1_ = resolved % (empty patch = fail) · _patch%_ = any patch · "
+              "_rec@1/rec@cum_ = FILE-recall after first / all searches · _prec_ = "
+              "first-search precision · _fRank_ = median rank of first gold FILE · "
+              "_funcR@10/funcHit/fnRank_ = FUNCTION-level recall@10 / hit / median rank "
+              "(gold function, tightened gold) · _tokens_ = mean input tokens.",
+              "", "</details>"]
 
-    # ── data integrity — SG runs that silently lost their embedding index ───
+    # ── Markdown pipe table (for paper — comes first for easy copy) ──────────
+    lines += ["### Results (sorted by pass@1)", "",
+              "| Arm | n | pass@1 | patch% | rec@1 | rec@cum | prec | fRank "
+              "| funcR@10 | funcHit | fnRank | tokens | turns | cost$ |",
+              "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:"
+              "| ---:| ---:| ---:| ---:| ---:| ---:|"]
+    for r in sorted_rows:
+        lines.append(
+            f"| `{r['key']}` | {r['n']} | {_pct(r['pass1'])} | {_p0(r['patchrate'])} "
+            f"| {_f3(r['rec1'])} | {_f3(r['reccum'])} | {_f3(r['prec'])} | {_rk(r['rank'])} "
+            f"| {_f3(r['funcr'])} | {_p0(r['funchit'])} | {_rk(r['funcrank'])} "
+            f"| {r['intok']:,} | {r['turns']:.1f} | ${r['cost']:.4f} |"
+        )
+
+    # ── Arm legend (short id → what it is) ───────────────────────────────────
+    lines += ["", "**Arms:**", ""]
+    for r in sorted(rows, key=lambda r: r['key']):
+        lines.append(f"- `{r['key']}` — {r['label']}")
+    lines.append("")
+
+    # (Function-level localization columns are folded into the main table above.
+    # For the deep dive — funcMRR, cumFuncHit, fileR@10 — run
+    # `python -m eval.scripts.localization_metrics`.)
+
+
+    # ── Data integrity — SG runs that silently lost their embedding index ────
     lines += ["", "## Data integrity", ""]
     # sg-noembed runs WITHOUT embeddings on purpose — don't flag it as degraded.
     sg_runs = [r for a, rs in by_arm.items()
@@ -251,18 +367,12 @@ def aggregate(stage: str | None, task_ids: set | None = None,
     else:
         lines.append("_No SG runs in this selection._")
 
-    # ── trajectory dynamics ─────────────────────────────────────────────────
-    # The interesting agent-behavior signals: when does the agent first edit?
-    # how many edits does it attempt vs land? does the empty-submit guard fire?
-    # These differentiate retrieval quality from model capability.
-    lines += ["", "## Trajectory dynamics by arm", "",
-              "edits-success-rate = successful / attempted edit_file calls · "
-              "guard-fired% = empty-submit guard had to nudge the model · "
-              "tte = mean turn index of first successful edit",
-              "",
-              "| Arm | n | edits attempted | edits successful | "
-              "success-rate | guard-fired% | mean tte |",
-              "| --- | --- | --- | --- | --- | --- | --- |"]
+    # ── Trajectory dynamics ──────────────────────────────────────────────────
+    # When does the agent first edit? How many edits does it attempt vs land?
+    # Does the empty-submit guard fire? Differentiates retrieval from capability.
+    lines += ["", "## Trajectory dynamics", "",
+              "| Arm | n | edits att | edits ok | succ% | guard% | tte |",
+              "| --- | ---:| ---:| ---:| ---:| ---:| ---:|"]
     for arm in sorted(by_arm):
         rs = by_arm[arm]
         att = [r.get("edits_attempted", 0) for r in rs]
@@ -271,23 +381,18 @@ def aggregate(stage: str | None, task_ids: set | None = None,
         guard = _mean([1 if r.get("empty_submit_blocked") else 0 for r in rs])
         ttes = [r.get("time_to_first_edit_turn") for r in rs
                 if r.get("time_to_first_edit_turn") is not None]
-        mean_tte = round(sum(ttes) / len(ttes), 1) if ttes else "n/a"
+        mean_tte = round(sum(ttes) / len(ttes), 1) if ttes else None
+        tte_s = f"{mean_tte:.1f}" if mean_tte is not None else "n/a"
         lines.append(
-            f"| {arm} | {len(rs)} | {round(_mean(att), 2)} "
-            f"| {round(_mean(suc), 2)} | {rate} | {guard} | {mean_tte} |"
+            f"| `{arm}` | {len(rs)} | {_mean(att):.2f} "
+            f"| {_mean(suc):.2f} | {rate*100:.1f}% | {guard*100:.1f}% | {tte_s} |"
         )
 
-    # ── consolidation gap (the ContextBench-style headline figure) ──────────
-    # Files retrieved but never appearing in the final patch. Lower is better;
-    # SG with summaries should focus the model and shrink this gap vs naive
-    # retrievers that surface noise.
-    lines += ["", "## Consolidation gap by arm", "",
-              "files-read = mean files opened with read_file · "
-              "files-in-patch = mean files touched by patch · "
-              "gap-files = 1 − (read ∩ patch) / read   (0 = perfect)",
-              "",
-              "| Arm | n | files-read | files-in-patch | gap-files |",
-              "| --- | --- | --- | --- | --- |"]
+    # ── Consolidation gap ────────────────────────────────────────────────────
+    # Files retrieved but never appearing in the final patch. Lower is better.
+    lines += ["", "## Consolidation gap", "",
+              "| Arm | n | files read | files patched | gap |",
+              "| --- | ---:| ---:| ---:| ---:|"]
     for arm in sorted(by_arm):
         rs = by_arm[arm]
         gaps = [(r.get("consolidation") or {}).get("consolidation_gap_files")
@@ -297,17 +402,15 @@ def aggregate(stage: str | None, task_ids: set | None = None,
         patch_c = [(r.get("consolidation") or {}).get("files_in_patch_count", 0)
                    for r in rs]
         lines.append(
-            f"| {arm} | {len(rs)} | {round(_mean(read_c), 2)} "
-            f"| {round(_mean(patch_c), 2)} | {_mean(gaps)} |"
+            f"| `{arm}` | {len(rs)} | {_mean(read_c):.2f} "
+            f"| {_mean(patch_c):.2f} | {_mean(gaps):.3f} |"
         )
 
-    # ── search dynamics ─────────────────────────────────────────────────────
-    # Did the agent thrash on retrieval? Multiple searches per task with high
-    # search_calls but low retrieval_precision = thrashing. Useful for the
-    # "smart retrieval reduces tool calls" claim.
-    lines += ["", "## Search dynamics by arm", "",
-              "| Arm | n | mean search-calls | mean unique-files-retrieved | search-errors% |",
-              "| --- | --- | --- | --- | --- |"]
+    # ── Search dynamics ──────────────────────────────────────────────────────
+    # Did the agent thrash on retrieval? High search-calls + low precision = thrash.
+    lines += ["", "## Search dynamics", "",
+              "| Arm | n | searches | unique files | err% |",
+              "| --- | ---:| ---:| ---:| ---:|"]
     for arm in sorted(by_arm):
         rs = by_arm[arm]
         ncalls = [r.get("n_search_calls", 0) for r in rs]
@@ -317,15 +420,15 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             scs = r.get("search_calls") or []
             errs.append(sum(1 for sc in scs if sc.get("error")) / max(len(scs), 1))
         lines.append(
-            f"| {arm} | {len(rs)} | {round(_mean(ncalls), 2)} "
-            f"| {round(_mean(uniq), 2)} | {round(_mean(errs), 4)} |"
+            f"| `{arm}` | {len(rs)} | {_mean(ncalls):.2f} "
+            f"| {_mean(uniq):.2f} | {_mean(errs)*100:.1f}% |"
         )
 
-    # significance: SG vs each baseline, paired on task_id
-    lines += ["", "## Significance — SG vs each baseline (McNemar, paired)", ""]
+    # ── Significance — SG vs each baseline (McNemar, paired) ────────────────
+    lines += ["", "## Significance — SG vs each baseline (McNemar)", ""]
     if "sg" in arm_pass and any("resolved" in r for r in recs):
-        lines += ["| Baseline | SG-only wins | base-only wins | p-value | "
-                  "verdict |", "| --- | --- | --- | --- | --- |"]
+        lines += ["| Baseline | SG wins | base wins | p-value | verdict |",
+                  "| --- | ---:| ---:| ---:| --- |"]
         sg = arm_pass["sg"]
         for arm in sorted(by_arm):
             if arm == "sg":
@@ -338,38 +441,41 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             b, c, p = mcnemar(pairs)
             verdict = ("SG better" if b > c and p < 0.05 else
                        "baseline better" if c > b and p < 0.05 else
-                       "no sig. difference")
-            lines.append(f"| {arm} | {b} | {c} | {p:.4f} | {verdict} |")
+                       "no sig. diff")
+            lines.append(f"| `{arm}` | {b} | {c} | {p:.4f} | {verdict} |")
     else:
         lines.append("_Run verify.py first — no pass/fail verdicts yet._")
 
-    # retrieval-hit CI per arm
-    lines += ["", "## Retrieval-hit rate — 95% bootstrap CI", "",
-              "| Arm | hit-rate | 95% CI |", "| --- | --- | --- |"]
+    # ── Retrieval-hit rate — 95% bootstrap CI ────────────────────────────────
+    lines += ["", "## Retrieval-hit rate — 95% CI", "",
+              "| Arm | hit rate | 95% CI |",
+              "| --- | ---:| --- |"]
     for arm in sorted(by_arm):
         vals = [1 if r.get("retrieval_hit") else 0 for r in by_arm[arm]]
         lo, hi = bootstrap_ci(vals)
-        lines.append(f"| {arm} | {_mean(vals)} | [{lo}, {hi}] |")
+        lines.append(f"| `{arm}` | {_mean(vals)*100:.1f}% | [{lo:.3f}, {hi:.3f}] |")
 
-    # failure taxonomy
-    lines += ["", "## Stop reason (failure mode) by arm", "",
+    # ── Stop reason (failure mode) ───────────────────────────────────────────
+    lines += ["", "## Stop reason by arm", "",
               "| Arm | submit | max_turns | error | no_tool |",
-              "| --- | --- | --- | --- | --- |"]
+              "| --- | ---:| ---:| ---:| ---:|"]
     for arm in sorted(by_arm_all):
         rs = by_arm_all[arm]          # ALL runs — failures belong in this table
         cnt = defaultdict(int)
         for r in rs:
             cnt[r.get("stopped", "?")] += 1
-        lines.append(f"| {arm} | {cnt['submit']} | {cnt['max_turns']} "
+        lines.append(f"| `{arm}` | {cnt['submit']} | {cnt['max_turns']} "
                      f"| {cnt['error']} | {cnt['no_tool']} |")
 
     sfx = f"_{out_label}" if out_label else ""
     out = config.RUNS_DIR / f"SUMMARY{sfx}.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote {out}")
-    print("\n".join(lines[:18]))
-    print("...")
-    print(f"({len(lines)} total lines in SUMMARY.md — open the file for the full breakdown)")
+    # Console preview — the file is UTF-8, but a Windows cp1252 console can't
+    # encode box-drawing/unicode chars, so sanitize for stdout only.
+    preview = "\n".join(lines[:22])
+    print(preview.encode("ascii", "replace").decode("ascii"))
+    print(f"... ({len(lines)} total lines in SUMMARY.md — open the file for the full breakdown)")
 
     # Machine-readable summary alongside the human-readable SUMMARY.md.
     # Keyed by arm — retrieval/efficiency numbers for downstream scripting.
@@ -432,11 +538,14 @@ def main() -> None:
     ap.add_argument("--label", default="",
                     help="Suffix for output files: SUMMARY_<label>.md / "
                          "summary_<label>.json (e.g. --label n30). Avoids overwrite.")
+    ap.add_argument("--gold-fqns", default=None, type=Path,
+                    help="jsonl with tightened gold_fqns (default: swebench_100_fqn.jsonl) "
+                         "for the file-vs-function localization table. Skipped if absent.")
     args = ap.parse_args()
     if args.run_dir:
         config.RUNS_DIR = Path(args.run_dir).expanduser().resolve()
     task_ids = _task_ids_from(args.tasks) if args.tasks else None
-    aggregate(args.stage, task_ids, args.label)
+    aggregate(args.stage, task_ids, args.label, args.gold_fqns)
 
 
 # `label` is referenced as a transient inside the headline-row loop, so the
