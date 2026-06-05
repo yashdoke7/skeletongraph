@@ -18,9 +18,10 @@ from typing import List
 
 from . import config
 from .tools import TOOL_SCHEMAS, ToolExecutor
+from .profiles import build_profile, ALL_TOOL_NAMES
 
 # Valid tool names — used to validate text-parsed tool calls (below).
-_VALID_TOOLS = {s["function"]["name"] for s in TOOL_SCHEMAS}
+_VALID_TOOLS = ALL_TOOL_NAMES   # superset across all arm profiles (text-call parser)
 
 # API call robustness — retry transient failures so one blip doesn't drop a task
 # (which would unpair the arm comparison). Substring match on the error string.
@@ -155,7 +156,7 @@ def _usage_from_dict(d: dict) -> dict:
     }
 
 
-def _stream_completion(client, messages: list):
+def _stream_completion(client, messages: list, tool_schemas=TOOL_SCHEMAS):
     """Stream a chat completion and reassemble into (content, tool_calls, usage).
 
     Streaming is critical for reasoning models (DeepSeek V4 Flash, etc.) that
@@ -182,7 +183,7 @@ def _stream_completion(client, messages: list):
         kwargs: dict = dict(
             model=config.MODEL_NAME,
             messages=messages,
-            tools=TOOL_SCHEMAS,
+            tools=tool_schemas,
             tool_choice="auto",
             temperature=config.TEMPERATURE,
             seed=config.SEED,
@@ -350,8 +351,12 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
     traj = Trajectory(task_id=task["task_id"], arm=arm, model=model)
     t0 = time.time()
 
+    # Per-arm tool surface + system prompt (systems comparison). Baselines get
+    # the standard 5 tools; SG also gets read_symbol/expand; cbmem/aider native
+    # surfaces come online via build_profile.
+    tool_schemas, system_prompt = build_profile(arm, executor.repo)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": USER_TEMPLATE.format(issue=task["query"])},
     ]
 
@@ -360,9 +365,22 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
     # contradictory edits). Once the agent has landed an edit and spent enough
     # turns, remind it ONCE to submit. Identical for every arm → no retrieval
     # bias; it only trims the pathological never-submit tail.
-    _SUBMIT_NUDGE_AFTER = 10
-    _FORCE_SUBMIT_AFTER = 25      # hard cap once an edit exists + nudge ignored
-    submit_nudged = False
+    # ONE uniform budget (config.MAX_TURNS) is the only hard stop — no per-model
+    # truncation (that would bias models that legitimately need more turns). The
+    # only intervention is a SINGLE soft reminder fired LATE (after normal runs
+    # have long finished), which the model is free to ignore and keep working.
+    # It does not cap reads/edits; it just standardizes stop-behavior across
+    # heterogeneous models and must be disclosed as part of the harness.
+    _NUDGE_AFTER = 20            # late enough that normal (<20-turn) runs are untouched
+    submit_nudged = edit_nudged = False
+
+    # no_tool tolerance: some models emit a reasoning paragraph before acting, or
+    # phrase one call in a format the parser misses. Bailing after 2 such turns
+    # discards an otherwise-valid run (it's then excluded from metrics → smaller,
+    # unpaired n). Allow a few consecutive no-tool turns with a firm, format-
+    # explicit nudge before giving up. Reset on any successful tool call.
+    _MAX_NO_TOOL = 4
+    consecutive_no_tool = 0
 
     for step in range(config.MAX_TURNS):
         _compact_history(messages)   # bounded context — elide stale tool dumps
@@ -374,7 +392,8 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
         # as retryable keeps the task set complete and the comparison paired.
         for attempt in range(_MAX_API_ATTEMPTS):
             try:
-                content, native_calls, usage_dict = _stream_completion(client, messages)
+                content, native_calls, usage_dict = _stream_completion(
+                    client, messages, tool_schemas)
                 break  # success
             except Exception as e:
                 err_msg = f"{type(e).__name__}: {e}"
@@ -398,16 +417,22 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
                       else _parse_text_tool_calls(content))
 
         if not native_calls and not text_calls:
-            # model answered without acting — nudge once, else stop
+            # model answered without a parseable tool call — nudge firmly, and
+            # only give up after _MAX_NO_TOOL consecutive such turns.
             turn.tool_calls = []
             traj.turns.append(turn)
             messages.append({"role": "assistant", "content": content})
-            if step > 0 and not traj.turns[step - 1].tool_calls:
+            consecutive_no_tool += 1
+            if consecutive_no_tool >= _MAX_NO_TOOL:
                 traj.stopped = "no_tool"
                 break
-            messages.append({"role": "user",
-                              "content": "Use a tool, or call submit if done."})
+            messages.append({"role": "user", "content":
+                "You did not make a tool call. Respond with EXACTLY ONE tool call "
+                "— search_code, list_files, read_file, edit_file, or submit — and "
+                "nothing else (no prose, no explanation). If the fix is already "
+                "applied, call submit now."})
             continue
+        consecutive_no_tool = 0   # a real tool call resets the no-tool streak
 
         if native_calls:
             # ── structured tool_calls path ──────────────────────────────────
@@ -450,21 +475,23 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
             traj.stopped = "submit"
             break
 
-        # Over-editing models (nemotron-3, step-3.5) never call submit. Once an
-        # edit is in place: nudge once at _SUBMIT_NUDGE_AFTER; if still going by
-        # _FORCE_SUBMIT_AFTER, hard-stop — the accumulated git diff IS the patch,
-        # so nothing is lost; it just caps the 40-turn thrash. Uniform → no bias.
-        if (executor.edits_made > 0 and step >= _SUBMIT_NUDGE_AFTER
-                and not submit_nudged):
-            submit_nudged = True
-            messages.append({"role": "user", "content":
-                "You have already edited the file(s). If the fix is complete, "
-                "call submit NOW to finish. Do NOT keep re-reading or making "
-                "more edits unless the current fix is clearly wrong."})
-        elif (executor.edits_made > 0 and submit_nudged
-                and step >= _FORCE_SUBMIT_AFTER):
-            traj.stopped = "submit"
-            break
+        # ONE late soft reminder (no forced stop). After _NUDGE_AFTER turns a run
+        # is clearly stuck in a loop; remind it of the next action it's avoiding —
+        # submit (if it has edited) or edit (if it's only been reading). The model
+        # may ignore it and continue to MAX_TURNS; nothing is truncated. Uniform
+        # across arms AND models → it standardizes stop-behavior without changing
+        # which files get read/edited.
+        if step >= _NUDGE_AFTER:
+            if executor.edits_made > 0 and not submit_nudged:
+                submit_nudged = True
+                messages.append({"role": "user", "content":
+                    "Reminder: you have already edited the file(s). If the fix is "
+                    "complete, call submit to finish."})
+            elif executor.edits_made == 0 and not edit_nudged:
+                edit_nudged = True
+                messages.append({"role": "user", "content":
+                    "Reminder: once you have located the bug, apply the fix with "
+                    "edit_file and then call submit."})
     else:
         traj.stopped = "max_turns"
 

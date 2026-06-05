@@ -90,6 +90,40 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# ── extra tool schemas for native pipelines (systems comparison, final v2) ────
+# Composed per-arm by profiles.py; NOT in the baseline set. SG exposes these so
+# the agent fetches functions / follows the call graph instead of reading whole
+# files — the SG pipeline, not a bare ranker.
+READ_SYMBOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "read_symbol",
+        "description": "Read ONE function/class body by its `file::symbol` id (from "
+                       "a search result) — far fewer tokens than read_file. Prefer "
+                       "this over read_file for a specific function.",
+        "parameters": {
+            "type": "object",
+            "properties": {"fqn": {"type": "string",
+                                   "description": "file::symbol id, e.g. pkg/mod.py::Class.method"}},
+            "required": ["fqn"],
+        },
+    },
+}
+EXPAND_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "expand",
+        "description": "Show the callers and callees of a function (by `file::symbol`) "
+                       "so you can follow the real control flow across the codebase.",
+        "parameters": {
+            "type": "object",
+            "properties": {"fqn": {"type": "string",
+                                   "description": "file::symbol id to expand"}},
+            "required": ["fqn"],
+        },
+    },
+}
+
 # ── Loop-breaker budgets (identical for EVERY arm → no bias; just removes the
 # pathological 40-turn tail that pollutes all arms' turn/token metrics). ──────
 _MAX_UNIQUE_SEARCHES = 8     # global unique-query budget per task
@@ -145,6 +179,33 @@ class ToolExecutor:
             if name == "read_file":
                 return self._read(args["path"], args.get("start_line"),
                                   args.get("end_line"))
+            if name == "read_symbol":
+                self._searches_since_read = 0          # a read → reset the nudge
+                from .sg_tools import read_symbol
+                return read_symbol(self.repo, args.get("fqn", ""))
+            if name == "expand":
+                self._searches_since_read = 0
+                from .sg_tools import expand
+                return expand(self.repo, args.get("fqn", ""))
+            if name == "cbmem_search":
+                _ensure_sg_on_path()
+                from backends.cbmem import search_native
+                return self._native_search(args.get("query", ""),
+                                           int(args.get("k", 10) or 10), search_native)
+            if name == "cbmem_trace":
+                _ensure_sg_on_path()
+                from backends.cbmem import trace_calls
+                return trace_calls(args.get("function_name", ""), self.repo,
+                                   args.get("direction", "both"))
+            if name == "cbmem_snippet":
+                self._searches_since_read = 0
+                _ensure_sg_on_path()
+                from backends.cbmem import code_snippet
+                return code_snippet(args.get("qualified_name", ""), self.repo)
+            if name == "cbmem_arch":
+                _ensure_sg_on_path()
+                from backends.cbmem import architecture
+                return architecture(self.repo)
             if name == "edit_file":
                 return self._edit(args["path"], args["old_str"], args["new_str"])
             if name == "submit":
@@ -274,6 +335,36 @@ class ToolExecutor:
         if self._searches_since_read >= _SEARCH_NOREAD_NUDGE:
             result += (f"\n\n(You have searched {self._searches_since_read} times "
                        "without reading. read_file the top result now to make progress.)")
+        return result
+
+    # ── native-pipeline search (cbmem etc.) — records recall like _search ────
+
+    def _record_first_hits(self, result: str) -> None:
+        """Set first_search_hits (file paths) from a 'Ranked results' block, once."""
+        if self._search_calls != 0:
+            return
+        seen: List[str] = []
+        for line in (result or "").splitlines():
+            m = re.match(r"^\s*\d+\.\s+(\S+)", line)
+            if m:
+                f = m.group(1).split("::")[0].replace("\\", "/")
+                if f and f not in seen:
+                    seen.append(f)
+        self.first_search_hits = seen
+
+    def _native_search(self, query: str, k: int, fn) -> str:
+        """A system's native search tool (e.g. cbmem_search). Records the same
+        first-search recall signal the harness scores, then returns fn's output."""
+        if not (query or "").strip():
+            return ("ERROR: search requires a non-empty query. Describe the "
+                    "symptom or name a symbol.")
+        try:
+            result = fn(query, self.repo, k)
+        except Exception as e:
+            result = f"ERROR: {type(e).__name__}: {e}"
+        self._record_first_hits(result)
+        self._search_calls += 1
+        self._searches_since_read += 1
         return result
 
     # ── neutral file tools (identical for all arms) ────────────────────────

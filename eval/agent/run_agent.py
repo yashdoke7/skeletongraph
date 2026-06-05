@@ -208,7 +208,7 @@ def _search_call_metrics(turns, gold_files) -> list:
     out = []
     for t in turns:
         for call in t.tool_calls:
-            if call.get("name") != "search_code":
+            if call.get("name") not in ("search_code", "cbmem_search"):
                 continue
             result = call.get("result", "") or ""
             hits = _parse_search_result_files(result)
@@ -235,9 +235,14 @@ def _file_access_metrics(turns, gold_files) -> list:
     out = []
     for t in turns:
         for call in t.tool_calls:
-            if call.get("name") != "read_file":
+            name = call.get("name")
+            if name not in ("read_file", "read_symbol"):
                 continue
-            path = ((call.get("args") or {}).get("path") or "").replace("\\", "/")
+            args = call.get("args") or {}
+            if name == "read_symbol":          # SG native fetch — path is the fqn's file
+                path = (args.get("fqn") or "").split("::", 1)[0].replace("\\", "/")
+            else:
+                path = (args.get("path") or "").replace("\\", "/")
             out.append({
                 "turn": t.index,
                 "path": path,
