@@ -136,14 +136,44 @@ Process: use the repository map to decide which files to read, read_file them,
 edit_file the minimal correct fix, then submit. Do NOT run or write tests.
 """
 
+# ── graphify native: knowledge-graph query/explain ("70x token reduction") ────
+_GRAPHIFY_SCHEMAS = [
+    _fn("graphify_search",
+        "Query the code knowledge graph; returns a compact ranked subgraph "
+        "(file::symbol) instead of raw files.",
+        {"query": {"type": "string"}, "k": {"type": "integer"}}, ["query"]),
+    _fn("graphify_explain",
+        "Explain a symbol: its node details, code, and graph neighbors.",
+        {"symbol": {"type": "string"}}, ["symbol"]),
+    _BY_NAME["read_file"], _BY_NAME["edit_file"], _BY_NAME["submit"],
+]
+
+GRAPHIFY_PROMPT = """You are an autonomous software engineer fixing a bug in a \
+repository. You explore the code through a knowledge graph.
+
+Available tools: graphify_search, graphify_explain, read_file, edit_file, submit.
+
+Process:
+1. graphify_search(query) — find relevant code (ranked file::symbol subgraph).
+2. graphify_explain(symbol) — inspect a symbol's code + neighbors; read_file for a whole file.
+3. edit_file to make the minimal correct fix; submit when done.
+
+Rules: smallest correct change; do NOT run or write tests; act through tools; submit when done.
+"""
+
 
 def build_profile(arm: str, repo: Path):
     """Return (tool_schemas, system_prompt) for this arm. Each pipeline uses its
     NATIVE tools; baselines (bm25/grep/hybrid/none) keep the standard 5."""
-    if arm == "sg":
+    # The whole SG family (structural core + concept variants: chain, rerank,
+    # embed, seed, ablations, and the summary-search arms) uses SG's NATIVE tools
+    # — read_symbol/expand — so each concept is tested as a real pipeline.
+    if arm == "sg" or arm.startswith(("sg-", "summary")):
         return (_SG_SCHEMAS, SG_PROMPT)
     if arm == "cbmem":
         return (_CBMEM_SCHEMAS, CBMEM_PROMPT)
+    if arm == "graphify":
+        return (_GRAPHIFY_SCHEMAS, GRAPHIFY_PROMPT)
     if arm == "aider":
         try:
             from backends.aider_repomap import get_map_text
@@ -161,4 +191,5 @@ def build_profile(arm: str, repo: Path):
 # validate text-form tool calls regardless of which profile is active.
 ALL_TOOL_NAMES = {s["function"]["name"] for s in TOOL_SCHEMAS} | {
     "read_symbol", "expand",
-    "cbmem_search", "cbmem_trace", "cbmem_snippet", "cbmem_arch"}
+    "cbmem_search", "cbmem_trace", "cbmem_snippet", "cbmem_arch",
+    "graphify_search", "graphify_explain"}

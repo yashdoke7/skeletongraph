@@ -208,7 +208,7 @@ def _search_call_metrics(turns, gold_files) -> list:
     out = []
     for t in turns:
         for call in t.tool_calls:
-            if call.get("name") not in ("search_code", "cbmem_search"):
+            if call.get("name") not in ("search_code", "cbmem_search", "graphify_search"):
                 continue
             result = call.get("result", "") or ""
             hits = _parse_search_result_files(result)

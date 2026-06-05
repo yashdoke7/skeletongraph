@@ -206,6 +206,16 @@ class ToolExecutor:
                 _ensure_sg_on_path()
                 from backends.cbmem import architecture
                 return architecture(self.repo)
+            if name == "graphify_search":
+                _ensure_sg_on_path()
+                from backends.graphify import search_native
+                return self._native_search(args.get("query", ""),
+                                           int(args.get("k", 10) or 10), search_native)
+            if name == "graphify_explain":
+                self._searches_since_read = 0
+                _ensure_sg_on_path()
+                from backends.graphify import explain
+                return explain(args.get("symbol", ""), self.repo)
             if name == "edit_file":
                 return self._edit(args["path"], args["old_str"], args["new_str"])
             if name == "submit":
@@ -777,6 +787,82 @@ def _retrieve_rerank(query: str, repo: Path, k: int) -> List[str]:
     return (confirmed + named + rest)[:k]
 
 
+# ── sg-embed: semantic (dense) rerank of the structural+lexical pool ──────────
+
+def _func_text(store, repo: Path, fqn: str) -> str:
+    """fqn + signature + docstring + body for one function (for dense encoding)."""
+    sk = store.skeleton_table.get(fqn)
+    if sk is None:
+        return fqn
+    body = ""
+    try:
+        lines = (repo / sk.file_path).read_text(encoding="utf-8",
+                                                errors="replace").splitlines()
+        s = max(0, getattr(sk, "line_start", 1) - 1)
+        e = min(len(lines), getattr(sk, "line_end", s + 1))
+        body = "\n".join(lines[s:e])
+    except Exception:
+        pass
+    return "\n".join([fqn, getattr(sk, "signature", "") or "",
+                      getattr(sk, "docstring", "") or "", body])
+
+
+def _retrieve_embed(query: str, repo: Path, k: int) -> List[str]:
+    """sg-embed: SG structural ∪ bm25 candidate pool, reranked by DENSE semantic
+    similarity (query vs function). Activates the semantic signal the heuristic SG
+    path leaves inert — catches functions whose PURPOSE matches the issue even
+    when the exact symbol isn't named. Concept = structural recall + semantic rank.
+    """
+    _ensure_sg_on_path()
+    from skeletongraph.engine import SGEngine
+    cfg = _sg_config("sg-chain")
+    engine = SGEngine(project_root=repo, config=cfg)
+    res = engine.heuristic_query(query, top_n=max(k * 4, 30))
+    store = engine.get_store()
+    from backends.bm25_flat import retrieve as bm25_retrieve
+    pool = _dedupe_ranked([c.skeleton.fqn for c in res.candidates]
+                          + bm25_retrieve(query, repo, max(k * 4, 30)))
+    pool = [f for f in pool if f in store.skeleton_table]
+    if not pool:
+        return []
+    texts = [_func_text(store, repo, f) for f in pool]
+    from backends.dense import rank as dense_rank
+    return dense_rank(query, pool, texts, k,
+                      repo / ".skeletongraph" / "dense_cache", tag="sgembed")
+
+
+# ── sg-seed: use the issue's structured signals (tracebacks/symbols) as seeds ──
+
+def _augment_with_symbols(text: str) -> str:
+    """Append code symbols extracted from the issue (backticks, code fences,
+    traceback frames, dotted paths, CamelCase) so SG's intent analysis seeds on
+    them — the structured signals plain-prose retrieval ignores."""
+    t = text or ""
+    syms: Set[str] = set()
+    syms |= set(re.findall(r"`([A-Za-z_][\w.]{2,})`", t))                 # `Foo.bar`
+    for block in re.findall(r"```[\s\S]*?```", t):                        # code fences
+        syms |= set(re.findall(r"\b([A-Za-z_]\w*(?:\.\w+)+|[A-Z][A-Za-z0-9]{2,})\b", block))
+    syms |= set(re.findall(r"\bin\s+([A-Za-z_]\w+)", t))                  # traceback "in name"
+    syms |= set(re.findall(r"\b([A-Z][a-zA-Z0-9]+(?:\.[A-Za-z_]\w*)+)\b", t))  # Dotted.path
+    stop = {"the", "and", "for", "this", "that", "with", "from", "Error", "True", "False"}
+    syms = {s for s in syms if len(s) >= 3 and s not in stop}
+    if not syms:
+        return t
+    return t + "\n\nRelevant symbols: " + " ".join(sorted(syms)[:20])
+
+
+def _retrieve_seed(query: str, repo: Path, k: int) -> List[str]:
+    """sg-seed: SG structural retrieval on a query AUGMENTED with the issue's
+    code symbols (tracebacks point straight at the buggy function). Lifts recall
+    by using the issue's structured signals, not just its prose."""
+    _ensure_sg_on_path()
+    from skeletongraph.engine import SGEngine
+    cfg = _sg_config("sg-chain")
+    engine = SGEngine(project_root=repo, config=cfg)
+    res = engine.heuristic_query(_augment_with_symbols(query), top_n=k)
+    return [c.skeleton.fqn for c in res.candidates]
+
+
 def preflight_arm(backend: str, repo: Path) -> str:
     """STRICT mode (SG_EVAL_STRICT=1): confirm an arm can run its EXACT intended
     config before the agent loop burns any tokens. Returns "" if OK, else a
@@ -1011,6 +1097,12 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         # then-rerank). Targets bm25's recall AND sg-chain's rank.
         return _retrieve_rerank(query, repo, k)
 
+    if backend == "sg-embed":
+        return _retrieve_embed(query, repo, k)      # semantic dense rerank
+
+    if backend == "sg-seed":
+        return _retrieve_seed(query, repo, k)       # traceback/symbol-seeded SG
+
     if backend == "grep":
         from backends.grep_sim import retrieve
         return retrieve(query, repo, k)
@@ -1024,11 +1116,8 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         return retrieve(query, repo, k)
 
     if backend == "graphify":
-        # graphify dropped — see config.py for context. Raise loudly if anyone
-        # still has stale runbook commands referencing this backend.
-        raise ValueError(
-            "graphify backend was removed (CLI-only; not a fair "
-            "programmable retrieval lib). The graph competitor is cbmem.")
+        from backends.graphify import retrieve
+        return retrieve(query, repo, k)
 
     if backend == "aider":
         from backends.aider_repomap import retrieve         # tree-sitter+PageRank
