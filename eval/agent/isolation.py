@@ -41,7 +41,8 @@ _SG_ARTIFACTS = [
     "summary_drain.lock",
     "SG_EVAL_RUNBOOK.md",   # per-repo IDE prompt sheet — must not leak into eval
     ".hybrid_index",        # eval/backends/hybrid.py BM25+dense cache
-    ".graphify",            # eval/backends/graphify.py knowledge-graph cache
+    ".graphify",            # legacy graphify cache
+    "graphify-out",         # eval/backends/graphify.py extract output (graph.json)
     ".bm25_cache",          # eval/backends/bm25_flat.py (if ever persists)
     ".aider_cache",         # eval/backends/aider_repomap.py override target
     ".aider.tags.cache.v3", # aider default cache (current major version)
@@ -56,6 +57,7 @@ _WORKSPACE_GITIGNORE = """\
 .skeletongraph/
 .hybrid_index/
 .graphify/
+graphify-out/
 .bm25_cache/
 .aider_cache/
 .aider.tags.cache.v*/

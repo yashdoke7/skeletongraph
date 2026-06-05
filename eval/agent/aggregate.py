@@ -83,6 +83,23 @@ def _recall_cum(r) -> float | None:
     return scs[-1].get("cumulative_recall", 0.0) if scs else 0.0
 
 
+def _cost_cached(r) -> float:
+    """Supplementary: cost IF the static system-prompt prefix were cached each
+    turn (the minimal, well-defined caching benefit). Token COUNT is unchanged —
+    caching only re-bills the repeated prefix at the cheap cached rate. Computed
+    from the turn-0 prompt size, so it works on existing runs with no re-run. This
+    mostly matters for aider (its 48K repo map is re-sent every turn)."""
+    base = r.get("imputed_cost") or 0.0
+    turns = r.get("turns") or []
+    nt = r.get("n_turns") or len(turns)
+    if not turns or nt < 2:
+        return round(base, 5)
+    pre = (turns[0].get("usage") or {}).get("prompt_tokens", 0) or 0
+    save = ((nt - 1) * pre
+            * (config.PRICE_INPUT_PER_M - config.PRICE_CACHED_INPUT_PER_M) / 1e6)
+    return round(max(0.0, base - save), 5)
+
+
 # ── localization re-scoring (file vs function) ──────────────────────────────
 # Re-score each run's FIRST search result (the raw file::symbol list the model
 # saw, stored in turns) against gold_files / gold_fqns. Function match is fuzzy:
@@ -99,14 +116,16 @@ def _parse_ranked(result: str) -> list:
     for line in result.splitlines():
         m = _RANK_LINE.match(line)
         if m:
-            out.append(m.group(1).strip())
+            # first whitespace-token = the FQN/file (drops trailing annotations
+            # like cbmem's "  (qualified_name: …)" so the symbol parses cleanly)
+            out.append(m.group(1).strip().split()[0])
     return out
 
 
 def _first_search_fqns(rec: dict) -> list:
     for t in rec.get("turns", []):
         for call in t.get("tool_calls", []):
-            if call.get("name") == "search_code":
+            if call.get("name") in ("search_code", "cbmem_search", "graphify_search"):
                 return _parse_ranked(call.get("result", "") or "")
     return []
 
@@ -115,7 +134,7 @@ def _all_search_fqns(rec: dict) -> list:
     seen, out = set(), []
     for t in rec.get("turns", []):
         for call in t.get("tool_calls", []):
-            if call.get("name") == "search_code":
+            if call.get("name") in ("search_code", "cbmem_search", "graphify_search"):
                 for fq in _parse_ranked(call.get("result", "") or ""):
                     if fq not in seen:
                         seen.add(fq); out.append(fq)
@@ -291,6 +310,7 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             "intok": round(_mean([r.get('billed_input') for r in rs])),
             "outtok": round(_mean([r.get('billed_output') for r in rs])),
             "cost": _mean([r.get('imputed_cost') for r in rs]),
+            "cost_c": _mean([_cost_cached(r) for r in rs]),   # cost w/ prefix caching
         })
 
     sorted_rows = sorted(rows, key=lambda r: -(r['pass1'] or 0))
@@ -305,7 +325,7 @@ def aggregate(stage: str | None, task_ids: set | None = None,
     lines += ["```"]
     hdr = (f"{'arm':<18}{'n':>4}{'pass@1':>8}{'patch%':>8}{'rec@1':>8}"
            f"{'rec@cum':>9}{'prec':>7}{'fRank':>6}{'funcR@10':>9}{'funcHit':>8}"
-           f"{'fnRank':>7}{'tokens':>9}{'turns':>7}{'cost$':>9}")
+           f"{'fnRank':>7}{'tokens':>9}{'turns':>7}{'cost$':>9}{'cost(c)':>9}")
     lines.append(hdr)
     lines.append("-" * len(hdr))
     for r in sorted_rows:
@@ -314,7 +334,7 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             f"{_f3(r['rec1']):>8}{_f3(r['reccum']):>9}{_f3(r['prec']):>7}"
             f"{_rk(r['rank']):>6}{_f3(r['funcr']):>9}{_p0(r['funchit']):>8}"
             f"{_rk(r['funcrank']):>7}{r['intok']:>9,}{r['turns']:>7.1f}"
-            f"{('$'+format(r['cost'],'.4f')):>9}"
+            f"{('$'+format(r['cost'],'.4f')):>9}{('$'+format(r['cost_c'],'.4f')):>9}"
         )
     lines.append("```")
     lines += ["",
@@ -322,21 +342,23 @@ def aggregate(stage: str | None, task_ids: set | None = None,
               "_rec@1/rec@cum_ = FILE-recall after first / all searches · _prec_ = "
               "first-search precision · _fRank_ = median rank of first gold FILE · "
               "_funcR@10/funcHit/fnRank_ = FUNCTION-level recall@10 / hit / median rank "
-              "(gold function, tightened gold) · _tokens_ = mean input tokens.",
+              "(gold function, tightened gold) · _tokens_ = mean input tokens (uncached, "
+              "uniform) · _cost$_ = uncached cost · _cost(c)_ = cost if the static "
+              "system-prompt prefix is cached (token count unchanged).",
               "", "</details>"]
 
     # ── Markdown pipe table (for paper — comes first for easy copy) ──────────
     lines += ["### Results (sorted by pass@1)", "",
               "| Arm | n | pass@1 | patch% | rec@1 | rec@cum | prec | fRank "
-              "| funcR@10 | funcHit | fnRank | tokens | turns | cost$ |",
+              "| funcR@10 | funcHit | fnRank | tokens | turns | cost$ | cost(c) |",
               "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:"
-              "| ---:| ---:| ---:| ---:| ---:| ---:|"]
+              "| ---:| ---:| ---:| ---:| ---:| ---:| ---:|"]
     for r in sorted_rows:
         lines.append(
             f"| `{r['key']}` | {r['n']} | {_pct(r['pass1'])} | {_p0(r['patchrate'])} "
             f"| {_f3(r['rec1'])} | {_f3(r['reccum'])} | {_f3(r['prec'])} | {_rk(r['rank'])} "
             f"| {_f3(r['funcr'])} | {_p0(r['funchit'])} | {_rk(r['funcrank'])} "
-            f"| {r['intok']:,} | {r['turns']:.1f} | ${r['cost']:.4f} |"
+            f"| {r['intok']:,} | {r['turns']:.1f} | ${r['cost']:.4f} | ${r['cost_c']:.4f} |"
         )
 
     # ── Arm legend (short id → what it is) ───────────────────────────────────

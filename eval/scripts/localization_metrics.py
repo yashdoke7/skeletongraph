@@ -50,14 +50,14 @@ def _parse_ranked(result: str) -> list:
     for line in result.splitlines():
         m = _RANK_LINE.match(line)
         if m:
-            out.append(m.group(1).strip())
+            out.append(m.group(1).strip().split()[0])   # FQN token; drop annotations
     return out
 
 
 def _first_search_fqns(rec: dict) -> list:
     for t in rec.get("turns", []):
         for call in t.get("tool_calls", []):
-            if call.get("name") == "search_code":
+            if call.get("name") in ("search_code", "cbmem_search", "graphify_search"):
                 return _parse_ranked(call.get("result", "") or "")
     return []
 
@@ -66,7 +66,7 @@ def _all_search_fqns(rec: dict) -> list:
     seen, out = set(), []
     for t in rec.get("turns", []):
         for call in t.get("tool_calls", []):
-            if call.get("name") == "search_code":
+            if call.get("name") in ("search_code", "cbmem_search", "graphify_search"):
                 for fqn in _parse_ranked(call.get("result", "") or ""):
                     if fqn not in seen:
                         seen.add(fqn); out.append(fqn)
