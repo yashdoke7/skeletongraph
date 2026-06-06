@@ -61,7 +61,10 @@ def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         if ident:
             package_name = node_text(ident, source_bytes)
             
-    base_fqn = package_name if package_name else Path(file_path).stem
+    # FQN prefix MUST be the file_path (see go.py rationale), not the Java
+    # package name — "com.example.server::upload" split prefix never matched gold
+    # file paths → 0 recall on every Java task. Package kept implicitly via path.
+    base_fqn = file_path
 
     def traverse(node: Node, current_class: Optional[RawClass] = None, current_fqn: str = base_fqn):
         if node.type == "import_declaration":
@@ -192,6 +195,6 @@ def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         imports=imports,
         call_sites=call_sites,
         file_hash=_hash_text(source),
-        total_lines=source.count("\\n") + 1,
+        total_lines=source.count("\n") + 1,
         exports=[c.name for c in classes] # Java exports public classes
     )

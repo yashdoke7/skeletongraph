@@ -86,9 +86,11 @@ def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree)
                     "record_declaration": NodeKind.CLASS
                 }
                 
-                ns_prefix = f"{current_ns}::" if current_ns else ""
-                cls_fqn = f"{ns_prefix}{cls_name}"
-                
+                # file_path:: prefix (see go.py rationale); namespace kept inside
+                # the symbol part for uniqueness, not as the split-prefix.
+                ns_part = f"{current_ns}." if current_ns else ""
+                cls_fqn = f"{file_path}::{ns_part}{cls_name}"
+
                 new_class = RawClass(
                     name=cls_name,
                     fqn=cls_fqn,
@@ -132,8 +134,9 @@ def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree)
                 
                 kind = NodeKind.CONSTRUCTOR if node.type == "constructor_declaration" else NodeKind.METHOD
                 
-                ns_prefix = f"{current_ns}::" if current_ns else ""
-                fqn = f"{ns_prefix}{current_class.name}.{func_name}" if current_class else f"{ns_prefix}{func_name}"
+                ns_part = f"{current_ns}." if current_ns else ""
+                fqn = (f"{file_path}::{ns_part}{current_class.name}.{func_name}"
+                       if current_class else f"{file_path}::{ns_part}{func_name}")
                 
                 func = RawFunction(
                     name=func_name,
@@ -177,6 +180,6 @@ def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree)
         imports=imports,
         call_sites=call_sites,
         file_hash=_hash_text(source),
-        total_lines=source.count("\\n") + 1,
+        total_lines=source.count("\n") + 1,
         exports=[c.name for c in classes]
     )

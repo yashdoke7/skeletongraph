@@ -49,7 +49,10 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
     imports: List[RawImport] = []
     call_sites: List[RawCallSite] = []
     
-    base_fqn = Path(file_path).stem
+    # FQN prefix MUST be the file_path (see go.py rationale) — the old
+    # Path(file_path).stem dropped the directory and extension, so the split
+    # prefix never matched gold file paths → 0 recall on every Rust task.
+    base_fqn = file_path
 
     def traverse(node: Node, current_impl: Optional[str] = None):
         if node.type == "use_declaration":
@@ -174,6 +177,6 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         imports=imports,
         call_sites=call_sites,
         file_hash=_hash_text(source),
-        total_lines=source.count("\\n") + 1,
+        total_lines=source.count("\n") + 1,
         exports=[f.name for f in functions if f.is_exported] + [c.name for c in classes] # simplified export logic
     )

@@ -55,8 +55,14 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
     if pkg_node:
         package_name = _get_name(pkg_node, source_bytes)
     
-    # Prefix for all FQNs in this file will be based on the package
-    base_fqn = package_name if package_name else Path(file_path).stem
+    # FQN prefix MUST be the file_path (canonical make_fqn format,
+    # "<file_path>::<symbol>") so `fqn.split("::")[0]` yields the real file for
+    # recall scoring, read_symbol(file::symbol), and the agent's file resolution.
+    # Using the Go package name here (the old behavior) produced FQNs like
+    # "server::Upload", whose split prefix "server" never matches gold file paths
+    # like "internal/server/evaluation.go" → 0 recall on EVERY Go task. The
+    # package name is kept as metadata on the result, not in the FQN.
+    base_fqn = file_path
 
     def traverse(node: Node):
         if node.type == "import_declaration":
@@ -203,6 +209,6 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
         imports=imports,
         call_sites=call_sites,
         file_hash=_hash_text(source),
-        total_lines=source.count("\\n") + 1,
+        total_lines=source.count("\n") + 1,
         exports=[f.name for f in functions if f.is_exported] + [c.name for c in classes if c.name and c.name[0].isupper()]
     )

@@ -88,9 +88,12 @@ def extract_cpp(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
             cls_name_str = node_text(cls_name, source_bytes) if cls_name else ""
             if cls_name_str:
                 kind = NodeKind.CLASS if node.type == "class_specifier" else NodeKind.STRUCT
+                # file_path:: prefix (see go.py rationale); C++ namespace kept in
+                # the symbol part, not as the split-prefix.
                 ns = current_namespace()
-                fqn = f"{ns}::{cls_name_str}" if ns else cls_name_str
-                
+                ns_part = f"{ns}." if ns else ""
+                fqn = f"{file_path}::{ns_part}{cls_name_str}"
+
                 classes.append(RawClass(
                     name=cls_name_str,
                     fqn=fqn,
@@ -129,9 +132,9 @@ def extract_cpp(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
                 
             if func_name:
                 ns = current_namespace()
-                fqn_prefix = f"{ns}::" if ns else ""
-                
-                fqn = f"{fqn_prefix}{parent_cls}.{func_name}" if parent_cls else f"{fqn_prefix}{func_name}"
+                ns_part = f"{ns}." if ns else ""
+                fqn = (f"{file_path}::{ns_part}{parent_cls}.{func_name}"
+                       if parent_cls else f"{file_path}::{ns_part}{func_name}")
                 
                 block_node = _get_child_by_type(node, "compound_statement")
                 sig_text = ""
@@ -190,6 +193,6 @@ def extract_cpp(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
         imports=imports,
         call_sites=call_sites,
         file_hash=_hash_text(source),
-        total_lines=source.count("\\n") + 1,
+        total_lines=source.count("\n") + 1,
         exports=[]
     )

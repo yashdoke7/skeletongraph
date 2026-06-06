@@ -84,9 +84,11 @@ def extract_php(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
                     "trait_declaration": NodeKind.TRAIT
                 }
                 
-                ns_prefix = f"{current_ns}\\" if current_ns else ""
-                cls_fqn = f"{ns_prefix}{cls_name}"
-                
+                # file_path:: prefix (see go.py rationale); PHP namespace kept in
+                # the symbol part, not as the split-prefix.
+                ns_part = f"{current_ns}\\" if current_ns else ""
+                cls_fqn = f"{file_path}::{ns_part}{cls_name}"
+
                 new_class = RawClass(
                     name=cls_name,
                     fqn=cls_fqn,
@@ -128,8 +130,9 @@ def extract_php(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
                 if func_name == "__construct":
                     kind = NodeKind.CONSTRUCTOR
                 
-                ns_prefix = f"{current_ns}\\" if current_ns else ""
-                fqn = f"{ns_prefix}{current_class.name}.{func_name}" if current_class else f"{ns_prefix}{func_name}"
+                ns_part = f"{current_ns}\\" if current_ns else ""
+                fqn = (f"{file_path}::{ns_part}{current_class.name}.{func_name}"
+                       if current_class else f"{file_path}::{ns_part}{func_name}")
                 
                 func = RawFunction(
                     name=func_name,
@@ -173,6 +176,6 @@ def extract_php(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
         imports=imports,
         call_sites=call_sites,
         file_hash=_hash_text(source),
-        total_lines=source.count("\\n") + 1,
+        total_lines=source.count("\n") + 1,
         exports=[]
     )

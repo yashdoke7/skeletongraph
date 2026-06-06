@@ -85,9 +85,11 @@ def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         elif node.type == "class":
             cls_name = _get_name(node, source_bytes)
             if cls_name:
-                ns_prefix = f"{current_module}::" if current_module else ""
-                cls_fqn = f"{ns_prefix}{cls_name}"
-                
+                # file_path:: prefix (see go.py rationale); Ruby module kept in
+                # the symbol part, not as the split-prefix.
+                ns_part = f"{current_module}." if current_module else ""
+                cls_fqn = f"{file_path}::{ns_part}{cls_name}"
+
                 new_class = RawClass(
                     name=cls_name,
                     fqn=cls_fqn,
@@ -115,8 +117,9 @@ def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                 # We can't strictly grab a block, so we'll store the whole method text as body_text minus def line
                 body_text = node_text(node, source_bytes)
                 
-                ns_prefix = f"{current_module}::" if current_module else ""
-                fqn = f"{ns_prefix}{current_class.name}.{func_name}" if current_class else f"{ns_prefix}{func_name}"
+                ns_part = f"{current_module}." if current_module else ""
+                fqn = (f"{file_path}::{ns_part}{current_class.name}.{func_name}"
+                       if current_class else f"{file_path}::{ns_part}{func_name}")
                 
                 func = RawFunction(
                     name=func_name,
@@ -150,6 +153,6 @@ def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         imports=imports,
         call_sites=call_sites,
         file_hash=_hash_text(source),
-        total_lines=source.count("\\n") + 1,
+        total_lines=source.count("\n") + 1,
         exports=[]
     )
