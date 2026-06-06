@@ -43,7 +43,36 @@ REPOS_DIR = _DATA_ROOT / "repos"
 CACHE_DIR = _DATA_ROOT / "_repo_cache"
 OUT_PATH = EVAL_DIR / "datasets" / "stage0.jsonl"
 
-_DEF_RE = re.compile(r"\b(?:def|class)\s+([A-Za-z_]\w*)")
+# Multi-language enclosing-symbol extraction from the hunk-header context.
+# The text after the second `@@` in a hunk header is the enclosing decl, but its
+# keyword differs by language:
+#   Python:  def NAME(... | class NAME | async def NAME
+#   Go:      func NAME(... | func (r *T) NAME(... | type NAME ... | interface NAME
+#   JS/TS:   function NAME(... | const/let/var NAME = (... | NAME(...) {  (method)
+#   Java:    public/private ... NAME(... | class NAME | interface NAME
+# This is best-effort — Pro's multi-language hunks were silently dropping
+# gold_fqns for everything but Python (funcR@10 was `?` for go/js/ts).
+_DEF_RES = (
+    # Keyword-led declarations — keyword + identifier
+    re.compile(r"\b(?:async\s+def|def|class|func(?:\s*\([^)]*\))?|function|interface|type)\s+([A-Za-z_$][\w$]*)"),
+    # JS/TS arrow / function-expression assignment: const NAME = (...) => or = function(
+    re.compile(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?[\(<]|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*function\b"),
+    # Java/C#-style: visibility + (generics?) + returnType + NAME ( … )
+    re.compile(r"\b(?:public|private|protected|static|final|abstract|override)\s+(?:[\w<>,?\[\]\s]+\s+)?([A-Za-z_$][\w$]*)\s*\("),
+    # Bare method-in-class headers (TS/Java/C#): NAME(args) { or : Type {
+    re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*(?::\s*[\w<>,?\[\]|&\s]+)?\s*\{"),
+)
+
+
+def _extract_decl_name(ctx: str) -> str | None:
+    """Pick the first NAME captured by any language-pattern in the hunk context."""
+    for rx in _DEF_RES:
+        m = rx.search(ctx)
+        if m:
+            for g in m.groups():
+                if g:
+                    return g
+    return None
 
 
 # ── patch parsing ─────────────────────────────────────────────────────────
@@ -53,7 +82,9 @@ def parse_patch(patch: str) -> Tuple[List[str], List[str]]:
     """Return (gold_files, gold_fqns) from a unified-diff patch.
 
     Files are exact. FQNs are best-effort: the text after the second @@ in a
-    hunk header usually names the enclosing def/class.
+    hunk header usually names the enclosing def/class/func/function. Now
+    multi-language (Python/Go/JS/TS/Java) — previously Python-only, which is
+    why funcR@10 columns were `?` across non-Python Pro tasks.
     """
     files: List[str] = []
     fqns: List[str] = []
@@ -67,9 +98,9 @@ def parse_patch(patch: str) -> Tuple[List[str], List[str]]:
         elif line.startswith("@@") and current:
             # @@ -a,b +c,d @@ <context>
             ctx = line.split("@@", 2)[-1] if line.count("@@") >= 2 else ""
-            m = _DEF_RE.search(ctx)
-            if m:
-                fqns.append(f"{current}::{m.group(1)}")
+            name = _extract_decl_name(ctx)
+            if name:
+                fqns.append(f"{current}::{name}")
 
     return list(dict.fromkeys(files)), list(dict.fromkeys(fqns))
 
@@ -99,14 +130,38 @@ def setup_repo(repo: str, base_commit: str, task_id: str) -> Path | None:
             return None
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    rc = _run(["git", "-C", str(cache), "worktree", "add", "--detach",
-               str(dest.resolve()), base_commit], check=False)
+
+    def _try_worktree() -> int:
+        return _run(["git", "-C", str(cache), "worktree", "add", "--detach",
+                     str(dest.resolve()), base_commit], check=False)
+
+    # Progressive recovery for SWE-Bench-Pro: many base_commits are PR-head
+    # commits that aren't in the default branch's history. Try the cheap path
+    # first, fall back to wider/heavier fetches only when needed.
+    rc = _try_worktree()
     if rc != 0:
+        # (1) standard refresh — branches + tags
         _run(["git", "-C", str(cache), "fetch", "--all", "--tags"], check=False)
-        rc = _run(["git", "-C", str(cache), "worktree", "add", "--detach",
-                   str(dest.resolve()), base_commit], check=False)
+        rc = _try_worktree()
     if rc != 0:
-        print(f"  ! could not check out {base_commit[:10]} for {task_id}")
+        # (2) PR-head refs: many Pro tasks point at commits that live ONLY in
+        # refs/pull/*/head — the default fetch ignores those. This rescues
+        # most "could not check out <sha>" failures on protonmail/webclients,
+        # element-hq/element-web, ansible/ansible PR-style instances, etc.
+        _run(["git", "-C", str(cache), "fetch", "origin",
+              "+refs/pull/*/head:refs/remotes/origin/pr/*"], check=False)
+        rc = _try_worktree()
+    if rc != 0:
+        # (3) fetch the SHA directly — GitHub has uploadpack.allowAnySHA1InWant
+        # since 2017, so unreachable commits (closed-without-merge PRs) often
+        # still resolve. Last resort because it's the slowest.
+        _run(["git", "-C", str(cache), "fetch", "origin", base_commit],
+             check=False)
+        rc = _try_worktree()
+    if rc != 0:
+        print(f"  ! could not check out {base_commit[:10]} for {task_id} "
+              f"(tried: default, fetch-all, PR-refs, direct-SHA — commit "
+              f"likely deleted upstream)")
         return None
     return dest
 
@@ -182,6 +237,10 @@ def main() -> None:
             "query": inst.get("problem_statement", ""),
             "gold_files": gold_files,
             "gold_fqns": gold_fqns,
+            # SWE-bench Pro carries `repo_language` (e.g. JavaScript, Go); Verified
+            # is Python-only. Captured for the per-language breakdown; "python"
+            # default keeps Verified rows uniform.
+            "language": (inst.get("repo_language") or "python"),
         })
 
     with args.out.open("w", encoding="utf-8") as f:

@@ -450,6 +450,9 @@ class SGEngine:
             # seaborn returned 0 hits across all ablation arms because the
             # fallback that would have caught lexical-only matches never fired.
             enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", True),
+            # sg-rerank: BM25 recall pool reordered by SG structure (eval-v2 winner).
+            # Default True (product retrieval); SG_BM25_PRIMARY=0 reverts to lean sg.
+            bm25_primary=getattr(self._config, "bm25_primary", True),
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -766,6 +769,9 @@ class SGEngine:
             # seaborn returned 0 hits across all ablation arms because the
             # fallback that would have caught lexical-only matches never fired.
             enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", True),
+            # sg-rerank: BM25 recall pool reordered by SG structure (eval-v2 winner).
+            # Default True (product retrieval); SG_BM25_PRIMARY=0 reverts to lean sg.
+            bm25_primary=getattr(self._config, "bm25_primary", True),
         )
 
         # Apply file filter post-hoc

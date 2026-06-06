@@ -227,6 +227,13 @@ class SGConfig:
     # ablation arm sg-weakfallback after confirming: precision +85% (0.18→0.34),
     # same recall (0.68), rank 1.0 vs 2.0, −37% input tokens on 7B/30-task eval.
     enable_weak_entity_fallback: bool = True
+    # sg-rerank (DEFAULT product retrieval). BM25 supplies the wide RECALL pool
+    # always (not just as a fallback), then the structural ranker reorders it by
+    # centrality + entity bonus + lexical score, and read_symbol fetches only the
+    # chosen function bodies. This is the eval-v2 WINNER (best file+function recall
+    # at the lowest token cost). Set SG_BM25_PRIMARY=0 to fall back to the lean
+    # entity-first `sg` path.
+    bm25_primary: bool = True
 
     # ── Tier Routing ───────────────────────────────────────────────────
     enable_dynamic_model_routing: bool = True  # Adjust tier by complexity/confidence
@@ -437,6 +444,10 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
         ),
         "SG_ENABLE_BM25_FALLBACK": (
             "enable_bm25_fallback",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
+        "SG_BM25_PRIMARY": (
+            "bm25_primary",
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
         "SG_GRAPH_POLICY": ("graph_expansion_policy", str),

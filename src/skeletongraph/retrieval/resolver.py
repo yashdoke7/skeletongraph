@@ -86,6 +86,7 @@ def resolve_context(
     graph_expansion_policy: str = "gated",
     enable_centrality_rerank: bool = True,
     enable_weak_entity_fallback: bool = False,
+    bm25_primary: bool = False,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
@@ -207,6 +208,24 @@ def resolve_context(
             else:
                 confidence = "LOW"
                 confidence_reason = "No entity matches; keyword fallback disabled"
+
+    # sg-rerank (the WINNING composition, default product retrieval): BM25 supplies
+    # the wide RECALL pool — always, not just as a fallback — and the structural
+    # ranker below (centrality + entity bonus + normalized lexical score) REORDERS
+    # it. This is "generate-then-rerank": bm25's recall with SG's rank, at SG's
+    # token cost (read_symbol fetches only the chosen function bodies). Entity
+    # matches resolved above are kept and get the highest structural score; the
+    # BM25 pool widens recall around them. Gated by `bm25_primary` so the lean
+    # entity-first `sg` path and the ablations keep their original behavior.
+    if bm25_primary:
+        _pool = _bm25_fallback(prompt, store, top_k=max(top_n, 25))
+        if _pool:
+            _pmax = max(s for _, s in _pool) or 1.0
+            for _f, _s in _pool:
+                _lexical_scores.setdefault(_f, _s / _pmax)
+            target_fqns.update(_f for _f, _ in _pool)
+            if match_source in ("none", ""):
+                match_source = "bm25"
 
     # Step 4: Build ranker with hub scores
     ranker = Ranker(store.graph, centrality_enabled=enable_centrality_rerank)
@@ -361,6 +380,22 @@ def _resolve_seed_fqns(seed_fqns: Set[str], store: IndexStore) -> Set[str]:
         alt_seed = f"src/{seed}" if not seed.startswith("src/") else seed.replace("src/", "", 1)
         if alt_seed in store.skeleton_table:
             resolved.add(alt_seed)
+            continue
+        
+        # Support Go/TS prefixes
+        pfx_found = False
+        for pfx in ("cmd/", "pkg/", "internal/", "lib/", "dist/", "packages/"):
+            if seed.startswith(pfx):
+                s2 = seed.replace(pfx, "", 1)
+                if s2 in store.skeleton_table:
+                    resolved.add(s2)
+                    pfx_found = True
+            else:
+                s2 = f"{pfx}{seed}"
+                if s2 in store.skeleton_table:
+                    resolved.add(s2)
+                    pfx_found = True
+        if pfx_found:
             continue
 
         seed_name = seed.split("::")[-1]
@@ -692,7 +727,7 @@ def _auto_include_constructors(
         if c.skeleton.kind.auto_include_constructor
     ]
     for class_fqn in class_fqns:
-        # Constructor FQN = class_fqn + ".__init__" (Python) or ".constructor" (TS)
+        # Python/TS/JS instance constructors
         for suffix in (".__init__", ".constructor"):
             ctor_fqn = class_fqn + suffix
             if ctor_fqn in store.skeleton_table and ctor_fqn not in candidates:
@@ -700,11 +735,31 @@ def _auto_include_constructors(
                 candidates[ctor_fqn] = RankedCandidate(
                     skeleton=sk, tier=Tier.TIER2, distance=0,
                     score=ranker.score(
-                        ctor_fqn, sk, 0, "Auto-included constructor",
-                        target_file,
+                        ctor_fqn, sk, 0, "Auto-included constructor", target_file,
                     ),
                     reason="Auto-included constructor",
                 )
+
+        # Go convention: NewStructName() or newStructName() standalone functions
+        # Rust convention: StructName::new()
+        class_name = class_fqn.split("::")[-1].split(".")[-1]
+        go_new1 = f"New{class_name}"
+        go_new2 = f"new{class_name}"
+        file_path = class_fqn.split("::")[0]
+        
+        for name in (go_new1, go_new2, "new"):
+            # Rust uses file::Struct.new or file::new
+            # Go uses file::NewStruct
+            for possible_fqn in (f"{file_path}::{name}", f"{class_fqn}.{name}"):
+                if possible_fqn in store.skeleton_table and possible_fqn not in candidates:
+                    sk = store.skeleton_table[possible_fqn]
+                    candidates[possible_fqn] = RankedCandidate(
+                        skeleton=sk, tier=Tier.TIER2, distance=0,
+                        score=ranker.score(
+                            possible_fqn, sk, 0, "Auto-included constructor", target_file,
+                        ),
+                        reason="Auto-included constructor",
+                    )
 
 
 def _has_anaphora(prompt: str) -> bool:
