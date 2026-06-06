@@ -1,459 +1,181 @@
 #!/bin/bash
 set -euo pipefail
 # ==================================================================================
-# SkeletonGraph — AMD Developer Cloud MI300X Runbook (v3 — SMOKE-FIRST)
-# GPU: AMD MI300X 192 GB VRAM   |  Credits: AMD Developer Cloud $100 grant
-# Model: Qwen/Qwen2.5-Coder-32B-Instruct (BF16, ~64 GB VRAM, fits single GPU)
+# SkeletonGraph — AMD MI300X Runbook (v5 — BATCHED, WINDOW-PRECISE)
+# GPU: AMD MI300X 192 GB | Budget: $100 ≈ 50 GPU-h | Agent model: Qwen2.5-Coder-32B
 #
-# This file is COPY-PASTE ONLY — you (the user) read it block by block and paste
-# into a tmux session on AMD. It is NOT meant to run end-to-end as a script.
-# ==================================================================================
+# 120B is NOT served here (done via NIM = tag `nemotron_v2`). AMD serves 32B only.
+# Mirrors docs/EVAL_PLAN_FINAL.md §7/§9. Copy-paste BLOCK by BLOCK into tmux windows.
 #
-# STAGED RUN PLAN (smoke first; only spend the budget if smoke passes):
+# BATCHES (each a tmux window/session):
+#   SETUP  → pull, deps, model, datasets, comparator envs, PREBUILD graphify graphs
+#   SMOKE  → 10 tasks (a slice of workshop) = THE GATE
+#   WORKSHOP → baselines+method (win1) ∥ cbmem (win2) ∥ graphify (win3) ∥ aider (win4),
+#              THEN ablations (win5). Both benchmarks, 100 tasks.
+#   CONFERENCE → same windows, --n 300 Verified / 150 Pro, headline+comparators; + Claude Code
+#   VERIFY (rolling) → after each arm-set, verify it in win6 while the next set runs.
 #
-#   BLOCK 0   Setup (apt, pip, clone, dataset prep, dependencies)       ~$1-2
-#   BLOCK 1   Start vLLM server (background; runs throughout)            free
-#   BLOCK 2   SMOKE 7 arms × 10 tasks (THE GATE — pass before scaling)  ~$1
-#   BLOCK 3   verify SMOKE pass@1 + inspect SUMMARY.md before continuing
-#   BLOCK 4a  1a-workshop 5 arms × 150 tasks (in tmux window 0)         ~$10-14
-#   BLOCK 4b  1b-conference 5 ablations × 150 tasks (window 1, parallel) ~$10-14
-#   BLOCK 4c  sg-noagent single-shot × 150                              ~$0.80
-#   BLOCK 5   cbmem competitor × 150                                    ~$3
-#   BLOCK 6   ContextBench (7 arms × 60 tasks)                          ~$4-6
-#   BLOCK 7   3-seed variance appendix (4 arms × 20 tasks × 3)          ~$3
-#   BLOCK 8   graphify × 150 (LAST — only if smoke + 1a both clean)     ~$3
-#   BLOCK 9   verify ALL via Docker harness                             ~$4-8
-#   BLOCK 10  final aggregate + figures + push
+# WINDOW LAYOUT (total in-flight ≈ 16–20; vLLM is the shared bottleneck):
+#   win0  vLLM 32B server (leave running)
+#   win1  headline+method  sg-env        --workers 8
+#   win2  cbmem            sg-env+.exe    --workers 4
+#   win3  graphify         graphify-venv  --workers 4   (graphs prebuilt → fast)
+#   win4  aider            aider-venv     --workers 4
+#   win5  ablations (after win1–4 free)  sg-env  --workers 12–16
+#   win6  rolling verify (Docker/CPU) + monitor
 #
-#   EXPECTED TOTAL: $40-55 of the $100 grant. Headroom: $45-60.
-#
-# WORKERS — 192 GB VRAM is overkill for 32B BF16; spend it on concurrency:
-#   --workers 16 to start; bump to 24 if `rocm-smi` shows GPU < 80% busy.
-#   cbmem/graphify are CPU/disk-bound — use --workers 4 for those.
-#
-# ROCm vLLM caveat:
-#   If `pip install vllm` errors on AMD wheels, follow Option B in 0.6 below
-#   (AMD's prebuilt ROCm wheel). Test on a small instance FIRST if unsure —
-#   ~$0.50 of MI300X time to verify vLLM boots is much cheaper than $20 wasted.
-# ==================================================================================
-#
-# QUICK OPERATION GUIDE (READ ONCE)
-# ─────────────────────────────────
-# Connect from Windows PowerShell:
-#   ssh root@<AMD_DC_HOST> -p <PORT>
-#
-# Start tmux on AMD (do this ONCE per server session):
-#   tmux new-session -s sg
-#
-# Detach (laptop can be closed; jobs keep running on AMD):
-#   Ctrl+B, then D
-#
-# Reconnect later:
-#   ssh root@<AMD_DC_HOST> -p <PORT>
-#   tmux attach -t sg
-#
-# Paste the helper-function block (BLOCK A) into your session ONCE on attach.
-# Then run `ensure_vllm` to confirm the server is up before resuming any block.
-#
-# Open a second window (for running 1a and 1b in PARALLEL):
-#   Ctrl+B c          — new window
-#   Ctrl+B 0 / 1      — switch window 0 / window 1
-#   Ctrl+B [          — scroll mode (q to exit)
-#
-# Kill session when all done:
-#   tmux kill-session -t sg
+# Why baselines+comparators CONCURRENT then ablations ALONE: comparators are CPU/disk
+# heavy (cbmem index, aider context, graphify queries) so they interleave with GPU
+# generations and keep vLLM saturated; ablations are pure-GPU → run them after, alone.
 # ==================================================================================
 
 REPO_DIR="${WORKSPACE_DIR:-/workspace}/skeletongraph"
 MODELS_DIR="${WORKSPACE_DIR:-/workspace}/models"
-GITHUB_USER="yashdoke7"
-GITHUB_REPO="skeletongraph"
+GITHUB_USER="yashdoke7"; GITHUB_REPO="skeletongraph"
 GITHUB_PAT="${GITHUB_PAT:-YOUR_PAT_HERE}"
 GITHUB_URL="https://${GITHUB_USER}:${GITHUB_PAT}@github.com/${GITHUB_USER}/${GITHUB_REPO}.git"
-
 PY="${PYTHON:-python3}"
-
+HEADLINE="sg,sg-rerank,bm25,grep,hybrid,none"
+ABLATIONS="sg-chain,sg-embed,sg-seed,summary-dense,sg-nograph,sg-norerank"
 
 # ==================================================================================
-# BLOCK A — HELPER FUNCTIONS (paste once per tmux attach)
+# BLOCK A — HELPERS (paste once per tmux attach)
 # ==================================================================================
-
-ensure_vllm() {
-  curl -s http://127.0.0.1:8000/v1/models > /dev/null 2>&1 && {
-    echo "vLLM OK: $(curl -s http://127.0.0.1:8000/v1/models | python3 -c 'import sys,json; d=json.load(sys.stdin); [print("  model:", m["id"]) for m in d.get("data",[])]' 2>/dev/null)"
-    return 0
-  }
-  echo "vLLM not running — start it in tmux window 0 (BLOCK 1)."
-  return 1
-}
-
-push_results() {
-  local msg="${1:-checkpoint}"
-  echo "=== Pushing results: $msg ==="
-  cd "$REPO_DIR"
-  git add -f eval/results/ 2>/dev/null || true
-  git diff --cached --quiet && { echo "Nothing new to commit."; return 0; }
-  git commit -m "results: $msg [$(date '+%Y-%m-%d %H:%M')]"
-  git pull --rebase origin main 2>/dev/null || echo "(pull warning — continuing)"
-  git push origin main
-  echo "=== Pushed: $msg ==="
-}
-
-show_progress() {
-  local run_dir="${1:-$REPO_DIR/eval/results/agent/$SG_EVAL_RUN_TAG}"
-  echo "=== Progress: $run_dir ==="
-  python3 - "$run_dir" << 'PY'
-import sys, json, os, collections
-d = sys.argv[1]
-if not os.path.isdir(d):
-    print("  (no results yet)")
-    sys.exit(0)
-by_arm = collections.defaultdict(lambda: {"total": 0, "done": 0, "errors": 0})
+ensure_vllm(){ curl -s http://127.0.0.1:8000/v1/models >/dev/null 2>&1 && { echo "vLLM OK"; return 0; }; echo "start vLLM (win0, BLOCK 1)"; return 1; }
+set_run_tag(){ export SG_EVAL_RUN_TAG="$1" SG_EVAL_API_BASE="http://127.0.0.1:8000/v1" SG_EVAL_API_KEY="EMPTY" SG_EVAL_MODEL="Qwen/Qwen2.5-Coder-32B-Instruct"; echo "tag=$SG_EVAL_RUN_TAG dataset=${DS:-<unset>}"; }
+push_results(){ cd "$REPO_DIR"; git add -f eval/results/ 2>/dev/null||true; git diff --cached --quiet && { echo "nothing new"; return 0; }; git commit -m "results($SG_EVAL_RUN_TAG): ${1:-checkpoint} [$(date '+%m-%d %H:%M')]"; git pull --rebase origin main 2>/dev/null||true; git push origin main && echo "pushed: ${1:-checkpoint}"; }
+show_progress(){ $PY - "${1:-$REPO_DIR/eval/results/agent/$SG_EVAL_RUN_TAG}" <<'PY'
+import sys,json,os,collections
+d=sys.argv[1]
+if not os.path.isdir(d): print("  (none yet)"); sys.exit()
+b=collections.defaultdict(lambda:{"n":0,"done":0,"err":0})
 for f in os.listdir(d):
     if not f.endswith(".json") or f.startswith("_"): continue
-    try: r = json.loads(open(os.path.join(d, f)).read())
-    except: continue
-    arm = r.get("arm", "?")
-    by_arm[arm]["total"] += 1
-    if r.get("stopped") in ("submit", "max_turns"): by_arm[arm]["done"] += 1
-    if r.get("stopped") == "error": by_arm[arm]["errors"] += 1
-for arm, s in sorted(by_arm.items()):
-    print(f"  {arm:25} {s['done']:3d}/{s['total']:3d} done  {s['errors']} errors")
+    try:r=json.loads(open(os.path.join(d,f)).read())
+    except:continue
+    a=r.get("arm","?");b[a]["n"]+=1
+    if r.get("stopped") in("submit","max_turns"):b[a]["done"]+=1
+    if r.get("stopped")=="error":b[a]["err"]+=1
+for a,s in sorted(b.items()):print(f"  {a:14}{s['done']:3d}/{s['n']:3d}  {s['err']}err")
 PY
 }
-
-set_run_tag() {
-  export SG_EVAL_RUN_TAG="$1"
-  export SG_EVAL_API_BASE="http://127.0.0.1:8000/v1"
-  export SG_EVAL_API_KEY="EMPTY"
-  export SG_EVAL_MODEL="Qwen/Qwen2.5-Coder-32B-Instruct"
-  echo "Run tag: $SG_EVAL_RUN_TAG  |  model: $SG_EVAL_MODEL"
-}
-
+# Prebuild graphify graphs ONCE per unique repo in a dataset, on the LOCAL 32B vLLM.
+# Times + counts the extraction cost (counted against graphify in the paper).
+graphify_prebuild(){ cd "$REPO_DIR"; source .venv-graphify/bin/activate
+  export OLLAMA_BASE_URL="http://127.0.0.1:8000/v1" OLLAMA_MODEL="Qwen/Qwen2.5-Coder-32B-Instruct" OLLAMA_API_KEY="EMPTY" GRAPHIFY_OLLAMA_PARALLEL=1
+  $PY -m eval.scripts.graphify_prebuild "$1"; deactivate; }
 
 # ==================================================================================
-# BLOCK 0 — ONE-TIME SETUP (~15-30 min total)
-# Paste each step manually; verify before proceeding.
+# BLOCK 0 — SETUP (can split across 2 terminals: T1 model+deps, T2 datasets+envs)
 # ==================================================================================
-
-# 0.1  Verify storage (must be ≥ 200 GB free)
-df -h | head -5
-
-# 0.2  System packages
+# T1:
+df -h | head -5                                           # need >= 250 GB free
 apt-get update -qq && apt-get install -y git tmux htop curl python3-pip python3-venv
-
-# 0.3  Clone the repo (first time only)
-mkdir -p "$(dirname "$REPO_DIR")"
-git clone "$GITHUB_URL" "$REPO_DIR"
-cd "$REPO_DIR"
-# OR if repo already exists:
-# cd "$REPO_DIR" && git pull origin main
-
-# 0.4  Git identity
-git config user.email "yashdoke215@gmail.com"
-git config user.name "Yash Doke"
-
-# 0.5  Python dependencies
-pip3 install -r requirements.txt -q
-pip3 install huggingface-hub sentence-transformers scikit-learn datasets -q
-
-# 0.6  Install vLLM with ROCm (AMD GPU) support
-# Option A — standard pip (vLLM v0.8+ ships ROCm wheels):
-pip3 install vllm -q
-
-# Option B — if Option A fails (ROCm version mismatch), use AMD's prebuilt:
-# pip3 install vllm --extra-index-url https://download.pytorch.org/whl/rocm6.2
-
-# 0.7  Download the model to local storage (one-time, ~65 GB, 15-20 min)
+mkdir -p "$(dirname "$REPO_DIR")"; git clone "$GITHUB_URL" "$REPO_DIR" || (cd "$REPO_DIR" && git pull origin main)
+cd "$REPO_DIR"; git config user.email "yashdoke215@gmail.com"; git config user.name "Yash Doke"
+pip3 install -r requirements.txt swebench huggingface-hub sentence-transformers scikit-learn datasets -q
+pip3 install vllm -q     # ROCm mismatch → --extra-index-url https://download.pytorch.org/whl/rocm6.2
 mkdir -p "$MODELS_DIR"
-python3 -c "
-from huggingface_hub import snapshot_download
-snapshot_download(
-    'Qwen/Qwen2.5-Coder-32B-Instruct',
-    local_dir='$MODELS_DIR/Qwen2.5-Coder-32B-Instruct',
-    local_dir_use_symlinks=False
-)
-print('Model downloaded.')
-"
-ls "$MODELS_DIR/Qwen2.5-Coder-32B-Instruct/"
-
-# 0.8  Build the 150-task SWE-bench dataset (clones ~150 repos; ~30-60 min)
-cd "$REPO_DIR"
-$PY eval/make_dataset.py --n 150 --seed 42
-$PY -c "import json; ts=list(map(json.loads,open('eval/datasets/stage0.jsonl').readlines())); print(len(ts),'tasks')"
-
-# 0.9  Build the 60-task ContextBench dataset (HF pull; ~10-30 min)
-$PY -m eval.scripts.extract_contextbench --inspect
-$PY -m eval.scripts.extract_contextbench --n 60 --lang python \
-    --out eval/datasets/contextbench.jsonl
-$PY -c "import json; ts=list(map(json.loads,open('eval/datasets/contextbench.jsonl').readlines())); print(len(ts),'ContextBench tasks')"
-
-# 0.10 Install cbmem binary (Linux, AMD DC)
-#   Option A — pre-built Linux x86_64 binary:
-curl -L https://github.com/seawinde/codebase-memory-mcp/releases/latest/download/cbmem-linux-amd64 \
-    -o /usr/local/bin/codebase-memory-mcp
-chmod +x /usr/local/bin/codebase-memory-mcp
-export CBMEM_BIN="/usr/local/bin/codebase-memory-mcp"
-"$CBMEM_BIN" --version  # confirm
-
-# 0.11 Install graphify (Python module path; binary path is fallback)
-pip3 install graphifyy -q || echo "(graphifyy install failed — backend will use CLI path if GRAPHIFY_BIN is set)"
-
-# 0.12 Selftest both external backends BEFORE running the smoke
-$PY -m eval.backends.cbmem    --selftest eval/datasets/repos/django__django-14725 || echo "cbmem selftest FAILED — fix before stage 5/6"
-$PY -m eval.backends.graphify --selftest eval/datasets/repos/django__django-14725 || echo "graphify selftest FAILED — fix or skip arm; safe to proceed without"
-
-echo "Setup complete. Proceed to BLOCK 1."
-
+$PY -c "from huggingface_hub import snapshot_download as d; d('Qwen/Qwen2.5-Coder-32B-Instruct', local_dir='$MODELS_DIR/Qwen2.5-Coder-32B-Instruct', local_dir_use_symlinks=False)"
+# T2 (parallel): comparator envs
+curl -L https://github.com/seawinde/codebase-memory-mcp/releases/latest/download/cbmem-linux-amd64 -o /usr/local/bin/codebase-memory-mcp && chmod +x /usr/local/bin/codebase-memory-mcp
+python3 -m venv .venv-aider    && .venv-aider/bin/pip install aider-chat -q
+python3 -m venv .venv-graphify && .venv-graphify/bin/pip install graphifyy openai -q
+echo "Setup done → BLOCK 1."
 
 # ==================================================================================
-# BLOCK 1 — START vLLM SERVER (dedicated tmux window — keeps running throughout)
-# Open a NEW tmux window: Ctrl+B c.  Run these in that window; leave it open.
+# BLOCK 1 — vLLM 32B (win0; leave running)
 # ==================================================================================
-
-cd "$REPO_DIR"
-rocm-smi 2>/dev/null || python3 -c "import torch; print('CUDA/ROCm available:', torch.cuda.is_available(), '| devices:', torch.cuda.device_count())"
-
+cd "$REPO_DIR"; rocm-smi 2>/dev/null || $PY -c "import torch;print('ROCm:',torch.cuda.is_available())"
 python3 -m vllm.entrypoints.openai.api_server \
-    --model "$MODELS_DIR/Qwen2.5-Coder-32B-Instruct" \
-    --tensor-parallel-size 1 \
-    --max-model-len 131072 \
-    --gpu-memory-utilization 0.90 \
-    --dtype bfloat16 \
-    --enable-auto-tool-choice \
-    --tool-call-parser hermes \
-    --port 8000 \
-    > ~/vllm.log 2>&1 &
-echo "vLLM starting (log: ~/vllm.log) ... waiting 90s"
+  --model "$MODELS_DIR/Qwen2.5-Coder-32B-Instruct" --served-model-name "Qwen/Qwen2.5-Coder-32B-Instruct" \
+  --tensor-parallel-size 1 --max-model-len 131072 --gpu-memory-utilization 0.90 --dtype bfloat16 \
+  --enable-auto-tool-choice --tool-call-parser hermes --port 8000 > ~/vllm.log 2>&1 &
 sleep 90 && ensure_vllm
 
-# Switch back to main eval window: Ctrl+B 0
-
-
 # ==================================================================================
-# BLOCK 2 — SMOKE: 7 arms × 10 tasks  (THE GATE before any big spend)
-# ~1-1.5 hours wall time at --workers 16; ≈ $1 of GPU.
-# If smoke arms look healthy AND verify works, proceed to BLOCK 4. If anything
-# is broken (errored arms, empty patches, vLLM crashes), STOP and fix.
+# BLOCK 2 — DATASETS + PREBUILDS + background verify-image prefetch (win5 early)
 # ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_swebench"
-
-echo "=== 0-SMOKE START $(date) ==="
-# 7 arms × first 10 tasks. cbmem/graphify CPU-bound — separate command below.
-$PY -m eval.agent.run_stage --stage 0-smoke --limit 10 --workers 16 \
-    --skip-arms cbmem,graphify
-# cbmem + graphify on the same 10 tasks (lower workers — they hit disk/CPU)
-$PY -m eval.agent.run_stage --stage 0-smoke --limit 10 --workers 4 \
-    --only-arms cbmem,graphify
-
-show_progress
-push_results "0-smoke complete (10 tasks × 7 arms)"
-
-
-# ==================================================================================
-# BLOCK 3 — SMOKE VERIFY (pass@1 via SWE-bench Docker; the GATE check)
-# Requires Docker. If Docker isn't on this box, run BLOCK 3 on a separate
-# CPU pod against the cloned predictions JSONLs.
-# ==================================================================================
-
-pip3 install swebench -q
-$PY -m eval.agent.verify --stage 0-smoke --run-tag qwen32b_smoke
-$PY -m eval.agent.aggregate --stage 0-smoke
-push_results "smoke verify done"
-
-# READ THE SUMMARY.MD. If pass@1 is plausible (e.g. sg ≥ bm25 on edited-gold,
-# none < everyone else, hybrid completes without 90%+ errors), continue.
-# If anything is wildly off, fix BEFORE BLOCK 4 — that's the whole point.
-
-
-# ==================================================================================
-# BLOCK 4a — STAGE 1a-WORKSHOP (tmux window 0)
-# 5 arms × 150 tasks = 750 runs; ~3-4 GPU-hrs at --workers 16.
-# Chunks of 50 with per-chunk push (results survive crashes).
-# ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_swebench"
-
-echo "=== 1a-WORKSHOP START $(date) ==="
-$PY -m eval.agent.run_stage --stage 1a-workshop --limit 50  --workers 16
-show_progress && push_results "1a-workshop 50/150 done"
-$PY -m eval.agent.run_stage --stage 1a-workshop --limit 100 --workers 16
-show_progress && push_results "1a-workshop 100/150 done"
-$PY -m eval.agent.run_stage --stage 1a-workshop --limit 150 --workers 16
-$PY -m eval.agent.aggregate
-echo "=== 1a-WORKSHOP DONE $(date) ==="
-push_results "1a-workshop 150/150 COMPLETE"
-
-
-# ==================================================================================
-# BLOCK 4b — STAGE 1b-CONFERENCE (tmux window 1 — START SAME TIME AS 4a)
-# 5 ablation arms × 150 tasks = 750 runs; ~3-4 GPU-hrs (parallel with 4a).
-# Switch to window 1: Ctrl+B c (or Ctrl+B 1 if already open).
-# ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_swebench"
-
-echo "=== 1b-CONFERENCE START $(date) ==="
-$PY -m eval.agent.run_stage --stage 1b-conference --limit 50  --workers 16
-push_results "1b 50/150 done"
-$PY -m eval.agent.run_stage --stage 1b-conference --limit 100 --workers 16
-push_results "1b 100/150 done"
-$PY -m eval.agent.run_stage --stage 1b-conference --limit 150 --workers 16
-$PY -m eval.agent.aggregate
-echo "=== 1b-CONFERENCE DONE $(date) ==="
-push_results "1b-conference 150/150 COMPLETE"
-
-
-# ==================================================================================
-# BLOCK 4c — SINGLE-SHOT sg-noagent (after 4a+4b finish; cheap, parallelisable)
-# ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_swebench"
-echo "=== sg-noagent START $(date) ==="
-$PY -m eval.agent.run_singleshot --all
-echo "=== sg-noagent DONE $(date) ==="
-push_results "sg-noagent single-shot done"
-
-
-# ==================================================================================
-# BLOCK 5 — cbmem competitor on 150 tasks (CPU/disk-bound, --workers 4)
-# ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_swebench"
-export CBMEM_BIN="/usr/local/bin/codebase-memory-mcp"
-
-echo "=== 2-competitor cbmem START $(date) ==="
-$PY -m eval.agent.run_stage --stage 2-competitor --limit 50  --workers 4
-push_results "cbmem 50/150 done"
-$PY -m eval.agent.run_stage --stage 2-competitor --limit 100 --workers 4
-push_results "cbmem 100/150 done"
-$PY -m eval.agent.run_stage --stage 2-competitor --limit 150 --workers 4
-$PY -m eval.agent.aggregate
-echo "=== 2-competitor cbmem DONE $(date) ==="
-push_results "cbmem 150/150 COMPLETE"
-
-
-# ==================================================================================
-# BLOCK 6 — ContextBench (7 arms × 60 tasks, separate run tag)
-# Includes cbmem + graphify so the graph-competitor comparison spans both benchmarks.
-# ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_contextbench"
-
-echo "=== ContextBench START $(date) ==="
-# Baseline arms + SG: GPU-bound, --workers 16
-$PY -m eval.agent.run_stage --stage contextbench --limit 20 --workers 16 \
-    --dataset eval/datasets/contextbench.jsonl --skip-arms cbmem,graphify
-$PY -m eval.agent.run_stage --stage contextbench --limit 40 --workers 16 \
-    --dataset eval/datasets/contextbench.jsonl --skip-arms cbmem,graphify
-$PY -m eval.agent.run_stage --stage contextbench --limit 60 --workers 16 \
-    --dataset eval/datasets/contextbench.jsonl --skip-arms cbmem,graphify
-push_results "contextbench (5 GPU arms) 60/60 done"
-
-# cbmem + graphify on the same 60 tasks (CPU-bound, --workers 4)
-$PY -m eval.agent.run_stage --stage contextbench --limit 60 --workers 4 \
-    --dataset eval/datasets/contextbench.jsonl --only-arms cbmem,graphify
-push_results "contextbench (cbmem+graphify) 60/60 done"
-
-$PY -m eval.agent.aggregate
-echo "=== ContextBench DONE $(date) ==="
-
-# Offline retrieval eval (no LLM, instant)
-$PY eval/retrieval_eval.py --dataset eval/datasets/contextbench.jsonl
-
-
-# ==================================================================================
-# BLOCK 7 — VARIANCE APPENDIX (4 arms × 20 tasks × 3 seeds = 240 runs)
-# ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_swebench_variance"
-
-echo "=== variance appendix START $(date) ==="
-$PY -m eval.agent.run_stage --stage variance --workers 16
-$PY -m eval.agent.aggregate --stage variance
-echo "=== variance DONE $(date) ==="
-push_results "variance appendix COMPLETE"
-
-
-# ==================================================================================
-# BLOCK 8 — GRAPHIFY × 150  (LAST — only after smoke + 1a are clean)
-# ==================================================================================
-
-cd "$REPO_DIR" && ensure_vllm
-set_run_tag "qwen32b_swebench"
-
-# Selftest one more time after smoke to confirm graphify is stable
-$PY -m eval.backends.graphify --selftest eval/datasets/repos/django__django-14725
-
-echo "=== graphify START $(date) ==="
-$PY -m eval.agent.run_stage --stage 2-competitor --limit 50  --workers 4 --only-arms graphify
-push_results "graphify 50/150 done"
-$PY -m eval.agent.run_stage --stage 2-competitor --limit 100 --workers 4 --only-arms graphify
-push_results "graphify 100/150 done"
-$PY -m eval.agent.run_stage --stage 2-competitor --limit 150 --workers 4 --only-arms graphify
-$PY -m eval.agent.aggregate
-echo "=== graphify DONE $(date) ==="
-push_results "graphify 150/150 COMPLETE"
-
-
-# ==================================================================================
-# BLOCK 9 — PASS@1 VERIFY for everything (SWE-bench Docker harness)
-# ==================================================================================
-
-pip3 install swebench -q
-
-# SWE-bench arms
-$PY -m eval.agent.verify --stage 1a-workshop    --run-tag qwen32b_swebench
-$PY -m eval.agent.verify --stage 1b-conference  --run-tag qwen32b_swebench
-$PY -m eval.agent.verify --stage 2-competitor   --run-tag qwen32b_swebench  # cbmem + graphify
-$PY -m eval.agent.verify --stage variance       --run-tag qwen32b_swebench_variance
-
-# ContextBench arms — verify.py's --dataset flag is an HF dataset name, not a
-# local jsonl. ContextBench tasks may or may not be on SWE-bench's HF Verified
-# split; if not, score them offline against the gold patches in
-# contextbench.jsonl rather than via the SWE-bench Docker harness:
-#   $PY eval/retrieval_eval.py --dataset eval/datasets/contextbench.jsonl
-# Once a HF SWE-bench-compatible mirror of ContextBench is identified, replace
-# the line below with `--dataset <hf-name>`.
-# $PY -m eval.agent.verify --stage contextbench --run-tag qwen32b_contextbench
-
-# Final aggregate with pass@1 filled in
-$PY -m eval.agent.aggregate
-push_results "all verified — pass@1 + McNemar in SUMMARY.md"
-
-
-# ==================================================================================
-# BLOCK 10 — FIGURES + DOWNLOAD + FINAL PUSH
-# ==================================================================================
-
 cd "$REPO_DIR"
-$PY -m eval.agent.plots
-
-git add -f eval/results/ eval/figures/ 2>/dev/null || true
-git commit -m "results: all stages complete [$(date '+%Y-%m-%d')]" 2>/dev/null || true
-git push origin main
-
-zip -r ~/sg_results_$(date +%Y%m%d).zip eval/results/ eval/figures/
-echo "Download from: ~/sg_results_$(date +%Y%m%d).zip"
-
+$PY eval/make_dataset.py --n 300 --seed 42 --out eval/datasets/swebench_verified.jsonl   # 300 superset; --limit slices it
+$PY eval/make_dataset.py --split ScaleAI/SWE-bench_Pro --n 150 --seed 42 --out eval/datasets/swebench_pro.jsonl  # KeyError→add field adapter
+# Prebuild graphify graphs ONCE per unique repo (local 32B, fast, no RPD). Reused by 32B AND 120B.
+graphify_prebuild eval/datasets/swebench_verified.jsonl
+graphify_prebuild eval/datasets/swebench_pro.jsonl
+# (Optional) tar the graphs to reuse on the NIM/120B machine — avoids re-extracting there:
+#   tar czf ~/graphify_graphs.tgz $(find eval/datasets -type d -name graphify-out)
+# Background: prefetch SWE-bench verify Docker images (huge; do it now, not at verify time)
+nohup $PY -m swebench.harness.prepare_images --dataset_name princeton-nlp/SWE-bench_Verified --split test --max_workers 8 > ~/prefetch_verified.log 2>&1 &
 
 # ==================================================================================
-# MONITORING (run in a separate tmux window while eval is running)
+# BLOCK 3 — SMOKE GATE (10 tasks; ~$0.20). Abort + fix if any arm wedges.
+# ==================================================================================
+cd "$REPO_DIR" && ensure_vllm; export DS=eval/datasets/swebench_verified.jsonl
+set_run_tag "amd_32b_verified"
+$PY -m eval.agent.run_stage --stage final-v2 --dataset $DS --limit 10 --workers 16 --only-arms $HEADLINE
+show_progress    # sanity: none < others, no arm 90%+ errors
+
+# ==================================================================================
+# BLOCK 4 — WORKSHOP (100 tasks, BOTH benchmarks). Run per benchmark.
+#   Phase 1: win1 headline+method  ∥  win2 cbmem  ∥  win3 graphify  ∥  win4 aider
+#   Phase 2: win5 ablations (after win1–4 done)
+#   Set BENCH/DS/TAG, then paste the matching window commands.
+# ==================================================================================
+# --- Verified ---
+export DS=eval/datasets/swebench_verified.jsonl; set_run_tag "amd_32b_verified"; LIM="--limit 100"
+# win1: $PY -m eval.agent.run_stage --stage final-v2 --dataset $DS $LIM --workers 8 --only-arms $HEADLINE
+# win2: $PY -m eval.agent.run_stage --stage final-comparators --dataset $DS $LIM --workers 4 --only-arms cbmem
+# win3: source .venv-graphify/bin/activate; OLLAMA_BASE_URL=http://127.0.0.1:8000/v1 OLLAMA_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct OLLAMA_API_KEY=EMPTY GRAPHIFY_OLLAMA_PARALLEL=1 \
+#       SG_EVAL_RUN_TAG=amd_32b_verified SG_EVAL_API_BASE=http://127.0.0.1:8000/v1 SG_EVAL_API_KEY=EMPTY SG_EVAL_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct \
+#       $PY -m eval.agent.run_stage --stage final-comparators --dataset $DS $LIM --workers 4 --only-arms graphify; deactivate
+# win4: source .venv-aider/bin/activate; SG_EVAL_RUN_TAG=amd_32b_verified SG_EVAL_API_BASE=http://127.0.0.1:8000/v1 SG_EVAL_API_KEY=EMPTY SG_EVAL_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct \
+#       $PY -m eval.agent.run_stage --stage final-comparators --dataset $DS $LIM --workers 4 --only-arms aider; deactivate
+#   ↳ when win1–4 done: aggregate + verify (BLOCK 5), then ablations:
+# win5: $PY -m eval.agent.run_stage --stage sg-concepts --dataset $DS $LIM --workers 14 --only-arms $ABLATIONS
+$PY -m eval.agent.aggregate && push_results "verified workshop done"
+# --- Pro --- (repeat the same 5 windows with this DS/TAG)
+export DS=eval/datasets/swebench_pro.jsonl; set_run_tag "amd_32b_pro"; LIM="--limit 100"
+# ... same win1–win5 commands with $DS/$SG_EVAL_RUN_TAG=amd_32b_pro ...
+$PY -m eval.agent.aggregate && push_results "pro workshop done"
+
+# ==================================================================================
+# BLOCK 5 — ROLLING VERIFY (win6; CPU/Docker — runs WHILE the next arm-set runs)
+# Kick after each arm-set completes; images prefetched in BLOCK 2.
+# ==================================================================================
+cd "$REPO_DIR"
+for tag in amd_32b_verified amd_32b_pro; do
+  $PY -m eval.agent.verify --stage final-v2          --run-tag $tag
+  $PY -m eval.agent.verify --stage final-comparators --run-tag $tag
+  $PY -m eval.agent.verify --stage sg-concepts       --run-tag $tag
+done
+$PY -m eval.agent.aggregate && push_results "workshop verified — pass@1 + McNemar"
+
+# ==================================================================================
+# BLOCK 6 — CONFERENCE (same windows, increased tasks; ablations stay at 100)
+#   Verified → --limit 300 ; Pro → --limit 150 ; headline+comparators only.
+# ==================================================================================
+# Verified 300:
+export DS=eval/datasets/swebench_verified.jsonl; set_run_tag "amd_32b_verified"; LIM="--limit 300"
+# win1: headline $HEADLINE --workers 8 ; win2 cbmem ; win3 graphify ; win4 aider (as BLOCK 4)
+# Pro 150:
+export DS=eval/datasets/swebench_pro.jsonl; set_run_tag "amd_32b_pro"; LIM="--limit 150"
+# win1–4 as above with this DS/TAG. Then verify (BLOCK 5) + aggregate.
+$PY -m eval.agent.aggregate && push_results "conference scale done"
+# Claude Code ± SG on 30–50 Pro tasks (frontier agent; external API, ~0 GPU):
+# bash eval/scripts/run_claude_code.sh --dataset $DS --limit 50   # MCP wrapper (pending)
+
+# ==================================================================================
+# BLOCK 7 — HEADROOM (spend the ~30 GPU-h surplus, step by step — see EVAL_PLAN §7d)
+#   7B scaling point, Verified-500, 3-seed variance appendix, more Claude Code.
+# Example 7B point (swap the served model in win0 to 7B first):
+#   set_run_tag "amd_7b_verified"; $PY -m eval.agent.run_stage --stage final-v2 --dataset $DS --limit 100 --workers 24 --only-arms $HEADLINE
 # ==================================================================================
 
-# GPU utilisation + VRAM (ROCm):
-watch -n 10 'rocm-smi'
+# ==================================================================================
+# BLOCK 8 — FIGURES + FINAL PUSH
+# ==================================================================================
+cd "$REPO_DIR"
+for tag in amd_32b_verified amd_32b_pro; do $PY -m eval.scripts.make_figures --tag $tag; done
+push_results "figures + final"; zip -r ~/sg_results_$(date +%Y%m%d).zip eval/results/
 
-# Progress per arm (updates every 30s):
-watch -n 30 'show_progress'
-
-# vLLM request rate (from its log):
-tail -f ~/vllm.log | grep -E "Avg prompt|Avg generation|Running|Pending"
+# MONITORING (win6): watch -n 10 rocm-smi ; watch -n 30 'show_progress' ; tail -f ~/prefetch_verified.log
