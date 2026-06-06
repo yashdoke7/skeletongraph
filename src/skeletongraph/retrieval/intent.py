@@ -97,8 +97,8 @@ def analyze_intent(prompt: str, known_files: Set[str] = frozenset(),
                 file_paths.append(candidate)  # Keep as-is, may resolve later
 
     # 2. Function/class names (identifiers that match known FQNs)
-    # Match: snake_case, camelCase, PascalCase identifiers
-    ident_pattern = re.compile(r'\b([a-zA-Z_]\w{2,})\b')
+    # Match: snake_case, camelCase, PascalCase identifiers (2+ chars)
+    ident_pattern = re.compile(r'\b([a-zA-Z_]\w{1,})\b')
     prompt_lower = prompt.lower()
 
     # Track whether we found any hard entities (file paths, exact FQN matches)
@@ -129,11 +129,22 @@ def analyze_intent(prompt: str, known_files: Set[str] = frozenset(),
         if found_file:
             continue
 
-        # Check if it matches a known FQN suffix (case-insensitive)
+        # Check if it matches a known FQN suffix
         for fqn in known_fqns:
+            # Handle Python (file::Class.method), Go (pkg/file::(*Type).Method)
             short = fqn.split("::")[-1] if "::" in fqn else fqn
-            if short.lower() == name.lower() or short.endswith(f".{name}"):
+            # Strip Go pointer receiver syntax
+            if short.startswith("(*") and ")." in short:
+                short = short.split(").")[-1]
+            
+            # Exact match (for Go case-sensitivity)
+            if short == name or short.endswith(f".{name}"):
                 entities.append(Entity(name, "function_name", confidence=0.95))
+                function_names.append(name)
+                break
+            # Case-insensitive fallback
+            elif short.lower() == name.lower():
+                entities.append(Entity(name, "function_name", confidence=0.85))
                 function_names.append(name)
                 break
 
@@ -289,11 +300,18 @@ _HARD_STOPS = frozenset({
     "does", "did", "done", "been", "being",
     "but", "and", "for", "are", "isn", "don",
     "about", "after", "before", "between", "during",
-    # Python/JS keywords (never entity names)
+    # Python/JS/TS/Go keywords (never entity names — would create false-positive
+    # entity matches against arbitrary FQNs and crowd out the real targets).
     "def", "class", "import", "return", "yield", "async",
     "await", "try", "except", "finally", "raise", "pass",
     "true", "false", "none", "null", "undefined",
     "const", "let", "var", "function", "interface",
+    # Multi-language keywords that are NOT plausible Python identifiers — added
+    # for SWE-bench Pro (Go/TS/Java). Deliberately EXCLUDES tokens that ARE valid
+    # Python identifiers (struct, enum, package, fixture, assert) so that adding
+    # multi-language support does not change Python (Verified) retrieval at all.
+    "func", "chan", "defer", "goto", "fallthrough", "nil",
+    "namespace", "readonly", "keyof", "declare", "implements", "extends",
     # Generic verbs that are never entity targets
     "make", "take", "use", "using", "used", "like",
     "need", "want", "know", "see", "look", "give",
