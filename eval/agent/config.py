@@ -165,6 +165,26 @@ def impute_cost(input_tokens: int, output_tokens: int, cached_tokens: int = 0) -
     )
 
 
+# ── graph-EXTRACTION model price (the index-build cost SG never pays) ────────
+# graphify and cbmem build their knowledge graph with an LLM, once per repo.
+# That cost is real and must be attributed to those arms (a finding: structural
+# competitors need an LLM to even construct their index; SG's tree-sitter index
+# is zero-LLM). The extraction model differs from the AGENT model — on NIM it is
+# Llama-3.3-70B (Qwen-32B-Coder was deprecated on NIM); on AMD it is the local
+# 32B. Default = a published Llama-3.3-70B reference rate; override per provider.
+PRICE_EXTRACT_INPUT_PER_M = 0.23
+PRICE_EXTRACT_OUTPUT_PER_M = 0.40
+
+
+def impute_extract_cost(input_tokens: float, output_tokens: float) -> float:
+    """Reference-priced cost of the one-time LLM graph build (graphify/cbmem)."""
+    return round(
+        input_tokens / 1e6 * PRICE_EXTRACT_INPUT_PER_M
+        + output_tokens / 1e6 * PRICE_EXTRACT_OUTPUT_PER_M,
+        5,
+    )
+
+
 # ── arms ───────────────────────────────────────────────────────────────────
 # An arm = the retrieval backend the agent's `search_code` tool dispatches to.
 # Every arm gets the IDENTICAL tool set {search_code, list_files, read_file,
@@ -250,8 +270,12 @@ ARMS: Dict[str, Arm] = {
                      strong=True),
     # New concepts (native harness): semantic dense rerank of the pool, and
     # SG seeded on the issue's tracebacks/code symbols.
-    "sg-embed": Arm("sg-embed", "sg-embed",
-                    "SG-embed (structural pool + dense semantic rerank)", strong=True),
+    "sg-hybrid-fusion": Arm("sg-hybrid-fusion", "sg-hybrid-fusion",
+                            "SG-hybrid-fusion (RRF merge of BM25 and Dense)"),
+    "sg-dense-rerank": Arm("sg-dense-rerank", "sg-dense-rerank",
+                           "SG-dense-rerank (BM25 recall + Dense rescore)", strong=True),
+    "sg-keyword-dense": Arm("sg-keyword-dense", "sg-keyword-dense",
+                            "SG-keyword-dense (Extracted keywords -> Dense)", strong=True),
     "sg-seed":  Arm("sg-seed",  "sg-seed",
                     "SG-seed (SG seeded on issue tracebacks/symbols)"),
 
@@ -269,6 +293,12 @@ ARMS: Dict[str, Arm] = {
     # Run in sg-env (summary-dense needs sentence-transformers, like hybrid/sg-embed).
     "summary-dense": Arm("summary-dense", "summary-dense",
                          "Summary-search (dense over summaries)", strong=True),
+    "summary-bm25": Arm("summary-bm25", "summary-bm25",
+                         "Summary-search (BM25 over local summaries)"),
+    "summary-llm-dense": Arm("summary-llm-dense", "summary-llm-dense",
+                         "Summary-search (dense over LLM summaries)", strong=True),
+    "summary-llm-bm25": Arm("summary-llm-bm25", "summary-llm-bm25",
+                         "Summary-search (BM25 over LLM summaries)"),
 
     # Single-shot SG (no agent loop): retrieve once → one generation → patch.
     # This is the "is the agent worth it" measure (agent vs no-agent) — which is
@@ -465,7 +495,7 @@ STAGES: Dict[str, Stage] = {
     ),
     "final-summary": Stage(
         "final-summary",
-        ["summary-dense"],
+        ["summary-bm25", "summary-dense", "summary-llm-bm25", "summary-llm-dense"],
         100, "swebench",
         "FINAL SUMMARY-SEARCH — the new contribution: rank by function SUMMARIES "
         "(purpose) instead of code. summary-bm25 isolates the summary representation "
@@ -497,14 +527,13 @@ STAGES: Dict[str, Stage] = {
     ),
     "sg-concepts": Stage(
         "sg-concepts",
-        ["sg-chain", "sg-rerank", "summary-dense", "sg-embed", "sg-seed"],
+        ["sg-chain", "sg-rerank", "summary-dense", "sg-hybrid-fusion", "sg-dense-rerank", "sg-keyword-dense"],
         100, "swebench",
         "SG CONCEPTS — re-test the best retrieval CONCEPTS in the NATIVE harness "
         "(each gets SG's read_symbol/expand): sg-chain (structural+lexical fusion + "
         "graph-path evidence), sg-rerank (bm25 recall pool -> SG structural rerank), "
-        "summary-dense (intent/purpose-layer search). Run into the SAME tag as "
-        "final-v2 to compare against `sg` + baselines; keep whichever genuinely wins "
-        "on recall + tokens + pass@1 (concept that HELPS, not a metric hack). sg-env.",
+        "summary-dense (intent/purpose-layer search), sg-embed-fallback, sg-embed-rerank, "
+        "and sg-ultimate. Run into the SAME tag as final-v2 to compare against `sg` + baselines."
     ),
     "final-comparators": Stage(
         "final-comparators",
@@ -544,6 +573,40 @@ STAGES: Dict[str, Stage] = {
         "appendix. (cbmem/aider excluded — own env; add them manually if "
         "needed.) Spend only after baseline + ablation land.",
         repeats=3,
+    ),
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ── TARGETED AMD MI300X BUDGET STAGES ─────────────────────────────────
+    # ──────────────────────────────────────────────────────────────────────
+
+    "amd-workshop-300": Stage(
+        "amd-workshop-300",
+        ["sg", "bm25", "cbmem", "graphify", "summary-llm-bm25"],
+        300, "swebench",
+        "WORKSHOP TARGET — 300 tasks (equivalent to SWE-bench Lite). "
+        "Tests core SG, flat BM25, graph/MCP baselines, and our LLM summaries.",
+    ),
+    "amd-conference-500": Stage(
+        "amd-conference-500",
+        ["sg", "bm25", "cbmem", "graphify", "summary-llm-bm25", "hybrid"],
+        500, "swebench",
+        "CONFERENCE TARGET — Full 500 tasks (SWE-bench Verified). "
+        "Adds hybrid-dense to the workshop mix for statistical significance.",
+    ),
+    "amd-pro-100": Stage(
+        "amd-pro-100",
+        ["sg", "bm25"],
+        100, "swebench_pro",
+        "CONFERENCE SCALING TARGET — 100 SWE-bench Pro tasks. "
+        "Massive repositories to prove architecture scales where BM25 breaks.",
+    ),
+    "amd-nim-150": Stage(
+        "amd-nim-150",
+        ["sg", "bm25", "cbmem", "graphify", "summary-llm-bm25"],
+        150, "swebench",
+        "NIM FALLBACK — 150 tasks (SWE-bench Verified). "
+        "Reduced subset for a 1:1 comparison against 120B NIM model without "
+        "hitting API rate limits or budget caps.",
     ),
 
     # ──────────────────────────────────────────────────────────────────────

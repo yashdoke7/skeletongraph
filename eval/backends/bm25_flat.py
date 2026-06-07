@@ -17,11 +17,19 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from skeletongraph.graph.inverted_index import tokenize_identifier
+
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _tokenize(text: str) -> List[str]:
-    return [t.lower() for t in _TOKEN_RE.findall(text or "")]
+    # Extract identifier-like tokens, then split camelCase/PascalCase via SG's tokenizer
+    tokens = []
+    for word in _TOKEN_RE.findall(text or ""):
+        split = tokenize_identifier(word)
+        if split:
+            tokens.extend(split)
+    return tokens
 
 
 class _BM25:

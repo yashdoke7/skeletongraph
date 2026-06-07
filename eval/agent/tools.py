@@ -481,7 +481,8 @@ _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
                 "sg-weakfallback",
                 "sg-lean", "sg-router", "sg-fusion", "sg-chain", "sg-chain-nopath",
                 # ablations AROUND the new lean default (final-run stage)
-                "sg-full", "sg-summary", "sg-embed"}
+                "sg-full", "sg-summary", "sg-embed", "sg-hybrid-fusion", 
+                "sg-dense-rerank", "sg-keyword-dense", "sg-rerank"}
 
 # The lean product default: structural core only. Summaries + embeddings are
 # OFF — in the heuristic_query path (eval + IDE sg_search) embeddings feed only
@@ -833,33 +834,80 @@ def _retrieve_embed(query: str, repo: Path, k: int) -> List[str]:
 
 # ── sg-seed: use the issue's structured signals (tracebacks/symbols) as seeds ──
 
-def _augment_with_symbols(text: str) -> str:
-    """Append code symbols extracted from the issue (backticks, code fences,
-    traceback frames, dotted paths, CamelCase) so SG's intent analysis seeds on
-    them — the structured signals plain-prose retrieval ignores."""
+_SEED_STOP = {"the", "and", "for", "this", "that", "with", "from", "Error",
+              "True", "False", "None", "Exception", "self", "return", "import"}
+
+
+def _extract_issue_symbols(text: str) -> Set[str]:
+    """High-signal code symbols an issue LITERALLY names — the precise anchors
+    that prose retrieval misses. Strongest signal first:
+      • Python traceback frames:  File "x.py", line N, in func   -> func
+      • backtick code:            `Foo.bar`, `func_name`
+      • code-fence declarations:  def/func/function/class NAME
+      • error/exception types:    SomethingError / SomethingException
+      • dotted paths:             pkg.module.Class.method
+    """
     t = text or ""
     syms: Set[str] = set()
-    syms |= set(re.findall(r"`([A-Za-z_][\w.]{2,})`", t))                 # `Foo.bar`
-    for block in re.findall(r"```[\s\S]*?```", t):                        # code fences
+    # (1) traceback frames — the single most precise signal: names the function.
+    syms |= set(re.findall(r'File\s+"[^"]+",\s*line\s+\d+,\s*in\s+([A-Za-z_]\w+)', t))
+    # (2) backtick code spans.
+    syms |= set(re.findall(r"`([A-Za-z_][\w.]{2,})`", t))
+    # (3) declarations inside code fences.
+    for block in re.findall(r"```[\s\S]*?```", t):
+        syms |= set(re.findall(r"\b(?:def|func|function|class)\s+([A-Za-z_]\w+)", block))
         syms |= set(re.findall(r"\b([A-Za-z_]\w*(?:\.\w+)+|[A-Z][A-Za-z0-9]{2,})\b", block))
-    syms |= set(re.findall(r"\bin\s+([A-Za-z_]\w+)", t))                  # traceback "in name"
-    syms |= set(re.findall(r"\b([A-Z][a-zA-Z0-9]+(?:\.[A-Za-z_]\w*)+)\b", t))  # Dotted.path
-    stop = {"the", "and", "for", "this", "that", "with", "from", "Error", "True", "False"}
-    syms = {s for s in syms if len(s) >= 3 and s not in stop}
+    # (4) error/exception type names anywhere in prose.
+    syms |= set(re.findall(r"\b([A-Za-z_]\w*(?:Error|Exception|Warning))\b", t))
+    # (5) dotted attribute paths in prose.
+    syms |= set(re.findall(r"\b([A-Z][a-zA-Z0-9]+(?:\.[A-Za-z_]\w*)+)\b", t))
+    # (6) generic "in NAME" (weaker; only if nothing stronger found below).
+    syms |= set(re.findall(r"\bin\s+([a-z_]\w{3,})\b", t))
+    return {s for s in syms if len(s) >= 3 and s not in _SEED_STOP}
+
+
+def _augment_with_symbols(text: str) -> str:
+    """Append extracted symbols so SG's intent analysis also seeds on them."""
+    syms = _extract_issue_symbols(text)
     if not syms:
-        return t
-    return t + "\n\nRelevant symbols: " + " ".join(sorted(syms)[:20])
+        return text or ""
+    return (text or "") + "\n\nRelevant symbols: " + " ".join(sorted(syms)[:20])
+
+
+def _seed_fqns_for(symbols: Set[str], store) -> Set[str]:
+    """Resolve issue symbol NAMES to exact FQNs in the index (suffix match) so
+    they can be passed as HARD seeds (top structural score). Prefers exact
+    short-name matches; a dotted `Class.method` must match the FQN tail."""
+    if not symbols:
+        return set()
+    shorts = {s.split(".")[-1] for s in symbols}
+    out: Set[str] = set()
+    for fqn in store.skeleton_table:
+        tail = fqn.split("::", 1)[-1]          # symbol part of file::symbol
+        last = tail.split(".")[-1]
+        if last in shorts or tail in symbols or any(tail.endswith("." + s) for s in symbols):
+            out.add(fqn)
+    return out
 
 
 def _retrieve_seed(query: str, repo: Path, k: int) -> List[str]:
-    """sg-seed: SG structural retrieval on a query AUGMENTED with the issue's
-    code symbols (tracebacks point straight at the buggy function). Lifts recall
-    by using the issue's structured signals, not just its prose."""
+    """sg-seed: SG structural retrieval HARD-ANCHORED on the exact functions the
+    issue names (tracebacks/code/backticks). Issue-named functions get the top
+    structural score; the augmented query + weak-entity BM25 fallback supply
+    recall AROUND them. Targets the file->function headroom (function precision)."""
     _ensure_sg_on_path()
     from skeletongraph.engine import SGEngine
-    cfg = _sg_config("sg-chain")
+    cfg = _sg_config("sg-chain")                          # lean SG + graph paths
     engine = SGEngine(project_root=repo, config=cfg)
-    res = engine.heuristic_query(_augment_with_symbols(query), top_n=k)
+    store = engine.get_store()
+    symbols = _extract_issue_symbols(query)
+    seeds = _seed_fqns_for(symbols, store)
+    # cap so a noisy issue can't flood the seed set; keep the most specific
+    # (dotted, then shorter) FQNs — those are the precise anchors.
+    if len(seeds) > 12:
+        seeds = set(sorted(seeds, key=lambda f: (-f.count("."), len(f)))[:12])
+    res = engine.heuristic_query(_augment_with_symbols(query), top_n=k,
+                                 seed_fqns=seeds or None)
     return [c.skeleton.fqn for c in res.candidates]
 
 
@@ -945,10 +993,25 @@ def _sg_config(backend: str):
         # (expected: no recall change, +tokens — summaries are previews).
         cfg.enable_embeddings = False
         return cfg
-    if backend == "sg-embed":
-        # Lean + embeddings only. Confirms embeddings are retrieval-inert in the
-        # heuristic path (expected: recall/precision ≈ lean sg).
+    if backend == "sg-hybrid-fusion":
+        cfg.enable_embeddings = True
         cfg.enable_summaries = False
+        cfg.enable_hybrid_fusion = True
+        cfg.enable_dense_fallback = False
+        return cfg
+    if backend == "sg-dense-rerank":
+        cfg.enable_embeddings = True
+        cfg.enable_summaries = False
+        cfg.dense_rerank = True
+        cfg.enable_dense_fallback = False
+        return cfg
+    if backend == "sg-keyword-dense":
+        cfg.enable_embeddings = True
+        cfg.enable_summaries = False
+        cfg.keyword_embedded_dense = True
+        # Base it off the hybrid fusion so we see how keywords affect the merged score
+        cfg.enable_hybrid_fusion = True
+        cfg.enable_dense_fallback = False
         return cfg
     if backend == "sg-nograph":
         # Lean − graph expansion. Direct entity matches only — does gated graph
@@ -1097,10 +1160,9 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
         # then-rerank). Targets bm25's recall AND sg-chain's rank.
         return _retrieve_rerank(query, repo, k)
 
-    if backend == "sg-embed":
-        return _retrieve_embed(query, repo, k)      # semantic dense rerank
-
-    if backend == "sg-seed":
+    if backend in ("sg", "sg-chain", "sg-nograph", "sg-norerank", "sg-noagent",
+                   "sg-full", "sg-summary", "sg-weakfallback", "sg-hybrid-fusion",
+                   "sg-dense-rerank", "sg-keyword-dense") or backend.startswith("sg-learned"):
         return _retrieve_seed(query, repo, k)       # traceback/symbol-seeded SG
 
     if backend == "grep":

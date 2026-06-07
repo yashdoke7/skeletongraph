@@ -45,6 +45,16 @@ _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 # because recall for that repo is then partially local. Raise for a faithful run.
 _OLLAMA_MAX = int(os.environ.get("SG_SUMMARY_OLLAMA_MAX", "6000"))
 
+# ── OpenAI-compatible endpoint (NIM / vLLM) ──────────────────────────────
+# Defaults fall through to the eval agent's endpoint so the summary LLM matches
+# the agent LLM (same 70B on NIM, same 32B on AMD) unless explicitly overridden.
+_OPENAI_BASE = os.environ.get("SG_SUMMARY_API_BASE",
+                               os.environ.get("SG_EVAL_API_BASE", "http://localhost:8000/v1"))
+_OPENAI_KEY = os.environ.get("SG_SUMMARY_API_KEY",
+                              os.environ.get("SG_EVAL_API_KEY", "EMPTY"))
+_OPENAI_MODEL = os.environ.get("SG_SUMMARY_MODEL",
+                                os.environ.get("SG_EVAL_MODEL", "Qwen/Qwen2.5-Coder-32B-Instruct"))
+
 
 def _ensure_paths() -> None:
     here = Path(__file__).resolve()
@@ -85,7 +95,13 @@ def _enumerate(repo: Path) -> List[Tuple[str, object, str]]:
 
 
 def _summary_docs(repo: Path, source: str) -> Tuple[List[str], List[str]]:
-    """Return (fqns, summaries) aligned. Cached by content hash per repo+source."""
+    """Return (fqns, summaries) aligned. Cached by content hash per repo+source.
+
+    source:
+      "local"  — heuristic summaries only (zero compute)
+      "ollama" — Ollama /api/generate (legacy, local qwen 1.5b)
+      "openai" — OpenAI-compatible /v1/chat/completions (NIM 70B / vLLM 32B)
+    """
     _ensure_paths()
     from skeletongraph.summary.local import build_local_summary
 
@@ -96,33 +112,50 @@ def _summary_docs(repo: Path, source: str) -> Tuple[List[str], List[str]]:
     except Exception:
         cache = {}
 
-    # ── Ollama availability + budget (only when source == "ollama") ──────────
-    ollama_ok = False
+    # ── LLM availability + budget (ollama or openai) ─────────────────────
+    llm_ok = False
     llm_budget = set()           # fqns allowed to use the LLM under the cap
+
     if source == "ollama":
         from skeletongraph.summary.ollama import is_ollama_available
-        ollama_ok = is_ollama_available(_OLLAMA_BASE)
-        if not ollama_ok:
+        llm_ok = is_ollama_available(_OLLAMA_BASE)
+        if not llm_ok:
             sys.stderr.write(
                 f"[summary-search] Ollama not reachable at {_OLLAMA_BASE} — "
                 f"falling back to LOCAL summaries (the llm variant == local here).\n")
+
+    elif source == "openai":
+        from skeletongraph.summary.ollama import is_openai_available
+        llm_ok = is_openai_available(_OPENAI_BASE, _OPENAI_KEY)
+        if not llm_ok:
+            sys.stderr.write(
+                f"[summary-search] OpenAI endpoint not reachable at {_OPENAI_BASE} — "
+                f"falling back to LOCAL summaries.\n")
         else:
-            # uncached funcs only; longest-body first; cap to _OLLAMA_MAX
-            uncached = []
-            for fqn, sk, body in funcs:
-                bhash = hashlib.sha1((body or "").encode("utf-8")).hexdigest()[:12]
-                c = cache.get(fqn)
-                if not (c and c.get("h") == bhash and c.get("s")):
-                    uncached.append((fqn, len(body or "")))
-            uncached.sort(key=lambda t: -t[1])
-            llm_budget = {f for f, _ in uncached[:_OLLAMA_MAX]}
-            if len(uncached) > _OLLAMA_MAX:
-                sys.stderr.write(
-                    f"[summary-search] {repo.name}: {len(uncached)} functions need "
-                    f"LLM summaries but cap is {_OLLAMA_MAX}; the rest use LOCAL. "
-                    f"Raise SG_SUMMARY_OLLAMA_MAX for a faithful run.\n")
+            sys.stderr.write(
+                f"[summary-search] Using OpenAI endpoint: {_OPENAI_BASE} "
+                f"model={_OPENAI_MODEL}\n")
+
+    if llm_ok and source in ("ollama", "openai"):
+        # uncached funcs only; longest-body first; cap to _OLLAMA_MAX
+        uncached = []
+        for fqn, sk, body in funcs:
+            bhash = hashlib.sha1((body or "").encode("utf-8")).hexdigest()[:12]
+            c = cache.get(fqn)
+            if not (c and c.get("h") == bhash and c.get("s")):
+                uncached.append((fqn, len(body or "")))
+        uncached.sort(key=lambda t: -t[1])
+        llm_budget = {f for f, _ in uncached[:_OLLAMA_MAX]}
+        if len(uncached) > _OLLAMA_MAX:
+            sys.stderr.write(
+                f"[summary-search] {repo.name}: {len(uncached)} functions need "
+                f"LLM summaries but cap is {_OLLAMA_MAX}; the rest use LOCAL. "
+                f"Raise SG_SUMMARY_OLLAMA_MAX for a faithful run.\n")
 
     gen = used_llm = 0
+    total_input_tokens = cache.get("__usage__", {}).get("input", 0)
+    total_output_tokens = cache.get("__usage__", {}).get("output", 0)
+    
     fqns: List[str] = []
     summaries: List[str] = []
     new_cache: Dict[str, dict] = {}
@@ -133,12 +166,23 @@ def _summary_docs(repo: Path, source: str) -> Tuple[List[str], List[str]]:
             summ = c["s"]
         else:
             summ = ""
-            if (source == "ollama" and ollama_ok and body and fqn in llm_budget):
-                from skeletongraph.summary.ollama import generate_summary_ollama
-                summ = generate_summary_ollama(
-                    fqn=fqn, signature=getattr(sk, "signature", "") or "",
-                    body=body, model=_OLLAMA_MODEL, base_url=_OLLAMA_BASE,
-                    timeout=20) or ""
+            if llm_ok and body and fqn in llm_budget:
+                if source == "ollama":
+                    from skeletongraph.summary.ollama import generate_summary_ollama
+                    summ = generate_summary_ollama(
+                        fqn=fqn, signature=getattr(sk, "signature", "") or "",
+                        body=body, model=_OLLAMA_MODEL, base_url=_OLLAMA_BASE,
+                        timeout=20) or ""
+                elif source == "openai":
+                    from skeletongraph.summary.ollama import generate_summary_openai
+                    summ, usage = generate_summary_openai(
+                        fqn=fqn, signature=getattr(sk, "signature", "") or "",
+                        body=body, model=_OPENAI_MODEL, base_url=_OPENAI_BASE,
+                        api_key=_OPENAI_KEY, timeout=20)
+                    summ = summ or ""
+                    if usage:
+                        total_input_tokens += usage.get("prompt_tokens", 0)
+                        total_output_tokens += usage.get("completion_tokens", 0)
                 gen += 1
                 if summ:
                     used_llm += 1
@@ -155,16 +199,18 @@ def _summary_docs(repo: Path, source: str) -> Tuple[List[str], List[str]]:
         fqns.append(fqn)
         summaries.append(summ or fqn.split("::")[-1])   # never empty doc
 
+    new_cache["__usage__"] = {"input": total_input_tokens, "output": total_output_tokens}
+
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(new_cache, ensure_ascii=False),
                               encoding="utf-8")
     except Exception:
         pass
-    if source == "ollama" and ollama_ok:
+    if llm_ok and source in ("ollama", "openai"):
         sys.stderr.write(
             f"[summary-search] {repo.name}: {used_llm} LLM summaries this run "
-            f"(cache now {len(new_cache)} funcs).\n")
+            f"(cache now {len(new_cache) - 1} funcs). Tokens used: {total_input_tokens} in / {total_output_tokens} out.\n")
     return fqns, summaries
 
 
@@ -172,7 +218,7 @@ def retrieve(query: str, repo_path: Path, top_n: int,
              source: str = "local", method: str = "bm25") -> List[str]:
     """Ranked FQNs from searching function summaries.
 
-    source: "local" | "ollama"      method: "bm25" | "dense"
+    source: "local" | "ollama" | "openai"      method: "bm25" | "dense"
     """
     repo = Path(repo_path)
     fqns, summaries = _summary_docs(repo, source)

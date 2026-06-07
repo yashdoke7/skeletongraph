@@ -139,7 +139,7 @@ def _find_indexed(bin_path: str, repo: Path) -> str | None:
     """cbmem's registered project name for this repo, matched by root_path (exact
     and unambiguous — avoids the stale eval/datasets projects still in the
     registry) AND requiring it to be actually built (nodes>0). None otherwise."""
-    target = str(repo).replace("\\", "/").rstrip("/")
+    target = str(repo).replace("\\", "/").rstrip("/").lower()
     slug = _project_slug(repo)
     blob = _run(bin_path, ["cli", "list_projects", "{}"], timeout=15)
     try:
@@ -148,7 +148,7 @@ def _find_indexed(bin_path: str, repo: Path) -> str | None:
         return None
     built = [p for p in projs if p.get("name") and (p.get("nodes") or 0) > 0]
     for p in built:               # 1) exact root_path match — the reliable key
-        if str(p.get("root_path", "")).replace("\\", "/").rstrip("/") == target:
+        if str(p.get("root_path", "")).replace("\\", "/").rstrip("/").lower() == target:
             return p["name"]
     for p in built:               # 2) fallback: exact computed-slug match
         if p["name"] == slug:
@@ -170,7 +170,7 @@ def _ensure_indexed(bin_path: str, repo: Path) -> str:
              json.dumps({"repo_path": key.replace("\\", "/")})], timeout=300)
         # cbmem indexes ASYNCHRONOUSLY — querying before the graph is built 404s
         # ("project not found or not indexed"). Poll until it appears with nodes>0.
-        for _ in range(120):               # up to ~240s
+        for _ in range(450):               # up to ~900s (15 mins) for massive repos
             name = _find_indexed(bin_path, repo)
             if name:
                 break
