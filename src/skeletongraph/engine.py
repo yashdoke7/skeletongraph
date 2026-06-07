@@ -346,63 +346,21 @@ class SGEngine:
         retry_note: str = "",
         force_slm: bool = False,
     ):
-        """Phase 1: Regex + (optionally) SLM entity extraction.
-
-        Returns (intent, slm_result, regex_confidence).
+        """Phase 1: Regex entity extraction.
+        
+        Returns (intent, None, regex_confidence).
         """
         # Step 1: Regex entity extraction (~1ms, always)
         known_files = set(store.file_skeletons.keys())
         known_fqns = set(store.skeleton_table.keys())
         intent = analyze_intent(prompt, known_files, known_fqns)
 
-        # Step 2: Determine if SLM is needed
+        # Step 2: Determine confidence
         regex_confidence = "HIGH" if intent.function_names else (
             "MEDIUM" if intent.file_paths else "LOW"
         )
 
-        slm_result = None
-
-        # Skip SLM conditions:
-        # 1. Regex found exact FQN matches → HIGH confidence
-        # 2. Tiny project (<10 functions) → graph handles everything
-        # 3. SLM disabled in config
-        should_skip_slm = (
-            (not force_slm and regex_confidence == "HIGH")
-            or len(store.skeleton_table) < 10
-            or not self._config.enable_slm_fallback
-        )
-
-        if not should_skip_slm:
-            # Get session FQNs for pre-filter
-            session_fqns = None
-            if session and session.turn_count > 0:
-                session_fqns = set(session.get_last_target_fqns())
-
-            slm_result = slm_extract(
-                prompt=prompt,
-                store=store,
-                sg_dir=self._sg_dir,
-                config=self._config,
-                session_fqns=session_fqns,
-                retry_note=retry_note,
-            )
-
-            # Merge SLM entities into intent
-            if slm_result.success and slm_result.entities:
-                from .retrieval.intent import Entity
-                for e in slm_result.entities:
-                    intent.entities.append(Entity(
-                        value=e.fqn,
-                        entity_type="slm_entity",
-                        confidence=0.8,
-                    ))
-                    # Try to resolve to function_names
-                    if e.fqn in known_fqns or any(
-                        e.fqn.endswith(f"::{fn}") for fn in intent.function_names
-                    ):
-                        intent.function_names.append(e.fqn)
-
-        return intent, slm_result, regex_confidence
+        return intent, None, regex_confidence
 
     # ── Phase 2: RETRIEVE ───────────────────────────────────────────────
 
@@ -437,7 +395,7 @@ class SGEngine:
             top_n=50,
             seed_fqns=seed_fqns,
             mode_spec=mode_spec,
-            enable_keyword_fallback=self._config.enable_keyword_fallback,
+            enable_keyword_fallback=getattr(self._config, "enable_keyword_fallback", False),
             enable_bm25_fallback=self._config.enable_bm25_fallback,
             enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
             graph_expansion_policy=getattr(self._config, "graph_expansion_policy", "gated"),
@@ -450,9 +408,9 @@ class SGEngine:
             # seaborn returned 0 hits across all ablation arms because the
             # fallback that would have caught lexical-only matches never fired.
             enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", True),
-            # sg-rerank: BM25 recall pool reordered by SG structure (eval-v2 winner).
-            # Default True (product retrieval); SG_BM25_PRIMARY=0 reverts to lean sg.
+            enable_dense_fallback=getattr(self._config, "enable_dense_fallback", False),
             bm25_primary=getattr(self._config, "bm25_primary", True),
+            dense_primary=getattr(self._config, "dense_primary", False),
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -754,7 +712,7 @@ class SGEngine:
             session=None,
             top_n=top_n,
             mode_spec=mode_spec,
-            enable_keyword_fallback=self._config.enable_keyword_fallback,
+            enable_keyword_fallback=getattr(self._config, "enable_keyword_fallback", False),
             enable_bm25_fallback=self._config.enable_bm25_fallback,
             enable_graph_expansion=getattr(self._config, "enable_graph_expansion", True),
             graph_expansion_policy=(
@@ -769,9 +727,9 @@ class SGEngine:
             # seaborn returned 0 hits across all ablation arms because the
             # fallback that would have caught lexical-only matches never fired.
             enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", True),
-            # sg-rerank: BM25 recall pool reordered by SG structure (eval-v2 winner).
-            # Default True (product retrieval); SG_BM25_PRIMARY=0 reverts to lean sg.
+            enable_dense_fallback=getattr(self._config, "enable_dense_fallback", False),
             bm25_primary=getattr(self._config, "bm25_primary", True),
+            dense_primary=getattr(self._config, "dense_primary", False),
         )
 
         # Apply file filter post-hoc
