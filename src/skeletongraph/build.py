@@ -17,6 +17,7 @@ from .parser.ast_extractor import (
     extract_file,
     result_to_file_skeleton,
     FileExtractionResult,
+    detect_language,
 )
 from .parser.edge_extractor import build_short_name_index, extract_edges
 from .parser.import_resolver import ImportResolver
@@ -159,7 +160,17 @@ def build_index(
         if on_progress:
             on_progress(file_path, i + 1, len(files))
 
-        result = extract_file(file_path, project_root)
+        # Defensive: one pathological file (RecursionError, decode error, broken
+        # AST) must not kill the whole index. Skip + log; rest of repo still
+        # indexes. The iterative walkers fix the known recursion case; this is
+        # belt-and-braces for the long tail (encoding quirks, partial files).
+        try:
+            result = extract_file(file_path, project_root)
+        except (RecursionError, RuntimeError, ValueError, UnicodeDecodeError) as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "extract_file failed for %s: %s — skipping", file_path, e)
+            continue
         if result is None:
             continue
 
@@ -257,7 +268,8 @@ def build_index(
             try:
                 lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
                 body = "\n".join(lines[sk.line_start - 1:sk.line_end])
-                body_kw = extract_body_keywords(body)
+                lang = detect_language(sk.file_path) or "python"
+                body_kw = extract_body_keywords(body, language=lang)
             except Exception:
                 pass
         summary = _seed_summary_from_source(sk, body_kw, store, cfg)
@@ -351,7 +363,8 @@ def build_index(
                 try:
                     lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
                     body = "\n".join(lines[sk.line_start - 1:sk.line_end])
-                    body_kw = extract_body_keywords(body)
+                    lang = detect_language(sk.file_path) or "python"
+                    body_kw = extract_body_keywords(body, language=lang)
                 except Exception:
                     pass
             emb_entries.append((fqn, sk.signature, store.summaries.get(fqn) or sk.docstring or "", body_kw))
@@ -499,8 +512,14 @@ def update_index(
         if file_path in modified_files:
             removed_fqns.update(_remove_file_from_store(store, file_path))
 
-        # Parse new/modified file
-        result = extract_file(file_path, project_root)
+        # Parse new/modified file (defensive — see Phase-1 loop above).
+        try:
+            result = extract_file(file_path, project_root)
+        except (RecursionError, RuntimeError, ValueError, UnicodeDecodeError) as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "extract_file failed for %s: %s — skipping", file_path, e)
+            continue
         if result is None:
             continue
 
@@ -521,7 +540,8 @@ def update_index(
                 try:
                     lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
                     body = "\n".join(lines[sk.line_start - 1:sk.line_end])
-                    body_kw = extract_body_keywords(body)
+                    lang = detect_language(sk.file_path) or "python"
+                    body_kw = extract_body_keywords(body, language=lang)
                 except Exception:
                     pass
             store.inverted_index.add(

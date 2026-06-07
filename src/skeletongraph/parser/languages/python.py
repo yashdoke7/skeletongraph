@@ -527,26 +527,22 @@ def extract_call_sites(
                 best_start = start
         return best_fqn
 
-    def _walk_calls(node: Node) -> None:
+    # Iterative — see typescript.py::extract_call_sites_ts. Deeply nested
+    # Python expressions (long generator/comprehension chains, big AST classes)
+    # can blow Python's default recursion limit on a pure-recursive walk.
+    stack: list = [tree.root_node]
+    while stack:
+        node = stack.pop()
         if node.type == "call":
             func_node = node.child_by_field_name("function")
             if func_node:
                 callee = node_text(func_node, source_bytes)
                 line = node.start_point[0] + 1
                 caller = _find_caller(line)
-
-                # Detect constructor calls (PascalCase)
                 is_ctor = bool(re.match(r"^[A-Z][a-zA-Z0-9]+$", callee.split(".")[-1]))
-
                 calls.append(RawCallSite(
-                    caller_fqn=caller,
-                    callee_name=callee,
-                    line=line,
+                    caller_fqn=caller, callee_name=callee, line=line,
                     is_constructor=is_ctor,
                 ))
-
-        for child in node.children:
-            _walk_calls(child)
-
-    _walk_calls(tree.root_node)
+        stack.extend(reversed(node.children))
     return calls

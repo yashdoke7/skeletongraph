@@ -639,37 +639,33 @@ def extract_call_sites_ts(
                 best_start = start
         return best_fqn
 
-    def _walk(node: Node) -> None:
+    # Iterative walk — TypeScript ASTs (especially bundled / generated files like
+    # tutanota's flow→TS pipeline) can be deeper than Python's default 1000-frame
+    # recursion limit. Stack-based avoids RecursionError without needing
+    # setrecursionlimit (which would just shift the limit and burn memory).
+    stack: list = [tree.root_node]
+    while stack:
+        node = stack.pop()
         if node.type == "call_expression":
             func_node = node.child_by_field_name("function")
             if func_node:
                 callee = node_text(func_node, source_bytes)
                 line = node.start_point[0] + 1
                 caller = _find_caller(line)
-
                 calls.append(RawCallSite(
-                    caller_fqn=caller,
-                    callee_name=callee,
-                    line=line,
+                    caller_fqn=caller, callee_name=callee, line=line,
                 ))
-
         elif node.type == "new_expression":
-            # new ClassName(...)
             constructor = node.child_by_field_name("constructor")
             if constructor:
                 callee = node_text(constructor, source_bytes)
                 line = node.start_point[0] + 1
                 caller = _find_caller(line)
-
                 calls.append(RawCallSite(
-                    caller_fqn=caller,
-                    callee_name=callee,
-                    line=line,
+                    caller_fqn=caller, callee_name=callee, line=line,
                     is_constructor=True,
                 ))
-
-        for child in node.children:
-            _walk(child)
-
-    _walk(tree.root_node)
+        # Push children in reverse so they're popped in source order (cosmetic,
+        # but it makes the order match the previous recursive version).
+        stack.extend(reversed(node.children))
     return calls

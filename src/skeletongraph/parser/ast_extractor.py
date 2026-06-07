@@ -193,20 +193,18 @@ def count_branches(node: Node) -> int:
     }
     boolean_ops = {"and", "or", "&&", "||"}
 
-    def _walk(n: Node) -> None:
-        nonlocal count
+    # Iterative — see typescript.py::extract_call_sites_ts for rationale.
+    # Deep TS/JS files blow Python's recursion limit on a pure-recursive walk.
+    stack: list = [node]
+    while stack:
+        n = stack.pop()
         if n.type in branch_types:
             count += 1
         if n.type in ("boolean_operator", "binary_expression"):
-            op_text = ""
             for child in n.children:
                 if child.type in ("and", "or"):
                     count += 1
-                # JS/TS: && and || are in the operator
-        for child in n.children:
-            _walk(child)
-
-    _walk(node)
+        stack.extend(n.children)
     return count + 1  # Base complexity
 
 
@@ -321,10 +319,10 @@ def result_to_file_skeleton(result: FileExtractionResult) -> FileSkeleton:
                     ]
                     cls_sk.constructor_params = params
 
-                # Extract instance attrs from body (self.X = ...)
-                attr_pattern = re.compile(r"self\.(\w+)\s*=")
+                # Extract instance attrs from body (self.X = ... or this.X = ...)
+                attr_pattern = re.compile(r"(?:self|this)\.(\w+)\s*=")
                 attrs = attr_pattern.findall(m.body_text)
-                cls_sk.instance_attrs = [f"self.{a}" for a in dict.fromkeys(attrs)]
+                cls_sk.instance_attrs = [f"self.{a}" if "self." in m.body_text else f"this.{a}" for a in dict.fromkeys(attrs)]
 
         class_skeletons.append(cls_sk)
 
