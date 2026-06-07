@@ -20,6 +20,7 @@ _SPLIT_PATTERN = re.compile(r"[_\-.]|(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]
 
 # Common stop words to exclude from index (too generic, match everything)
 _STOP_WORDS = frozenset({
+    # Python
     "self", "cls", "args", "kwargs", "none", "true", "false",
     "return", "def", "class", "import", "from", "if", "else",
     "for", "while", "try", "except", "with", "as", "in", "is",
@@ -28,6 +29,19 @@ _STOP_WORDS = frozenset({
     "set", "tuple", "type", "any", "optional", "void", "null",
     "undefined", "var", "let", "const", "function", "async",
     "await", "new", "get", "set",
+    # Go keywords (never useful as search tokens)
+    "func", "struct", "interface", "defer", "chan", "select",
+    "fallthrough", "nil", "goto", "range", "switch", "case",
+    "break", "continue", "default", "package", "map",
+    # TS/JS keywords
+    "export", "extends", "implements", "declare", "readonly",
+    "keyof", "namespace", "abstract", "enum", "module",
+    "typeof", "instanceof", "yield", "super",
+    # Java/C# keywords
+    "public", "private", "protected", "static", "final",
+    "throws", "throw", "catch", "void",
+    # Rust
+    "pub", "mut", "impl", "trait", "where", "unsafe", "match",
 })
 
 
@@ -66,12 +80,26 @@ def tokenize_text(text: str) -> List[str]:
 # match indexed function data. This fixes the v3 MISS on NLP prompts.
 
 _QUERY_STOP_WORDS = frozenset({
+    # Python
     "self", "cls", "args", "kwargs", "none", "true", "false",
     "return", "def", "class", "import", "from", "if", "else",
     "for", "while", "try", "except", "with", "as", "in", "is",
     "not", "and", "or", "the", "a", "an", "to", "of", "it",
     "this", "that", "void", "null", "undefined",
     "var", "let", "const", "function", "async", "await", "new",
+    # Go keywords (never useful as query tokens)
+    "func", "struct", "interface", "defer", "chan", "select",
+    "fallthrough", "nil", "goto", "range", "switch", "case",
+    "break", "continue", "default", "package", "map",
+    # TS/JS keywords
+    "export", "extends", "implements", "declare", "readonly",
+    "keyof", "namespace", "abstract", "enum", "module",
+    "typeof", "instanceof", "yield", "super",
+    # Java/C#
+    "public", "private", "protected", "static", "final",
+    "throws", "throw", "catch",
+    # Rust
+    "pub", "mut", "impl", "trait", "where", "unsafe", "match",
     # Keep intentionally: str, int, float, bool, list, dict, set, tuple,
     #   type, any, optional, get, set — these can match function names
 })
@@ -92,49 +120,110 @@ def tokenize_query(query: str) -> List[str]:
     return [t for t in raw if t and len(t) > 1 and t not in _QUERY_STOP_WORDS]
 
 
-def extract_body_keywords(body: str) -> List[str]:
+def extract_body_keywords(body: str, language: str = "python") -> List[str]:
     """Extract high-signal keywords from a function body.
 
     Captures string literals (like 'Content-Length'), dict key access patterns,
-    and header names — things that are never in the function name or signature
-    but are exactly what users search for.
+    method calls, and error patterns — things that are never in the function
+    name or signature but are exactly what users search for.
 
+    Language-aware: extracts patterns specific to Python, Go, TypeScript/JS.
     Zero LLM cost — pure regex extraction.
     """
     keywords: List[str] = []
 
-    # 1. String literals in quotes: 'Content-Length', "Transfer-Encoding"
+    # 1. String literals in quotes — universal across all languages
     for match in re.finditer(r'["\']([A-Za-z][A-Za-z0-9_-]{2,}(?:[- ][A-Za-z0-9_-]+)*)["\']', body):
         val = match.group(1)
-        # Skip very common strings and file paths
         if val.lower() not in _STOP_WORDS and '/' not in val and '\\' not in val:
-            # Tokenize hyphenated strings: 'Content-Length' -> ['content', 'length']
             parts = re.split(r'[-_ ]', val.lower())
             keywords.extend(p for p in parts if len(p) > 1 and p not in _STOP_WORDS)
 
-    # 2. Dict/header access: headers['Content-Length'] or self.headers.get('key')
+    # 2. Dict/header/bracket access — universal
     for match in re.finditer(r'\[\s*["\']([A-Za-z][A-Za-z0-9_-]+)["\']\s*\]', body):
         val = match.group(1)
         parts = re.split(r'[-_ ]', val.lower())
         keywords.extend(p for p in parts if len(p) > 1 and p not in _STOP_WORDS)
 
-    # 3. Raised exceptions: raise ValueError, raise TypeError
-    for match in re.finditer(r'raise\s+([A-Z][a-zA-Z]+)', body):
-        keywords.extend(tokenize_identifier(match.group(1)))
+    # === Python-specific ===
+    if language == "python":
+        for match in re.finditer(r'raise\s+([A-Z][a-zA-Z]+)', body):
+            keywords.extend(tokenize_identifier(match.group(1)))
+        for match in re.finditer(r'self\.([a-z_][a-z_0-9]*)', body):
+            attr = match.group(1)
+            if len(attr) > 2 and attr not in _STOP_WORDS:
+                keywords.extend(tokenize_identifier(attr))
+        for match in re.finditer(r'self\.([a-z_][a-z_0-9]*)\s*\(', body):
+            method = match.group(1)
+            if len(method) > 2 and method not in _STOP_WORDS:
+                keywords.extend(tokenize_identifier(method))
 
-    # 4. Attribute access: self.headers, self.method, response.status_code
-    for match in re.finditer(r'self\.([a-z_][a-z_0-9]*)', body):
-        attr = match.group(1)
-        if len(attr) > 2 and attr not in _STOP_WORDS:
-            keywords.extend(tokenize_identifier(attr))
+    # === Go-specific ===
+    elif language == "go":
+        # Error creation: fmt.Errorf(), errors.New(), errors.Wrap()
+        for match in re.finditer(r'(?:fmt\.Errorf|errors\.New|errors\.Wrap)\s*\(\s*"([^"]+)"', body):
+            parts = re.split(r'[^a-zA-Z0-9]+', match.group(1).lower())
+            keywords.extend(p for p in parts if len(p) > 2 and p not in _STOP_WORDS)
+        # Package-qualified calls AND receiver method calls: pkg.Func(), r.Method()
+        # Both have the same syntax in Go: lowercase.Uppercase()
+        seen_go = set()
+        for match in re.finditer(r'\b([a-z][a-zA-Z0-9]*)\.\s*([A-Z][a-zA-Z0-9]+)', body):
+            qualifier, name = match.group(1), match.group(2)
+            key = (qualifier, name)
+            if key in seen_go:
+                continue
+            seen_go.add(key)
+            if len(qualifier) > 1 and qualifier not in _STOP_WORDS:
+                keywords.append(qualifier)
+            keywords.extend(tokenize_identifier(name))
+        # Panic messages
+        for match in re.finditer(r'panic\s*\(\s*"([^"]+)"', body):
+            parts = re.split(r'[^a-zA-Z0-9]+', match.group(1).lower())
+            keywords.extend(p for p in parts if len(p) > 2 and p not in _STOP_WORDS)
 
-    # 5. Method calls on self: self.prepare_body() -> ['prepare', 'body']
-    for match in re.finditer(r'self\.([a-z_][a-z_0-9]*)\s*\(', body):
-        method = match.group(1)
-        if len(method) > 2 and method not in _STOP_WORDS:
-            keywords.extend(tokenize_identifier(method))
+    # === TypeScript / JavaScript ===
+    elif language in ("typescript", "javascript", "tsx", "jsx"):
+        # Method chains: this.service.doSomething()
+        for match in re.finditer(r'this\.([a-zA-Z_][a-zA-Z0-9_]*)(?:\.([a-zA-Z_][a-zA-Z0-9_]*))?', body):
+            prop = match.group(1)
+            method = match.group(2)
+            if prop and len(prop) > 1 and prop not in _STOP_WORDS:
+                keywords.extend(tokenize_identifier(prop))
+            if method and len(method) > 1 and method not in _STOP_WORDS:
+                keywords.extend(tokenize_identifier(method))
+        # throw new Error("...")
+        for match in re.finditer(r'throw\s+new\s+([A-Z][a-zA-Z]+)', body):
+            keywords.extend(tokenize_identifier(match.group(1)))
+        # Template literals with identifiers: ${variable}
+        for match in re.finditer(r'\$\{([a-zA-Z_][a-zA-Z0-9_.]+)\}', body):
+            for part in match.group(1).split('.'):
+                if len(part) > 1 and part.lower() not in _STOP_WORDS:
+                    keywords.extend(tokenize_identifier(part))
+        # React/DOM patterns: createElement, querySelector
+        for match in re.finditer(r'\b(querySelector|getElementById|createElement|addEventListener|removeEventListener|dispatch|emit|subscribe)\b', body):
+            keywords.extend(tokenize_identifier(match.group(1)))
+        # Import-like: require('module'), import('module')
+        for match in re.finditer(r'(?:require|import)\s*\(\s*["\']([^"\'/][^"\']*)["\'\)]', body):
+            mod = match.group(1).split('/')[-1]  # last segment
+            if len(mod) > 1 and mod.lower() not in _STOP_WORDS:
+                keywords.append(mod.lower())
 
-    return keywords
+    # === Universal: identifier calls not caught above ===
+    # Captures any functionCall() pattern for all languages
+    for match in re.finditer(r'\b([a-zA-Z_][a-zA-Z0-9_]{2,})\s*\(', body):
+        name = match.group(1)
+        name_lower = name.lower()
+        if name_lower not in _STOP_WORDS and name_lower not in {'if', 'for', 'while', 'switch', 'catch', 'func', 'function', 'return', 'print', 'println', 'printf', 'sprintf', 'log', 'console'}:
+            keywords.extend(tokenize_identifier(name))
+
+    # Deduplicate while preserving order (first occurrence wins)
+    seen = set()
+    deduped = []
+    for kw in keywords:
+        if kw not in seen:
+            seen.add(kw)
+            deduped.append(kw)
+    return deduped
 
 
 class InvertedIndex:

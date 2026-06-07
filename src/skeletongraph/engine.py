@@ -411,6 +411,9 @@ class SGEngine:
             enable_dense_fallback=getattr(self._config, "enable_dense_fallback", False),
             bm25_primary=getattr(self._config, "bm25_primary", True),
             dense_primary=getattr(self._config, "dense_primary", False),
+            enable_hybrid_fusion=getattr(self._config, "enable_hybrid_fusion", False),
+            dense_rerank=getattr(self._config, "dense_rerank", False),
+            keyword_embedded_dense=getattr(self._config, "keyword_embedded_dense", False),
         )
 
         # Filter excluded FQNs (for supplementary queries)
@@ -681,10 +684,14 @@ class SGEngine:
         file_filter: Optional[str] = None,
         mode_hint: Optional[str] = None,
         graph_policy: Optional[str] = None,
+        seed_fqns: Optional[Set[str]] = None,
     ):
         """IDE-mode retrieval: regex + BM25 + graph, zero LLM calls.
 
         Used by sg_search MCP tool and sg search CLI command.
+        seed_fqns: HARD anchors (e.g. exact functions named in an issue traceback)
+        resolved before retrieval — the sg-seed mechanism. They get top structural
+        score so issue-named functions surface even when prose retrieval misses.
         Returns a ResolverResult directly (not a full PipelineResult).
         """
         store = self._ensure_loaded()
@@ -708,6 +715,7 @@ class SGEngine:
         resolver_result = resolve_context(
             prompt=query,
             store=store,
+            seed_fqns=seed_fqns,
             max_depth=1,
             session=None,
             top_n=top_n,
@@ -728,8 +736,11 @@ class SGEngine:
             # fallback that would have caught lexical-only matches never fired.
             enable_weak_entity_fallback=getattr(self._config, "enable_weak_entity_fallback", True),
             enable_dense_fallback=getattr(self._config, "enable_dense_fallback", False),
-            bm25_primary=getattr(self._config, "bm25_primary", True),
+            bm25_primary=self._config.bm25_primary,
             dense_primary=getattr(self._config, "dense_primary", False),
+            enable_hybrid_fusion=getattr(self._config, "enable_hybrid_fusion", False),
+            dense_rerank=getattr(self._config, "dense_rerank", False),
+            keyword_embedded_dense=getattr(self._config, "keyword_embedded_dense", False),
         )
 
         # Apply file filter post-hoc

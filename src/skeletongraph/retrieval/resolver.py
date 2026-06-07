@@ -87,6 +87,11 @@ def resolve_context(
     enable_centrality_rerank: bool = True,
     enable_weak_entity_fallback: bool = False,
     bm25_primary: bool = False,
+    enable_dense_fallback: bool = False,
+    dense_primary: bool = False,
+    enable_hybrid_fusion: bool = False,
+    dense_rerank: bool = False,
+    keyword_embedded_dense: bool = False,
 ) -> ResolverResult:
     """Main entry point: prompt → ranked candidates.
 
@@ -217,15 +222,94 @@ def resolve_context(
     # matches resolved above are kept and get the highest structural score; the
     # BM25 pool widens recall around them. Gated by `bm25_primary` so the lean
     # entity-first `sg` path and the ablations keep their original behavior.
-    if bm25_primary:
-        _pool = _bm25_fallback(prompt, store, top_k=max(top_n, 25))
-        if _pool:
-            _pmax = max(s for _, s in _pool) or 1.0
-            for _f, _s in _pool:
-                _lexical_scores.setdefault(_f, _s / _pmax)
-            target_fqns.update(_f for _f, _ in _pool)
-            if match_source in ("none", ""):
-                match_source = "bm25"
+    if enable_hybrid_fusion:
+        _bm25_pool = _bm25_fallback(prompt, store, top_k=max(top_n, 25))
+        _dense_pool = _dense_fallback(prompt, store, top_k=max(top_n, 25), keyword_embedded=keyword_embedded_dense)
+        
+        combined_scores = {}
+        if _bm25_pool:
+            _pmax = max(s for _, s in _bm25_pool) or 1.0
+            for _f, _s in _bm25_pool:
+                combined_scores[_f] = combined_scores.get(_f, 0.0) + (_s / _pmax)
+                
+        if _dense_pool:
+            _dmax = max(s for _, s in _dense_pool) or 1.0
+            for _f, _s in _dense_pool:
+                combined_scores[_f] = combined_scores.get(_f, 0.0) + (_s / _dmax)
+                
+        sorted_fusion = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:max(top_n, 25)]
+        for _f, _s in sorted_fusion:
+            _lexical_scores[_f] = _s
+            target_fqns.add(_f)
+            
+        if match_source in ("none", ""):
+            match_source = "hybrid"
+
+    elif dense_rerank:
+        _bm25_pool = _bm25_fallback(prompt, store, top_k=max(top_n, 25))
+        if _bm25_pool:
+            pool_fqns = [_f for _f, _ in _bm25_pool]
+            if hasattr(store, "embeddings") and not store.embeddings.is_empty:
+                search_query = prompt
+                if keyword_embedded_dense:
+                    tokens = tokenize_query(prompt)
+                    if tokens:
+                        search_query = " ".join(tokens)
+                dense_scores = store.embeddings.rescore(search_query, pool_fqns)
+                if dense_scores:
+                    _dmax = max(dense_scores.values()) or 1.0
+                    for _f in pool_fqns:
+                        _s = dense_scores.get(_f, 0.0)
+                        _lexical_scores[_f] = _s / _dmax
+                        target_fqns.add(_f)
+                else:
+                    _pmax = max(s for _, s in _bm25_pool) or 1.0
+                    for _f, _s in _bm25_pool:
+                        _lexical_scores[_f] = _s / _pmax
+                        target_fqns.add(_f)
+            else:
+                _pmax = max(s for _, s in _bm25_pool) or 1.0
+                for _f, _s in _bm25_pool:
+                    _lexical_scores[_f] = _s / _pmax
+                    target_fqns.add(_f)
+                    
+        if match_source in ("none", ""):
+            match_source = "dense_rerank"
+
+    else:
+        if bm25_primary:
+            _pool = _bm25_fallback(prompt, store, top_k=max(top_n, 25))
+            if _pool:
+                _pmax = max(s for _, s in _pool) or 1.0
+                for _f, _s in _pool:
+                    _lexical_scores.setdefault(_f, _s / _pmax)
+                target_fqns.update(_f for _f, _ in _pool)
+                if match_source in ("none", ""):
+                    match_source = "bm25"
+                    
+        if dense_primary:
+            _dense_pool = _dense_fallback(prompt, store, top_k=max(top_n, 25), keyword_embedded=keyword_embedded_dense)
+            if _dense_pool:
+                _dmax = max(s for _, s in _dense_pool) or 1.0
+                for _f, _s in _dense_pool:
+                    _lexical_scores.setdefault(_f, _s / _dmax)
+                target_fqns.update(_f for _f, _ in _dense_pool)
+                if match_source in ("none", ""):
+                    match_source = "dense"
+                    
+        # Optional dense fallback (if entities and bm25 failed/were skipped)
+        if enable_dense_fallback and not target_fqns and not dense_primary:
+            dense_results = _dense_fallback(prompt, store, top_k=15, keyword_embedded=keyword_embedded_dense)
+            if dense_results:
+                target_fqns.update(fqn for fqn, _ in dense_results)
+                _dmax = max(s for _, s in dense_results) or 1.0
+                for fqn, s in dense_results:
+                    _lexical_scores[fqn] = s / _dmax
+                confidence = "MEDIUM" if len(dense_results) > 3 else "LOW"
+                confidence_reason = (
+                    f"Matched {len(dense_results)} entities via Dense Vector fallback"
+                )
+                match_source = "dense"
 
     # Step 4: Build ranker with hub scores
     ranker = Ranker(store.graph, centrality_enabled=enable_centrality_rerank)
@@ -427,6 +511,20 @@ def _bm25_fallback(prompt: str, store: IndexStore, top_k: int = 10) -> List[Tupl
         store.bm25_model = bm25
 
     return bm25.search(prompt, top_k=top_k)
+
+
+def _dense_fallback(prompt: str, store: IndexStore, top_k: int = 15, keyword_embedded: bool = False) -> List[Tuple[str, float]]:
+    """Run Dense Vector semantic search using sentence-transformers."""
+    if not hasattr(store, 'embeddings') or store.embeddings is None or store.embeddings.is_empty:
+        return []
+        
+    search_query = prompt
+    if keyword_embedded:
+        tokens = tokenize_query(prompt)
+        if tokens:
+            search_query = " ".join(tokens)
+            
+    return store.embeddings.search(search_query, top_k=top_k)
 
 
 # ── Graph expansion policy ──────────────────────────────────────────────

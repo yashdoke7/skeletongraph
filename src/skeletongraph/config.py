@@ -212,14 +212,9 @@ class SGConfig:
     summary_model: str = "gemini/gemini-2.5-flash"  # Used by sg summarize only
     summary_batch_size: int = 2
 
-    # ── SLM Fallback ───────────────────────────────────────────────────
-    enable_slm_fallback: bool = True        # SLM entity extraction on LOW/MISS
-    slm_timeout: int = 3                    # Seconds before SLM call times out
-    slm_max_fqns_in_prompt: int = 200       # Max FQN names sent to SLM for matching
-
     # ── Retrieval Fallbacks ─────────────────────────────────────────────
     enable_bm25_fallback: bool = True       # Use BM25 over comment/token corpus when no entity matches
-    enable_keyword_fallback: bool = False   # Allow inverted-index fallback when no entity matches
+    enable_dense_fallback: bool = False     # Semantic vector search fallback if no entities match
     # Gated recall booster (default ON as of eval v2). When an entity match is
     # AMBIGUOUS (a common token short-name-matched >6 FQNs → likely coincidental),
     # ALSO run full-corpus BM25 and add its top-3 hits as seeds. Gated on
@@ -231,17 +226,24 @@ class SGConfig:
     # always (not just as a fallback), then the structural ranker reorders it by
     # centrality + entity bonus + lexical score, and read_symbol fetches only the
     # chosen function bodies. This is the eval-v2 WINNER (best file+function recall
-    # at the lowest token cost). Set SG_BM25_PRIMARY=0 to fall back to the lean
-    # entity-first `sg` path.
+    # at the lowest token cost). 
+    # If True, bypass entity-first lean matching and use dense embeddings as the
+    # primary recall pool (the semantic equivalent of bm25_primary).
     bm25_primary: bool = True
+    dense_primary: bool = False
 
-    # ── Tier Routing ───────────────────────────────────────────────────
+    # ── Fusion & Rerank modes ───────────────────────────────────────────
+    enable_hybrid_fusion: bool = False
+    dense_rerank: bool = False
+    keyword_embedded_dense: bool = False
+
+    # ── Graph Constraints ───────────────────────────────────────────────────
     enable_dynamic_model_routing: bool = True  # Adjust tier by complexity/confidence
     tier_routing: Dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_TIER_ROUTING)
     )
 
-    # ── Context Assembly ───────────────────────────────────────────────
+    # ── Context Assembly ───────────────────────────────────────────────────
     use_4zone: bool = True               # Use 4-zone assembler (canonical). False → legacy layered.
     model_context_limit: int = 128_000
     soft_target_ratio: float = 0.25        # % of context limit we AIM to use
@@ -258,7 +260,7 @@ class SGConfig:
     ollama_timeout: int = 15                # Timeout per Ollama request (seconds)
 
     # ── Post-turn summary queue ────────────────────────────────────────────
-    summary_queue_enabled: bool = True      # Enable async post-turn summary queue
+    summary_queue_enabled: bool = False     # Defer summary gen to async queue
     summary_queue_max_batch: int = 10       # Max functions to process per drain run
 
     # ── IDE push/pull integration ─────────────────────────────────────────
@@ -437,17 +439,20 @@ def load_config(project_root: Optional[Path] = None) -> SGConfig:
             "enable_dynamic_model_routing",
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
-        "SG_ENABLE_SLM": ("enable_slm_fallback", lambda v: v.lower() in ("1", "true", "yes")),
-        "SG_ENABLE_KEYWORD_FALLBACK": (
-            "enable_keyword_fallback",
-            lambda v: v.lower() in ("1", "true", "yes"),
-        ),
         "SG_ENABLE_BM25_FALLBACK": (
             "enable_bm25_fallback",
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
+        "SG_ENABLE_DENSE_FALLBACK": (
+            "enable_dense_fallback",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
         "SG_BM25_PRIMARY": (
             "bm25_primary",
+            lambda v: v.lower() in ("1", "true", "yes"),
+        ),
+        "SG_DENSE_PRIMARY": (
+            "dense_primary",
             lambda v: v.lower() in ("1", "true", "yes"),
         ),
         "SG_GRAPH_POLICY": ("graph_expansion_policy", str),
@@ -515,9 +520,10 @@ def save_config(config: SGConfig, project_root: Path) -> None:
         "cli_mlm_model": config.cli_mlm_model,
         "cli_llm_model": config.cli_llm_model,
         "cli_api_base": config.cli_api_base,
-        "enable_slm_fallback": config.enable_slm_fallback,
         "enable_bm25_fallback": config.enable_bm25_fallback,
-        "enable_keyword_fallback": config.enable_keyword_fallback,
+        "enable_dense_fallback": config.enable_dense_fallback,
+        "bm25_primary": config.bm25_primary,
+        "dense_primary": config.dense_primary,
         "enable_dynamic_model_routing": config.enable_dynamic_model_routing,
         "tier_routing": config.tier_routing,
         # Legacy

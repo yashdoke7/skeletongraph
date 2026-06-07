@@ -42,16 +42,37 @@ def _get_model():
     if _model is not None:
         return _model
     try:
-        from sentence_transformers import SentenceTransformer
-        # trust_remote_code lets code-specific embedders (jina, nomic, …) load;
-        # harmless for MiniLM.
-        _model = SentenceTransformer(_MODEL_NAME, trust_remote_code=True)
-        return _model
+        import sys
+        import os
+        
+        # Remove current directory from sys.path to prevent 'requests' repo from poisoning Huggingface's import requests
+        cwd = os.getcwd()
+        original_sys_path = sys.path[:]
+        sys.path = [p for p in sys.path if p not in ('', cwd)]
+        
+        try:
+            import transformers
+            if not hasattr(transformers.PretrainedConfig, "is_decoder"):
+                transformers.PretrainedConfig.is_decoder = False
+            if not hasattr(transformers.PretrainedConfig, "add_cross_attention"):
+                transformers.PretrainedConfig.add_cross_attention = False
+            from sentence_transformers import SentenceTransformer
+            # trust_remote_code lets code-specific embedders (jina, nomic, …) load;
+            # harmless for MiniLM.
+            _model = SentenceTransformer(_MODEL_NAME, trust_remote_code=True)
+            return _model
+        finally:
+            sys.path = original_sys_path
     except ImportError:
         logger.debug("sentence-transformers not installed. Embeddings disabled.")
         return None
     except Exception as e:
         logger.warning(f"Failed to load embedding model: {e}")
+        try:
+            from rich.console import Console
+            Console().print(f"[bold yellow]WARNING:[/bold yellow] Skipping embeddings! Failed to load model '{_MODEL_NAME}': {e}")
+        except ImportError:
+            print(f"WARNING: Skipping embeddings! Failed to load model '{_MODEL_NAME}': {e}")
         return None
 
 
@@ -63,8 +84,16 @@ def is_available() -> bool:
     deterministic indexing never breaks because optional embeddings are broken.
     """
     try:
-        import sentence_transformers  # noqa: F401
-        return True
+        import sys
+        import os
+        cwd = os.getcwd()
+        original_sys_path = sys.path[:]
+        sys.path = [p for p in sys.path if p not in ('', cwd)]
+        try:
+            import sentence_transformers  # noqa: F401
+            return True
+        finally:
+            sys.path = original_sys_path
     except Exception as e:
         logger.debug("sentence-transformers unavailable. Embeddings disabled: %s", e)
         return False
@@ -168,6 +197,7 @@ class EmbeddingStore:
             chunk = texts_to_embed[i:i + chunk_size]
             chunk_emb = model.encode(
                 chunk,
+                batch_size=2,
                 show_progress_bar=False,
                 normalize_embeddings=True,  # L2-normalize for cosine sim via dot product
                 convert_to_numpy=True,
@@ -271,6 +301,42 @@ class EmbeddingStore:
             for i in top_indices
             if similarities[i] > 0.0  # Skip zero/negative similarities
         ]
+
+    def rescore(self, query: str, fqns: List[str]) -> Dict[str, float]:
+        """Compute semantic similarities for a specific subset of functions.
+        
+        Args:
+            query: Natural language query string.
+            fqns: List of FQNs to rescore.
+            
+        Returns:
+            Dictionary mapping FQN to similarity score. FQNs without embeddings
+            are omitted from the returned dictionary.
+        """
+        if self.is_empty or not fqns:
+            return {}
+
+        fqn_set = set(fqns)
+        indices = [i for i, f in enumerate(self.fqns) if f in fqn_set]
+        if not indices:
+            return {}
+
+        model = _get_model()
+        if model is None:
+            return {}
+
+        query_emb = model.encode(
+            [query],
+            show_progress_bar=False,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        ).astype(np.float32)
+
+        # Dot product with the subset matrix
+        sub_matrix = self.matrix[indices]
+        similarities = (sub_matrix @ query_emb.T).flatten()
+
+        return {self.fqns[idx]: float(sim) for idx, sim in zip(indices, similarities)}
 
     def get_similarity(self, fqn: str, query: str) -> float:
         """Get the similarity score between a specific function and a query.
