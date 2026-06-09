@@ -60,6 +60,7 @@ eval/logs/
 
 # Internal planning docs (not public)
 docs/plan.md
+docs/sg.md
 docs/BLUEPRINT.md
 docs/CODEMEMBENCH.md
 docs/results_memory_analysis.md
@@ -100,7 +101,15 @@ sg.*.json
 sg-*.json
 cbmem.*.json
 aider.*.json
+graphify.*.json
+summary-*.json
 logs/
+
+# graphify extract output (per-repo graph; never commit, never let it leak into a patch)
+graphify-out/
+**/graphify-out/
 
 eval/scripts/set_nim_env.bat
 eval/scripts/set_nim_env.ps1
+
+.aider.tags.cache.v4
