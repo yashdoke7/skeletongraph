@@ -481,8 +481,8 @@ _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
                 "sg-weakfallback",
                 "sg-lean", "sg-router", "sg-fusion", "sg-chain", "sg-chain-nopath",
                 # ablations AROUND the new lean default (final-run stage)
-                "sg-full", "sg-summary", "sg-embed", "sg-hybrid-fusion", 
-                "sg-dense-rerank", "sg-keyword-dense", "sg-rerank"}
+                "sg-full", "sg-summary", "sg-embed", "sg-hybrid-fusion",
+                "sg-dense-rerank", "sg-keyword-dense", "sg-rerank", "sg-seed"}
 
 # The lean product default: structural core only. Summaries + embeddings are
 # OFF — in the heuristic_query path (eval + IDE sg_search) embeddings feed only
@@ -874,10 +874,21 @@ def _augment_with_symbols(text: str) -> str:
     return (text or "") + "\n\nRelevant symbols: " + " ".join(sorted(syms)[:20])
 
 
+def _is_test_path(fqn: str) -> bool:
+    p = fqn.split("::", 1)[0].replace("\\", "/").lower()
+    return ("/test" in p or p.startswith("test") or "/tests/" in p
+            or "_test." in p or "conftest" in p)
+
+
 def _seed_fqns_for(symbols: Set[str], store) -> Set[str]:
     """Resolve issue symbol NAMES to exact FQNs in the index (suffix match) so
     they can be passed as HARD seeds (top structural score). Prefers exact
-    short-name matches; a dotted `Class.method` must match the FQN tail."""
+    short-name matches; a dotted `Class.method` must match the FQN tail.
+
+    SOURCE before tests: an issue's traceback names the buggy SOURCE function, and
+    the same short name often also exists in a test file (e.g. Header.fromstring in
+    both header.py and test_header.py). Seeding on the test pollutes the anchor, so
+    drop test-file matches UNLESS every match is a test (rare; then keep them)."""
     if not symbols:
         return set()
     shorts = {s.split(".")[-1] for s in symbols}
@@ -887,7 +898,8 @@ def _seed_fqns_for(symbols: Set[str], store) -> Set[str]:
         last = tail.split(".")[-1]
         if last in shorts or tail in symbols or any(tail.endswith("." + s) for s in symbols):
             out.add(fqn)
-    return out
+    non_test = {f for f in out if not _is_test_path(f)}
+    return non_test or out
 
 
 def _retrieve_seed(query: str, repo: Path, k: int) -> List[str]:
@@ -1076,6 +1088,16 @@ def _retrieve_sg(backend: str, query: str, repo: Path, k: int):
         return _retrieve_chain(query, repo, k)
     if backend == "sg-chain-nopath":
         return _retrieve_chain(query, repo, k, use_path=False)
+    # sg-rerank and sg-seed have DEDICATED retrieval logic, not a config-driven
+    # SGEngine pass. They are in _SG_BACKENDS (so search_code routes here), so we
+    # MUST dispatch them explicitly — otherwise they fall through to the generic
+    # heuristic_query path below and silently behave like plain `sg` (this is the
+    # bug that made sg-rerank = sg and sg-seed error out). Wrap their FQN lists in
+    # the (fqn, summary) contract this function returns.
+    if backend == "sg-rerank":
+        return [(fqn, "") for fqn in _retrieve_rerank(query, repo, k)]
+    if backend == "sg-seed":
+        return [(fqn, "") for fqn in _retrieve_seed(query, repo, k)]
 
     _ensure_sg_on_path()
     from skeletongraph.engine import SGEngine
