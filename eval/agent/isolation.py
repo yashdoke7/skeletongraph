@@ -107,6 +107,24 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
     work.mkdir(parents=True, exist_ok=True)
 
     src = Path(task["repo_path"])
+    # The graphify arm needs its PREBUILT graph (graphify-out/graph.json) inside
+    # the isolated workspace. Otherwise the backend finds no graph, re-extracts
+    # from scratch (a slow LLM build that times out), and every query returns
+    # "graph file not found" → all-zero results. The graph is gitignored in the
+    # workspace (_WORKSPACE_GITIGNORE), so copying it cannot leak into the patch.
+    # Every OTHER arm still excludes + strips it (clean SG-free start).
+    keep_graphify = (arm == "graphify" or arm.startswith("graphify"))
+    # Dense arms reuse the PREBUILT embeddings (embeddings.npz) in the base repo
+    # instead of re-encoding every workspace. The doc vectors load from disk; only
+    # the QUERY is encoded at search time (cheap). REQUIRES SG_EMBED_MODEL set at
+    # eval time to match the prebuilt vectors' dimension (Jina = 768). Covers ALL
+    # arms that use embeddings, not just sg-embed. NOTE: only safe for
+    # Verified/Python — the prebuilt index predates the multi-language FQN fix, so
+    # REBUILD (don't keep) for Pro / non-Python.
+    keep_sg = any(t in arm for t in ("embed", "dense", "fusion")) or arm == "summary-dense"
+    copy_excludes = [a for a in _SG_ARTIFACTS
+                     if not (keep_graphify and a == "graphify-out") and
+                     not (keep_sg and a == ".skeletongraph")]
     # Exclude .git: the source repos are git WORKTREES, so their .git is a
     # FILE pointing into a shared cache — copying it leaves a broken pointer.
     # We re-init a clean git repo below so `git diff` still works.
@@ -125,7 +143,7 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
     for attempt in range(3):
         try:
             shutil.copytree(src, repo,
-                            ignore=shutil.ignore_patterns(*_SG_ARTIFACTS, ".git"),
+                            ignore=shutil.ignore_patterns(*copy_excludes, ".git"),
                             symlinks=False,
                             ignore_dangling_symlinks=True)
             break
@@ -135,14 +153,23 @@ def prepare_workspace(task: dict, arm: str, repeat: int = 0,
                 raise
             time.sleep(0.6 * (attempt + 1))
 
-    _strip_sg_state(repo)
+    _strip_sg_state(repo, keep_graphify=keep_graphify, keep_sg=keep_sg)
     _init_clean_git(repo)
     return repo
 
 
-def _strip_sg_state(repo: Path) -> None:
-    """Delete any SkeletonGraph artifacts so the run starts with zero SG state."""
+def _strip_sg_state(repo: Path, keep_graphify: bool = False,
+                    keep_sg: bool = False) -> None:
+    """Delete any SkeletonGraph artifacts so the run starts with zero SG state.
+
+    keep_graphify: preserve a prebuilt graphify-out/ (the graphify arm needs it).
+    keep_sg: preserve a prebuilt .skeletongraph/ (dense arms reuse its prebuilt
+    embeddings instead of re-encoding — see prepare_workspace)."""
     for name in _SG_ARTIFACTS:
+        if keep_graphify and name == "graphify-out":
+            continue
+        if keep_sg and name == ".skeletongraph":
+            continue
         p = repo / name
         if p.is_dir():
             _rmtree_safe(p)
