@@ -288,6 +288,15 @@ class EmbeddingStore:
             convert_to_numpy=True,
         ).astype(np.float32)
 
+        # Dimension guard (see get_similarity): a prebuilt matrix loaded with a
+        # mismatched query encoder would raise here. Degrade to "no dense results"
+        # rather than crash the arm.
+        if query_emb.shape[-1] != self.matrix.shape[-1]:
+            logger.warning("Embedding dim mismatch in search (index=%d, query=%d) "
+                           "— set SG_EMBED_MODEL to the index's model; returning no "
+                           "dense hits.", self.matrix.shape[-1], query_emb.shape[-1])
+            return []
+
         # Cosine similarity via dot product (both are L2-normalized)
         similarities = (self.matrix @ query_emb.T).flatten()
 
@@ -358,10 +367,25 @@ class EmbeddingStore:
             convert_to_numpy=True,
         ).astype(np.float32)
 
-        # query_emb shape is (1, 384) — use [0] to get (384,) so the dot product
-        # with matrix[idx] (384,) returns a numpy scalar, not a (1,) array.
-        # float((1,) array) raises "only 0-dimensional arrays can be converted
-        # to Python scalars"; float(scalar) works.
+        # Dimension guard: a prebuilt matrix (e.g. Jina 768) loaded while the
+        # active query encoder is a different model (e.g. MiniLM 384) would make
+        # this dot product raise and crash the whole query. Embedding similarity
+        # is only a confidence TIEBREAKER, so degrade gracefully (return 0.0) and
+        # warn once instead of failing. Fix is to set SG_EMBED_MODEL to the model
+        # the index was built with.
+        if query_emb.shape[-1] != self.matrix.shape[-1]:
+            cls = type(self)
+            if not getattr(cls, "_dim_warned", False):
+                cls._dim_warned = True
+                logger.warning(
+                    "Embedding dim mismatch: index=%d, query encoder=%d. "
+                    "Skipping embedding similarity (set SG_EMBED_MODEL to the "
+                    "model the index was built with). Warning shown once.",
+                    self.matrix.shape[-1], query_emb.shape[-1])
+            return 0.0
+
+        # query_emb shape is (1, D) — use [0] to get (D,) so the dot product with
+        # matrix[idx] (D,) returns a numpy scalar, not a (1,) array.
         return float(self.matrix[idx] @ query_emb[0])
 
     # ── Persistence ──────────────────────────────────────────────────────
