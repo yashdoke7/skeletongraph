@@ -177,6 +177,55 @@ def _load_gold_fqns(path: Path) -> dict:
     return gold
 
 
+def _load_repo_paths(path: Path) -> dict:
+    """task_id -> repo_path (needed to locate each graphify graph's build-cost
+    sidecar, <repo_path>/graphify-out/.graphify_analysis.json)."""
+    out = {}
+    try:
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                d = json.loads(line)
+                out[d["task_id"]] = d.get("repo_path", "")
+    except Exception:
+        pass
+    return out
+
+
+def _graphify_build_tokens(repo_path: str) -> tuple:
+    """(input, output) one-time graph-extraction tokens for a graphify repo,
+    read from the graph's <repo>/graphify-out/.graphify_analysis.json sidecar.
+    (0, 0) if absent (graph not built, or arm doesn't build a graph)."""
+    if not repo_path:
+        return (0, 0)
+    try:
+        p = Path(repo_path) / "graphify-out" / ".graphify_analysis.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        t = d.get("tokens") or {}
+        return (int(t.get("input", 0) or 0), int(t.get("output", 0) or 0))
+    except Exception:
+        return (0, 0)
+
+
+def _summary_build_tokens(repo_path: str) -> tuple:
+    """(input, output) one-time summary generation tokens for the repo."""
+    if not repo_path:
+        return (0, 0)
+    try:
+        p = Path(repo_path) / ".skeletongraph" / "summcache_openai.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        u = d.get("__usage__") or {}
+        return (int(u.get("input", 0) or 0), int(u.get("output", 0) or 0))
+    except Exception:
+        return (0, 0)
+
+
+# Arms that build an LLM knowledge graph (one-time, per repo). For these the
+# total cost = agent cost + amortized build cost. cbmem builds a graph too but
+# its binary does not expose token counts, so its build cost is UNDER-COUNTED
+# (flagged in the table) rather than silently zero.
+_LLM_INDEX_ARMS = ("graphify", "summary-llm-bm25", "summary-llm-dense")
+
+
 # ── significance ────────────────────────────────────────────────────────────
 
 
@@ -233,11 +282,13 @@ def aggregate(stage: str | None, task_ids: set | None = None,
     # Gold fqns for the function-level columns (tightened gold; skipped if absent).
     gpath = gold_fqns_path if gold_fqns_path is not None else _DEFAULT_GOLD_FQNS
     gold = {}
+    repo_of = {}
     if gpath and Path(gpath).exists():
         try:
             gold = _load_gold_fqns(gpath)
         except Exception:
             gold = {}
+        repo_of = _load_repo_paths(gpath)
 
     def _loc(rs):
         """(funcR@10, funcHit, funcRank) for an arm's runs vs gold_fqns."""
@@ -286,6 +337,28 @@ def aggregate(stage: str | None, task_ids: set | None = None,
                  if r.get("retrieval_rank")]          # nonzero = found
         med_rank = round(statistics.median(ranks), 1) if ranks else None
         label = config.ARMS.get(arm, arm).label if arm in config.ARMS else arm
+        # ── LLM index/build cost (graphify/cbmem) — a per-repo cost SG never pays.
+        # Each graphify task's checkout has its own graph; read its sidecar token
+        # counts and price them at the EXTRACTION-model rate (≠ agent rate). The
+        # build LLM is NOT cached, so it adds to both total_cost and total_cost_c.
+        agent_cost = _mean([r.get('imputed_cost') for r in rs])
+        agent_cost_c = _mean([_cost_cached(r) for r in rs])
+        bi = bo = 0
+        if arm in _LLM_INDEX_ARMS:
+            for r in rs:
+                rp = repo_of.get(r.get("task_id"), "")
+                if "graphify" in arm:
+                    i, o = _graphify_build_tokens(rp)
+                elif "summary-llm" in arm:
+                    i, o = _summary_build_tokens(rp)
+                else:
+                    i = o = 0
+                bi += i; bo += o
+        n_rs = max(1, len(rs))
+        idx_in, idx_out = bi / n_rs, bo / n_rs          # mean per task
+        idx_cost = config.impute_extract_cost(idx_in, idx_out) if arm in _LLM_INDEX_ARMS else None
+        total_cost = round(agent_cost + (idx_cost or 0.0), 5)
+        total_cost_c = round(agent_cost_c + (idx_cost or 0.0), 5)
         rows.append({
             "key": arm,            # short id (e.g. "sg-chain") — for tables
             "label": label,        # long description — for the legend only
@@ -309,8 +382,15 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             "turns": _mean([r.get('n_turns') for r in rs]),
             "intok": round(_mean([r.get('billed_input') for r in rs])),
             "outtok": round(_mean([r.get('billed_output') for r in rs])),
-            "cost": _mean([r.get('imputed_cost') for r in rs]),
-            "cost_c": _mean([_cost_cached(r) for r in rs]),   # cost w/ prefix caching
+            "cost": agent_cost,                # AGENT-loop cost only (all arms)
+            "cost_c": agent_cost_c,             # agent cost w/ prefix caching
+            # index/build LLM cost (graphify/cbmem). None for arms with no LLM
+            # index → renders as "—" / null in tables and figures.
+            "idx_in": round(idx_in) if arm in _LLM_INDEX_ARMS else None,
+            "idx_out": round(idx_out) if arm in _LLM_INDEX_ARMS else None,
+            "idx_cost": idx_cost,
+            "total_cost": total_cost,           # agent + index build
+            "total_cost_c": total_cost_c,       # (agent cached) + index build
         })
 
     sorted_rows = sorted(rows, key=lambda r: -(r['pass1'] or 0))
@@ -322,7 +402,6 @@ def aggregate(stage: str | None, task_ids: set | None = None,
     def _rk(x):    return f"{x:.1f}" if x is not None else "—"
 
     # ── Compact monospace table (collapsible) ────────────────────────────────
-    lines += ["```"]
     hdr = (f"{'arm':<18}{'n':>4}{'pass@1':>8}{'patch%':>8}{'rec@1':>8}"
            f"{'rec@cum':>9}{'prec':>7}{'fRank':>6}{'funcR@10':>9}{'funcHit':>8}"
            f"{'fnRank':>7}{'tokens':>9}{'turns':>7}{'cost$':>9}{'cost(c)':>9}")
@@ -336,9 +415,8 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             f"{_rk(r['funcrank']):>7}{r['intok']:>9,}{r['turns']:>7.1f}"
             f"{('$'+format(r['cost'],'.4f')):>9}{('$'+format(r['cost_c'],'.4f')):>9}"
         )
-    lines.append("```")
-    lines += ["",
-              "_pass@1_ = resolved % (empty patch = fail) · _patch%_ = any patch · "
+    lines.append("")
+    lines += ["_pass@1_ = resolved % (empty patch = fail) · _patch%_ = any patch · "
               "_rec@1/rec@cum_ = FILE-recall after first / all searches · _prec_ = "
               "first-search precision · _fRank_ = median rank of first gold FILE · "
               "_funcR@10/funcHit/fnRank_ = FUNCTION-level recall@10 / hit / median rank "
@@ -347,18 +425,58 @@ def aggregate(stage: str | None, task_ids: set | None = None,
               "system-prompt prefix is cached (token count unchanged).",
               "", "</details>"]
 
+    # ── LLM index/build cost table (graphify/cbmem only) ─────────────────────
+    # Separates the THREE cost components the comparison must keep honest:
+    #   (1) agent-loop cost  — the per-task LLM cost EVERY arm pays (cost$ above)
+    #   (2) index/build cost — the one-time per-repo LLM graph build that ONLY
+    #       graph competitors pay (SG's tree-sitter index is zero-LLM → null)
+    #   (3) total            — (1)+(2), at the respective model prices
+    # Priced at the EXTRACTION model rate (config.PRICE_EXTRACT_*; Llama-3.3-70B
+    # on NIM), distinct from the agent model rate. Empty if no LLM-index arm ran.
+    idx_rows = [r for r in sorted_rows if r.get("idx_cost") is not None]
+    if idx_rows:
+        lines += ["", "### LLM index/build cost (graph competitors only)", "",
+                  "_Agent cost is the per-task loop cost all arms pay; build cost is "
+                  "the one-time per-repo LLM graph extraction that only graph "
+                  "competitors pay (SG = zero-LLM tree-sitter = null). Build tokens "
+                  f"priced at the extraction model ({config.PRICE_EXTRACT_INPUT_PER_M}/"
+                  f"{config.PRICE_EXTRACT_OUTPUT_PER_M} $/M in/out); agent tokens at "
+                  f"{config.PRICE_INPUT_PER_M}/{config.PRICE_OUTPUT_PER_M}. Build cost "
+                  "is per-task amortized over the arm's runs._", "",
+                  "| Arm | build in-tok | build out-tok | build $ | agent $ "
+                  "| total $ | total $(cached) |",
+                  "|---|--:|--:|--:|--:|--:|--:|"]
+        for r in idx_rows:
+            lines.append(
+                f"| `{r['key']}` | {r['idx_in']:,} | {r['idx_out']:,} | "
+                f"${r['idx_cost']:.4f} | ${r['cost']:.4f} | "
+                f"${r['total_cost']:.4f} | ${r['total_cost_c']:.4f} |")
+        lines += ["", "_cbmem builds a tree-sitter knowledge graph with NO LLM "
+                  "(index_repository runs in ~30s, no API key) — so its build cost is "
+                  "genuinely $0, like SG. Only graphify pays an LLM build. cbmem is thus "
+                  "a fair zero-LLM structural control; SG wins on retrieval + tokens, not build._"]
+
     # ── Markdown pipe table (for paper — comes first for easy copy) ──────────
+    # cost columns are kept SEPARATE on purpose (asked for explicitly):
+    #   agent$   = per-task agent-loop cost EVERY arm pays (was cost$)
+    #   index$   = one-time per-repo LLM build cost, ONLY graph competitors pay
+    #              (SG/baselines = zero-LLM = —); never silently folded into agent$
+    #   total$   = agent$ + index$ — the grand total of everything an arm costs
+    def _idx(r):  return f"${r['idx_cost']:.4f}" if r.get('idx_cost') is not None else "—"
+    def _tot(r):  return f"${r.get('total_cost', r['cost']):.4f}"
     lines += ["### Results (sorted by pass@1)", "",
               "| Arm | n | pass@1 | patch% | rec@1 | rec@cum | prec | fRank "
-              "| funcR@10 | funcHit | fnRank | tokens | turns | cost$ | cost(c) |",
+              "| funcR@10 | funcHit | fnRank | tokens | turns | agent$ | agent$(c) "
+              "| index$ | total$ |",
               "| --- | ---:| ---:| ---:| ---:| ---:| ---:| ---:"
-              "| ---:| ---:| ---:| ---:| ---:| ---:| ---:|"]
+              "| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:| ---:|"]
     for r in sorted_rows:
         lines.append(
             f"| `{r['key']}` | {r['n']} | {_pct(r['pass1'])} | {_p0(r['patchrate'])} "
             f"| {_f3(r['rec1'])} | {_f3(r['reccum'])} | {_f3(r['prec'])} | {_rk(r['rank'])} "
             f"| {_f3(r['funcr'])} | {_p0(r['funchit'])} | {_rk(r['funcrank'])} "
-            f"| {r['intok']:,} | {r['turns']:.1f} | ${r['cost']:.4f} | ${r['cost_c']:.4f} |"
+            f"| {r['intok']:,} | {r['turns']:.1f} | ${r['cost']:.4f} | ${r['cost_c']:.4f} "
+            f"| {_idx(r)} | {_tot(r)} |"
         )
 
     # ── Arm legend (short id → what it is) ───────────────────────────────────
@@ -531,6 +649,7 @@ def aggregate(stage: str | None, task_ids: set | None = None,
                                         for r in complete), 4),
             "pass1": _mean(pass_vals) if pass_vals else None,
         }
+    summary["_rows"] = rows          # full per-arm rows (all metrics) for plotting
     jsout = config.RUNS_DIR / f"summary{sfx}.json"
     jsout.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Wrote {jsout}")

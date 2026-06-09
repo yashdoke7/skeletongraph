@@ -527,13 +527,16 @@ STAGES: Dict[str, Stage] = {
     ),
     "sg-concepts": Stage(
         "sg-concepts",
-        ["sg-chain", "sg-rerank", "summary-dense", "sg-hybrid-fusion", "sg-dense-rerank", "sg-keyword-dense"],
+        ["sg-chain", "sg-rerank", "summary-dense", "sg-hybrid-fusion",
+         "sg-dense-rerank", "sg-keyword-dense", "sg-seed", "sg-embed"],
         100, "swebench",
         "SG CONCEPTS — re-test the best retrieval CONCEPTS in the NATIVE harness "
         "(each gets SG's read_symbol/expand): sg-chain (structural+lexical fusion + "
         "graph-path evidence), sg-rerank (bm25 recall pool -> SG structural rerank), "
-        "summary-dense (intent/purpose-layer search), sg-embed-fallback, sg-embed-rerank, "
-        "and sg-ultimate. Run into the SAME tag as final-v2 to compare against `sg` + baselines."
+        "summary-dense (intent/purpose-layer search), sg-hybrid-fusion / sg-dense-rerank "
+        "/ sg-keyword-dense (Jina dense variants), sg-seed (issue-traceback anchors), "
+        "sg-embed (structural pool + dense rerank). Run into the SAME tag as final-v2 "
+        "to compare against `sg` + baselines."
     ),
     "final-comparators": Stage(
         "final-comparators",
