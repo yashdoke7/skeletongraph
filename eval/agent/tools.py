@@ -237,6 +237,16 @@ class ToolExecutor:
     # ── search_code — the arm under test ───────────────────────────────────
 
     def _search(self, query: str, k: int) -> str:
+        # ── none arm: no retrieval backend — stop the model immediately ──────
+        # Without this guard the model calls search_code 6+ times/task, gets
+        # "No results." each time, and wastes turns trying different queries.
+        # Return a single directive so it pivots to list_files/read_file on the
+        # first call. Does NOT touch _search_calls or first_search_hits so the
+        # no-retrieval baseline metrics stay clean.
+        if self.backend == "none":
+            return ("No search backend available — this arm tests agent "
+                    "navigation without retrieval. Explore with list_files "
+                    "then read_file candidate source files directly.")
         # ── reject empty / whitespace-only queries ──────────────────────────
         # Observed: the model occasionally calls search_code(query="") (1/30
         # llama33 SG runs hit this). Silently returning "No results." wastes
@@ -986,6 +996,22 @@ def _sg_config(backend: str):
     """
     from skeletongraph.config import SGConfig
     cfg = SGConfig()
+
+    # PIN entity-first for EVERY eval SG arm. SGConfig.bm25_primary now defaults to
+    # True — that is the MCP/CLI/hooks PRODUCT default (engine-side sg-rerank, set
+    # in 02ef8a4) and must NOT leak into the eval. bm25_primary=True makes the
+    # resolver pull a 25-wide BM25 pool on EVERY query and add ALL of it to the
+    # candidate set, so high-centrality lexical neighbors (esp. TEST files that
+    # repeat the symbol name) outrank the exact entity match → recall@1 collapses
+    # (measured: v2 0.73 → v3 0.48 for lean sg; django-14725 rank 1→None; sympy-
+    # 24066 rank 2→9). v2 had no such field (pure entity-first). This is the "pin
+    # lean sg bm25_primary=False" commits 01005d9/26f2933 described but never wrote.
+    # Set BEFORE the branches so the ablation arms (sg-nograph/-norerank/-full/...)
+    # are covered too — none of them, nor the dense arms (which use
+    # enable_hybrid_fusion / dense_rerank), need bm25_primary=True. It ALSO fixes
+    # sg-rerank/sg-seed/sg-embed: their internal SG-confirmation pass calls
+    # _sg_config("sg-chain"), so a BM25-polluted SG order degraded their rank.
+    cfg.bm25_primary = False
 
     # ── the lean product default (sg + trial/learned arms) ──────────────────
     if backend in _LEAN_SG:
