@@ -25,7 +25,7 @@ try:
         """Count tokens using tiktoken BPE. Accurate for code."""
         if not text:
             return 0
-        return len(_enc.encode(text))
+        return len(_enc.encode(text, allowed_special="all"))
 
     def measure_file_tokens(
         file_path: Path,
