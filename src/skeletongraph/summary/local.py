@@ -70,7 +70,11 @@ def _extract_params(signature: str) -> List[str]:
         param = raw.strip()
         if not param or param in {"self", "cls"}:
             continue
+        # Python: 'name: type = default' → split on : then =
         name = param.split(":", 1)[0].split("=", 1)[0].strip()
+        # Go/Java/C: 'name type' or '*type' → take the first word only
+        if " " in name:
+            name = name.split()[0]
         if name and name not in {"*", "/"}:
             params.append(name.lstrip("*"))
     return params
