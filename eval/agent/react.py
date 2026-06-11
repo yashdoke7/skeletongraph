@@ -230,8 +230,12 @@ def _stream_completion(client, messages: list, tool_schemas=TOOL_SCHEMAS):
                     fn = getattr(tc, "function", None)
                     if fn:
                         if getattr(fn, "name", None):
-                            tc_acc[i]["name"] += fn.name
+                            # SET, not accumulate: the OpenAI streaming spec sends
+                            # the tool name once (first chunk only). NIM occasionally
+                            # re-sends it on a later chunk → += produces "read_fileread_file".
+                            tc_acc[i]["name"] = fn.name
                         if getattr(fn, "arguments", None):
+                            # arguments ARE streamed incrementally — keep +=
                             tc_acc[i]["arguments"] += fn.arguments
 
                 # Usage sometimes comes on the last choice chunk instead
