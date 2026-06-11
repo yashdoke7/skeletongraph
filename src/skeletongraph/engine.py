@@ -34,9 +34,6 @@ from .retrieval.classifier import (
 from .retrieval.confidence import compute_confidence
 from .retrieval.model_router import route_model_tier
 from .retrieval.session import Session
-from .retrieval.slm_extractor import (
-    slm_extract, SLMResult, prefilter_for_slm,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -200,13 +197,12 @@ class SGEngine:
         max_retries: int = 2,
         exclude_fqns: Optional[Set[str]] = None,
         delivery: str = "ide",
-        force_slm: bool = False,
     ) -> PipelineResult:
         """Execute the full v4 pipeline: Understand → Retrieve → Assemble.
 
         Args:
             prompt: User's natural language request.
-            max_retries: Max SLM retry attempts on MISS.
+            max_retries: Max retrieval retry attempts on MISS.
             exclude_fqns: FQNs to exclude (for supplementary queries).
 
         Returns:
@@ -228,38 +224,22 @@ class SGEngine:
         for attempt in range(max_retries + 1):
             # ── Phase 1: UNDERSTAND ─────────────────────────────────────
             p1_start = time.time()
-            intent, slm_result, regex_confidence = self._phase1_understand(
-                prompt, store, session,
-                retry_note="" if attempt == 0 else f"Attempt {attempt + 1}: Previous attempt found {result.slm_entities_found} entities. Broaden search.",
-                force_slm=force_slm,
-            )
+            intent, regex_confidence = self._phase1_understand(prompt, store, session)
             result.phase1_ms = (time.time() - p1_start) * 1000
 
-            # Classify mode
+            # Classify mode (zero-LLM: regex intent only)
             classification = classify_query(
                 intent,
                 confidence=None,  # Will be set after resolution
                 target_fqns=set(),
                 n_files_involved=0,
-                slm_result=slm_result,
             )
-
-            # Track SLM usage
-            if slm_result and slm_result.success:
-                result.slm_used = True
-                result.slm_reasoning = slm_result.reasoning
-                result.slm_entities_found = len(slm_result.entities)
-                result.slm_input_tokens = slm_result.input_tokens
-                result.slm_output_tokens = slm_result.output_tokens
-                result.slm_cost_usd = slm_result.cost_usd
-                result.pipeline_path = "slm"
-            else:
-                result.pipeline_path = "regex"
+            result.pipeline_path = "regex"
 
             # ── Phase 2: RETRIEVE ───────────────────────────────────────
             p2_start = time.time()
             resolver_result = self._phase2_retrieve(
-                prompt, intent, slm_result, classification,
+                prompt, intent, classification,
                 store, session, exclude_fqns, set(entities or []),
             )
             result.phase2_ms = (time.time() - p2_start) * 1000
@@ -293,7 +273,7 @@ class SGEngine:
         p3_start = time.time()
         result.context_text = self._phase3_assemble(
             prompt, resolver_result, classification,
-            slm_result, store, session,
+            store, session,
         )
         result.phase3_ms = (time.time() - p3_start) * 1000
 
@@ -338,29 +318,15 @@ class SGEngine:
 
     # ── Phase 1: UNDERSTAND ─────────────────────────────────────────────
 
-    def _phase1_understand(
-        self,
-        prompt: str,
-        store: IndexStore,
-        session: Optional[Session],
-        retry_note: str = "",
-        force_slm: bool = False,
-    ):
-        """Phase 1: Regex entity extraction.
-        
-        Returns (intent, None, regex_confidence).
-        """
-        # Step 1: Regex entity extraction (~1ms, always)
+    def _phase1_understand(self, prompt: str, store: IndexStore,
+                           session: Optional[Session] = None):
+        """Phase 1: regex entity extraction (zero-LLM). Returns (intent, confidence)."""
         known_files = set(store.file_skeletons.keys())
         known_fqns = set(store.skeleton_table.keys())
         intent = analyze_intent(prompt, known_files, known_fqns)
-
-        # Step 2: Determine confidence
         regex_confidence = "HIGH" if intent.function_names else (
-            "MEDIUM" if intent.file_paths else "LOW"
-        )
-
-        return intent, None, regex_confidence
+            "MEDIUM" if intent.file_paths else "LOW")
+        return intent, regex_confidence
 
     # ── Phase 2: RETRIEVE ───────────────────────────────────────────────
 
@@ -368,18 +334,13 @@ class SGEngine:
         self,
         prompt: str,
         intent: Intent,
-        slm_result: Optional[SLMResult],
         classification: ClassificationResult,
         store: IndexStore,
         session: Optional[Session],
         exclude_fqns: Optional[Set[str]] = None,
         seed_fqns: Optional[Set[str]] = None,
     ) -> ResolverResult:
-        """Phase 2: Graph traversal and candidate ranking.
-
-        Uses the existing resolver but feeds it SLM-enriched intent.
-        Zero LLM cost — pure Python computation.
-        """
+        """Phase 2: Graph traversal and candidate ranking. Zero LLM cost."""
         mode_spec = classification.mode_spec or MODE_SPECS[classification.query_mode]
 
         # Use mode-specific graph depth
@@ -432,7 +393,6 @@ class SGEngine:
         prompt: str,
         resolver_result: ResolverResult,
         classification: ClassificationResult,
-        slm_result: Optional[SLMResult],
         store: IndexStore,
         session: Optional[Session],
     ) -> str:
@@ -489,9 +449,7 @@ class SGEngine:
             )
         except Exception as e:
             logger.warning("prompt_builder assembly failed: %s, using minimal assembly", e)
-            context_text = self._minimal_assemble(
-                prompt, resolver_result, slm_result
-            )
+            context_text = self._minimal_assemble(prompt, resolver_result)
             self._last_assembly_tokens = len(context_text) // 4
             self._last_assembly_native_estimate = 0
 
@@ -499,27 +457,12 @@ class SGEngine:
         if _original_summaries is not None:
             store.summaries = _original_summaries
 
-        # Prepend SLM reasoning if available (CLI path)
-        if slm_result and slm_result.reasoning:
-            context_text = (
-                f"## Retrieval Analysis\n{slm_result.reasoning}\n\n"
-                + context_text
-            )
-            self._last_assembly_tokens = len(context_text) // 4
-
         return context_text
 
-    def _minimal_assemble(
-        self,
-        prompt: str,
-        resolver_result: ResolverResult,
-        slm_result: Optional[SLMResult],
-    ) -> str:
+    def _minimal_assemble(self, prompt: str,
+                          resolver_result: ResolverResult) -> str:
         """Minimal fallback assembly if prompt_builder fails."""
         parts = [f"## Task\n{prompt}\n"]
-
-        if slm_result and slm_result.reasoning:
-            parts.append(f"## Analysis\n{slm_result.reasoning}\n")
 
         for c in resolver_result.candidates[:10]:
             sk = c.skeleton
@@ -707,7 +650,6 @@ class SGEngine:
             confidence=None,
             target_fqns=set(),
             n_files_involved=0,
-            slm_result=None,
             intent_override=mode_hint,
         )
         mode_spec = classification.mode_spec or MODE_SPECS[classification.query_mode]

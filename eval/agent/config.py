@@ -548,6 +548,51 @@ STAGES: Dict[str, Stage] = {
         "under-counted by the production-pipeline parser.",
     ),
 
+    # ── Universal stage — every registered arm, 100 tasks ───────────────
+    # Use --only-arms to pick exactly what you want to run; --skip-arms to
+    # exclude env-incompatible arms for this terminal.  Examples:
+    #
+    #   python -m eval.agent.run_stage --stage v --only-arms sg sg-rerank
+    #   python -m eval.agent.run_stage --stage v --only-arms cbmem aider graphify
+    #   python -m eval.agent.run_stage --stage v --skip-arms cbmem aider graphify
+    #   python -m eval.agent.run_stage --stage v --only-arms sg bm25 grep none hybrid --shard 1/6
+    #
+    # Env split reminder (cbmem/aider/graphify need their own envs — run those
+    # in a separate terminal with only those arms selected):
+    #   sg-env  : sg sg-rerank sg-chain sg-seed sg-nograph sg-norerank sg-full
+    #             sg-embed sg-summary sg-hybrid-fusion sg-dense-rerank
+    #             sg-keyword-dense summary-dense summary-bm25
+    #             summary-llm-dense summary-llm-bm25
+    #             bm25 grep none hybrid
+    #   cbmem-env : cbmem  (needs CBMEM_BIN on PATH)
+    #   aider-env : aider  (needs aider-chat, separate venv)
+    #   graphify-env: graphify  (needs graphifyy, GRAPHIFY_BIN)
+    "v": Stage(
+        "v",
+        [
+            # ── baselines ──────────────────────────────────────────────────
+            "sg", "bm25", "grep", "none", "hybrid",
+            # ── sg headline operating points ───────────────────────────────
+            "sg-rerank", "sg-chain", "sg-seed",
+            # ── sg ablations ───────────────────────────────────────────────
+            "sg-nograph", "sg-norerank", "sg-full", "sg-embed", "sg-summary",
+            "sg-fullgraph", "sg-nosummary", "sg-noembed", "sg-weakfallback",
+            # ── dense variants ─────────────────────────────────────────────
+            "sg-hybrid-fusion", "sg-dense-rerank", "sg-keyword-dense",
+            # ── summary-search ─────────────────────────────────────────────
+            "summary-bm25", "summary-dense",
+            "summary-llm-bm25", "summary-llm-dense",
+            # ── external competitors (own envs — use --only-arms) ──────────
+            "cbmem", "aider", "graphify",
+        ],
+        100, "swebench",
+        "UNIVERSAL — every arm in one stage. Use --only-arms to target a "
+        "subset and --skip-arms to exclude env-incompatible arms. "
+        "--shard k/N splits tasks across terminals for multi-key runs. "
+        "Env split: sg/baselines in sg-env; cbmem/aider/graphify each need "
+        "their own env — run those separately with --only-arms.",
+    ),
+
     "smoke": Stage(
         "smoke",
         ["sg", "bm25", "grep", "hybrid", "none"],

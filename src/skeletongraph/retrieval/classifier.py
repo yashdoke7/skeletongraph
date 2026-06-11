@@ -29,7 +29,6 @@ from typing import Dict, List, Optional, Set, TYPE_CHECKING
 if TYPE_CHECKING:
     from .confidence import ConfidenceScore
     from .intent import Intent
-    from .slm_extractor import SLMResult
 
 from .intent import TaskType
 
@@ -337,14 +336,13 @@ def classify_query(
     confidence: Optional["ConfidenceScore"] = None,
     target_fqns: Optional[Set[str]] = None,
     n_files_involved: int = 0,
-    slm_result: Optional["SLMResult"] = None,
     intent_override: Optional[str] = None,
 ) -> ClassificationResult:
     """Classify a query into QueryMode + spec + modifiers.
 
     Classification order:
     1. Hard signals (unambiguous keywords/patterns)
-    2. SLM override (if SLM result provided and has a mode)
+    2. Explicit intent override (caller-declared, wins over all inference)
     3. TaskType-based mapping (from intent analysis)
 
     Args:
@@ -352,7 +350,6 @@ def classify_query(
         confidence: Optional 5-factor confidence score.
         target_fqns: Set of FQNs found by resolver.
         n_files_involved: Number of files touched by targets + neighbors.
-        slm_result: Optional SLM extraction result with mode field.
 
     Returns:
         ClassificationResult with query_mode, mode_spec, and modifiers.

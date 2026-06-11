@@ -1,8 +1,7 @@
 """
 Prompt builder: attention-optimal context assembly with 5 layers and 5 modes.
 
-Replaces zone_assembler.py as the primary assembly engine for v3.
-zone_assembler.py is kept for backward compatibility but bypassed.
+Primary assembly engine for v3+ (zone_assembler.py removed).
 
 Assembly order (optimized for LLM attention — "Lost in the Middle"):
   1. [TOP]    Task prompt              → high attention (primacy)
