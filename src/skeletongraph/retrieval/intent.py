@@ -97,8 +97,13 @@ def analyze_intent(prompt: str, known_files: Set[str] = frozenset(),
                 file_paths.append(candidate)  # Keep as-is, may resolve later
 
     # 2. Function/class names (identifiers that match known FQNs)
-    # Match: snake_case, camelCase, PascalCase identifiers (2+ chars)
-    ident_pattern = re.compile(r'\b([a-zA-Z_]\w{1,})\b')
+    # Match: snake_case, camelCase, PascalCase identifiers (3+ chars).
+    # NOTE: must stay \w{2,} (3-char minimum). A brief change to \w{1,} (2-char)
+    # in 78289e3 — landed as "multi-language, Python-neutral" — let 2-char tokens
+    # (id, pk, db, ax, fn) match high-frequency FQN suffixes (.id/.pk/...), flooding
+    # the entity set with spurious high-centrality candidates and collapsing
+    # recall@1 on Verified. Restored to v2 behavior.
+    ident_pattern = re.compile(r'\b([a-zA-Z_]\w{2,})\b')
     prompt_lower = prompt.lower()
 
     # Track whether we found any hard entities (file paths, exact FQN matches)
@@ -137,14 +142,20 @@ def analyze_intent(prompt: str, known_files: Set[str] = frozenset(),
             if short.startswith("(*") and ")." in short:
                 short = short.split(").")[-1]
             
-            # Exact match (for Go case-sensitivity)
+            # Exact match (for Go case-sensitivity) keeps the case-sensitive
+            # branch first so Go's `Foo` vs `foo` still resolves to the exact FQN.
             if short == name or short.endswith(f".{name}"):
                 entities.append(Entity(name, "function_name", confidence=0.95))
                 function_names.append(name)
                 break
-            # Case-insensitive fallback
+            # Case-insensitive fallback at 0.95 (NOT 0.85). v2 scored every
+            # case-insensitive FQN match at 0.95; 78289e3 demoted this branch to
+            # 0.85, which (since issue prose rarely matches FQN casing exactly:
+            # "LaTeX"->latex, "Method"->method) weakened the gold entity's ranker
+            # bonus and dropped it out of rank 1 on Verified. The exact branch
+            # above still fires first for Go, so this is Python-restoring only.
             elif short.lower() == name.lower():
-                entities.append(Entity(name, "function_name", confidence=0.85))
+                entities.append(Entity(name, "function_name", confidence=0.95))
                 function_names.append(name)
                 break
 
