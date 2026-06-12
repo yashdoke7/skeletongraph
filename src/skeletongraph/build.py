@@ -310,43 +310,10 @@ def build_index(
     else:
         store.pagerank_scores = {}
 
-    # ── Phase 3c: Summaries are seeded while building the inverted index ──
-
-    # ── Phase 3d: Auto-summarize top 20% hub functions (v4) ──────────
-    if cfg.auto_summarize_on_build and (not cfg.summary_use_docstrings) and store.pagerank_scores:
-        hub_fqns = get_hub_functions(store.pagerank_scores, top_percent=0.20)
-        # Filter out already-summarized ones
-        unsummarized = [f for f in hub_fqns if _summary_needs_refresh(f, store, cfg)]
-        
-        if unsummarized:
-            if on_progress:
-                on_progress(f"Auto-summarizing {len(unsummarized)} hub functions...", 0, 0)
-            try:
-                from .retrieval.slm_extractor import batch_summarize_functions
-                bodies = []
-                fqns_to_summarize = []
-                for fqn in unsummarized:
-                    sk = store.skeleton_table.get(fqn)
-                    if sk:
-                        fp = project_root / sk.file_path
-                        if fp.exists():
-                            try:
-                                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
-                                body = "\n".join(lines[sk.line_start - 1:sk.line_end])
-                                bodies.append(body)
-                                fqns_to_summarize.append(fqn)
-                            except Exception:
-                                pass
-                
-                if bodies:
-                    summaries = batch_summarize_functions(bodies, fqns_to_summarize, cfg)
-                    for fqn, summary in summaries.items():
-                        store.summaries.set(fqn, summary)
-                    if on_progress:
-                        on_progress(f"Summarized {len(summaries)}/{len(unsummarized)} hub functions", 0, 0)
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Auto-summarize failed: {e}")
+    # ── Phase 3c: Summaries are seeded (local, zero-LLM) while building the
+    # inverted index — see build_local_summary in summary/local.py. The old v4
+    # LLM hub-summary enrichment was removed with the SLM pipeline; summaries are
+    # now deterministic (docstring / name+signature+keywords).
 
     # Embeddings (optional — requires sentence-transformers).
     # When the user has enable_embeddings=True but the dep is missing, we
@@ -719,12 +686,8 @@ def _summarize_changed_functions(
     cfg: SGConfig,
     on_progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> None:
-    """Summarize changed functions using the configured summary model."""
-    from .retrieval.slm_extractor import batch_summarize_functions
-
-    bodies = []
-    fqns_to_summarize = []
-
+    """Summarize changed functions with the local (zero-LLM) summarizer."""
+    n = 0
     for file_path in cached_results:
         file_skel = store.file_skeletons.get(file_path)
         if not file_skel:
@@ -734,24 +697,8 @@ def _summarize_changed_functions(
                 continue
             if not _summary_needs_refresh(sk.fqn, store, cfg):
                 continue
-            fp = project_root / sk.file_path
-            if not fp.exists():
-                continue
-            try:
-                lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
-                body = "\n".join(lines[sk.line_start - 1:sk.line_end])
-                if body:
-                    bodies.append(body)
-                    fqns_to_summarize.append(sk.fqn)
-            except Exception:
-                continue
+            store.summaries.set(sk.fqn, build_local_summary(sk))
+            n += 1
 
-    if not bodies:
-        return
-
-    if on_progress:
-        on_progress(f"Summarizing {len(bodies)} changed functions...", 0, 0)
-
-    summaries = batch_summarize_functions(bodies, fqns_to_summarize, cfg)
-    for fqn, summary in summaries.items():
-        store.summaries.set(fqn, summary)
+    if n and on_progress:
+        on_progress(f"Summarized {n} changed functions (local)", 0, 0)

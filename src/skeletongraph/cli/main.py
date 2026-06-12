@@ -711,7 +711,7 @@ def run(
     if dry_run and not plan_first:
         config.enable_slm_fallback = False
 
-    result = engine.query(prompt, delivery="cli", force_slm=plan_first)
+    result = engine.query(prompt, delivery="cli")
 
     if not result.success:
         console.print(f"[yellow]{result.error}[/yellow]")
@@ -730,68 +730,9 @@ def run(
     extra_context = ""
     expansion_errors: List[str] = []
     if plan_first:
-        try:
-            from ..retrieval.slm_extractor import slm_plan_tools
-            store = engine.get_store()
-            session = engine.get_session()
-            session_fqns = session.get_last_target_fqns() if session else set()
-            sg_dir = project_root / ".skeletongraph"
-
-            slm_plan = slm_plan_tools(
-                prompt=prompt,
-                store=store,
-                sg_dir=sg_dir,
-                config=config,
-                session_fqns=session_fqns,
-            )
-
-            plan_payload = {
-                "success": slm_plan.success,
-                "reasoning": slm_plan.reasoning,
-                "tool_calls": [
-                    {
-                        "type": c.call_type,
-                        "target": c.target,
-                        "start_line": c.start_line,
-                        "end_line": c.end_line,
-                        "include_neighbors": c.include_neighbors,
-                    }
-                    for c in slm_plan.tool_calls
-                ],
-                "input_tokens": slm_plan.input_tokens,
-                "output_tokens": slm_plan.output_tokens,
-                "cost": slm_plan.cost_usd,
-                "latency_ms": slm_plan.latency_ms,
-                "error": slm_plan.error,
-            }
-
-            if slm_plan.success and slm_plan.tool_calls:
-                expansions = []
-                for call in slm_plan.tool_calls:
-                    try:
-                        expanded = engine.expand(
-                            target=call.target,
-                            expand_type=call.call_type,
-                            start_line=call.start_line or None,
-                            end_line=call.end_line or None,
-                            include_neighbors=call.include_neighbors,
-                            max_tokens=plan_max_tokens,
-                        )
-                        expansions.append(f"### {call.call_type} {call.target}\n{expanded}")
-                        if expanded.startswith(("File not found:", "Function not found:", "Unknown expand type:")):
-                            expansion_errors.append(f"{call.call_type} {call.target}: {expanded}")
-                    except Exception as e:
-                        expansions.append(f"### {call.call_type} {call.target}\n[ERROR] {e}")
-                        expansion_errors.append(f"{call.call_type} {call.target}: {e}")
-                if expansions:
-                    extra_context = "## Planned Expansions\n" + "\n\n".join(expansions)
-        except Exception:
-            plan_payload = {
-                "success": False,
-                "reasoning": "",
-                "tool_calls": [],
-                "error": "planner_failed",
-            }
+        # SLM tool-planning was removed with the SLM pipeline. There is no LLM
+        # planner; plan_first no longer triggers planned expansions.
+        plan_payload = None
 
     if extra_context:
         result.context_text = f"{result.context_text}\n\n---\n\n{extra_context}"
