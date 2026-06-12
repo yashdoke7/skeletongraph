@@ -166,8 +166,17 @@ def _ensure_indexed(bin_path: str, repo: Path) -> str:
         return _PROJECT_CACHE[key]
     name = _find_indexed(bin_path, repo)
     if not name:
-        _run(bin_path, ["cli", "index_repository",
-             json.dumps({"repo_path": key.replace("\\", "/")})], timeout=300)
+        # Optionally request a richer index mode (CBMEM_INDEX_MODE=full|moderate)
+        # so cbmem builds semantic (nomic-embed-code) edges for `semantic_query`.
+        # Default OMITS the field — the known-working call (cbmem's own default) —
+        # so a binary that rejects an unknown `mode` field can never wedge the
+        # 15-minute build. Set CBMEM_INDEX_MODE=full once you've confirmed the
+        # param is accepted. Timeout raised since a full/embedding build is slower.
+        _payload = {"repo_path": key.replace("\\", "/")}
+        _mode = os.environ.get("CBMEM_INDEX_MODE")
+        if _mode:
+            _payload["mode"] = _mode
+        _run(bin_path, ["cli", "index_repository", json.dumps(_payload)], timeout=900)
         # cbmem indexes ASYNCHRONOUSLY — querying before the graph is built 404s
         # ("project not found or not indexed"). Poll until it appears with nodes>0.
         for _ in range(450):               # up to ~900s (15 mins) for massive repos
@@ -233,18 +242,13 @@ def retrieve(query: str, repo: Path, k: int = 10) -> List[str]:
     """Return up to k ranked file paths (forward-slash, repo-relative).
 
     Indexes the repo on first call (subsequent calls are cheap — already indexed).
-    Dispatches to cbmem's search_graph with the raw query string (cbmem uses BM25
-    over symbol names and doc strings internally).
+    Uses cbmem's BEST retrieval: semantic vector search (nomic-embed-code) with a
+    lexical fallback (see _search_blob).
     """
     repo = Path(repo).resolve()
     bin_path = _bin()
     slug = _ensure_indexed(bin_path, repo)
-    payload = json.dumps({
-        "query": query,
-        "project": slug,
-        "limit": max(k * 5, 50),
-    })
-    blob = _run(bin_path, ["cli", "search_graph", payload], timeout=60)
+    blob = _search_blob(bin_path, slug, query, max(k * 5, 50))
     files = _extract_files(blob, repo)
     return files[:k]
 
@@ -266,11 +270,40 @@ def _walk_dicts(node):
 
 
 def _extract_symbols(blob: str, repo: Path) -> list:
-    """Pull (qualified_name|name, file) pairs from cbmem search JSON, ranked."""
+    """Pull (qualified_name|name, file) pairs from cbmem search JSON, ranked.
+
+    cbmem v0.7+ returns two sections when semantic_query is used:
+      "results"         — BM25 lexical hits (always present, ranks hub/Makefile
+                          nodes first due to high degree — do NOT use these)
+      "semantic_results"— vector-search hits with relevance scores (correct)
+    Prefer semantic_results when present; fall back to walking all dicts
+    (the v0.6 single-section format and lexical-only queries).
+    """
     try:
         data = json.loads(blob)
     except Exception:
         return []
+    # cbmem v0.7+: semantic_results is the correct ranked list when it exists.
+    # Using _walk_dicts over the whole blob visits "results" (BM25/hub-nodes)
+    # first and buries the semantic hits — so check explicitly.
+    sem = data.get("semantic_results") if isinstance(data, dict) else None
+    if sem and isinstance(sem, list):
+        out, seen = [], set()
+        for d in sem:
+            name = d.get("qualified_name") or d.get("name") or d.get("symbol")
+            fp = (d.get("file_path") or d.get("file") or d.get("path") or
+                  d.get("relative_path") or "")
+            if not name:
+                continue
+            fp = str(fp).replace("\\", "/")
+            key = (str(name), fp)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((str(name), fp))
+        if out:
+            return out
+    # Fallback: v0.6 single-section format or lexical-only response.
     out, seen = [], set()
     for d in _walk_dicts(data):
         name = d.get("qualified_name") or d.get("name") or d.get("symbol")
@@ -287,14 +320,73 @@ def _extract_symbols(blob: str, repo: Path) -> list:
     return out
 
 
+def _has_hits(blob: str) -> bool:
+    """True if a cbmem search blob carries at least one result (not an error)."""
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return False
+    if isinstance(data, dict) and data.get("error"):
+        return False
+    for d in _walk_dicts(data):
+        if any(key in d for key in ("file_path", "file", "path",
+                                    "relative_path", "qualified_name", "name")):
+            return True
+    return False
+
+
+_CBMEM_STOP = {
+    "the", "this", "that", "with", "from", "into", "when", "then", "should",
+    "fix", "add", "error", "issue", "bug", "code", "test", "tests", "function",
+    "method", "class", "return", "value", "true", "false", "none", "null",
+    "self", "args", "kwargs", "for", "and", "not", "but", "use", "using", "are",
+    "what", "how", "why", "where", "which", "would", "could", "must", "have",
+}
+
+
+def _semantic_keywords(query: str, cap: int = 12) -> list:
+    """cbmem's semantic_query expects an ARRAY of keyword strings (it errors on a
+    single NL string: 'semantic_query must be an array of keyword strings'). We
+    pull identifier-shaped tokens from the issue, drop stopwords, dedupe."""
+    import re
+    out, seen = [], set()
+    for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query or ""):
+        tl = t.lower()
+        if tl in _CBMEM_STOP or tl in seen:
+            continue
+        seen.add(tl)
+        out.append(t)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _search_blob(bin_path: str, slug: str, query: str, limit: int) -> str:
+    """cbmem's BEST code retrieval: semantic vector search (nomic-embed-code)
+    first, falling back to lexical search_graph if semantic returns nothing
+    (e.g. an index built without embeddings, or no keywords). Force one mode with
+    CBMEM_SEARCH=semantic|lexical (default: semantic, cbmem's intended best mode).
+    NOTE: semantic_query takes an ARRAY of keywords, not a string (see selftest).
+    """
+    mode = os.environ.get("CBMEM_SEARCH", "semantic")
+    if mode != "lexical":
+        kws = _semantic_keywords(query)
+        if kws:
+            blob = _run(bin_path, ["cli", "search_graph", json.dumps(
+                {"semantic_query": kws, "project": slug, "limit": limit})], timeout=90)
+            if _has_hits(blob):
+                return blob
+    return _run(bin_path, ["cli", "search_graph", json.dumps(
+        {"query": query, "project": slug, "limit": limit})], timeout=90)
+
+
 def search_native(query: str, repo: Path, k: int = 10) -> str:
     """cbmem search_graph → ranked `file::symbol` lines (same format the harness
     parses for recall) + a usable qualified-name for get_code_snippet."""
     repo = Path(repo).resolve()
     bin_path = _bin()
     slug = _ensure_indexed(bin_path, repo)
-    payload = json.dumps({"query": query, "project": slug, "limit": max(k * 3, 30)})
-    blob = _run(bin_path, ["cli", "search_graph", payload], timeout=60)
+    blob = _search_blob(bin_path, slug, query, max(k * 3, 30))
     syms = _extract_symbols(blob, repo)
     if not syms:
         files = _extract_files(blob, repo)
@@ -322,7 +414,8 @@ def trace_calls(function_name: str, repo: Path, direction: str = "both") -> str:
     slug = _ensure_indexed(bin_path, Path(repo).resolve())
     payload = json.dumps({"function_name": function_name, "direction": direction,
                           "project": slug})
-    return _pretty(_run(bin_path, ["cli", "trace_call_path", payload], timeout=60), 1800)
+    # v0.7.0 renamed the tool trace_call_path -> trace_path.
+    return _pretty(_run(bin_path, ["cli", "trace_path", payload], timeout=60), 1800)
 
 
 def code_snippet(qualified_name: str, repo: Path) -> str:

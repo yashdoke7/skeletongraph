@@ -123,6 +123,10 @@ def _parse_ranked(result: str) -> list:
 
 
 def _first_search_fqns(rec: dict) -> list:
+    # MCP arms (Claude Code) carry pre-parsed sg_search FQNs on the record, since
+    # their retrieval is not in the ReAct `turns` structure.
+    if rec.get("first_search_fqns"):
+        return rec["first_search_fqns"]
     for t in rec.get("turns", []):
         for call in t.get("tool_calls", []):
             if call.get("name") in ("search_code", "cbmem_search", "graphify_search"):
@@ -131,6 +135,8 @@ def _first_search_fqns(rec: dict) -> list:
 
 
 def _all_search_fqns(rec: dict) -> list:
+    if rec.get("all_search_fqns"):
+        return rec["all_search_fqns"]
     seen, out = set(), []
     for t in rec.get("turns", []):
         for call in t.get("tool_calls", []):
@@ -380,7 +386,11 @@ def aggregate(stage: str | None, task_ids: set | None = None,
                 "files_in_patch_count", 0) > 0 else 0 for r in rs]),
             "egold": _mean([1 if r.get('edited_gold_file') else 0 for r in rs]),
             "turns": _mean([r.get('n_turns') for r in rs]),
-            "intok": round(_mean([r.get('billed_input') for r in rs])),
+            # Claude-Code arms prompt-cache the re-sent history, so billed_input
+            # is only the fresh slice; total_input_tokens is the real volume the
+            # model processed. ReAct arms have no total_input_tokens → billed_input.
+            "intok": round(_mean([r.get('total_input_tokens') or r.get('billed_input')
+                                  for r in rs])),
             "outtok": round(_mean([r.get('billed_output') for r in rs])),
             "cost": agent_cost,                # AGENT-loop cost only (all arms)
             "cost_c": agent_cost_c,             # agent cost w/ prefix caching
@@ -454,7 +464,15 @@ def aggregate(stage: str | None, task_ids: set | None = None,
         lines += ["", "_cbmem builds a tree-sitter knowledge graph with NO LLM "
                   "(index_repository runs in ~30s, no API key) — so its build cost is "
                   "genuinely $0, like SG. Only graphify pays an LLM build. cbmem is thus "
-                  "a fair zero-LLM structural control; SG wins on retrieval + tokens, not build._"]
+                  "a fair zero-LLM structural control; SG wins on retrieval + tokens, not build._",
+                  "",
+                  "_**Embedding-build cost = $0 (local, no API).** The dense arms "
+                  "(sg-embed, sg-hybrid-fusion, sg-dense-rerank, sg-keyword-dense, "
+                  "summary-dense) and cbmem-semantic encode functions with a LOCAL "
+                  "model (MiniLM / Jina / compiled nomic-embed-code) — compute only, "
+                  "zero API tokens — so their index build adds $0 to the dollar cost "
+                  "(shown as `—`/`$0` in the main table's index$). Only graphify's LLM "
+                  "extraction consumes billable build tokens._"]
 
     # ── Markdown pipe table (for paper — comes first for easy copy) ──────────
     # cost columns are kept SEPARATE on purpose (asked for explicitly):
@@ -594,6 +612,92 @@ def aggregate(stage: str | None, task_ids: set | None = None,
         vals = [1 if r.get("retrieval_hit") else 0 for r in by_arm[arm]]
         lo, hi = bootstrap_ci(vals)
         lines.append(f"| `{arm}` | {_mean(vals)*100:.1f}% | [{lo:.3f}, {hi:.3f}] |")
+
+    # ── Tool usage — what each arm actually calls ────────────────────────────
+    # Three tiers:
+    #   native_search : the arm's primary retrieval tool (varies per arm)
+    #   read_file     : universal fallback — high rate signals broken retrieval
+    #   read_symbol   : SG-only symbol-level fetch (replaces read_file for functions)
+    #   hallucinated  : execute/bash/think/grep/write calls not in any arm's schema
+    #                   (model invents tools; rate is pure noise)
+    # Also flags doubled tool names (e.g. edit_fileedit_file) from the NIM
+    # streaming accumulation bug so they're visible if they reappear.
+    _NATIVE_SEARCH = {
+        "sg": "search_code", "sg-chain": "search_code", "sg-rerank": "search_code",
+        "bm25": "search_code", "grep": "search_code", "hybrid": "search_code",
+        "none": "search_code",
+        "cbmem": "cbmem_search",
+        "graphify": "graphify_search",
+        "aider": None,   # no search tool — uses repo-map in system prompt
+    }
+    _NATIVE_SECONDARY = {
+        "sg": "read_symbol", "sg-chain": "read_symbol", "sg-rerank": "read_symbol",
+        "cbmem": "cbmem_snippet",
+        "graphify": "graphify_explain",
+    }
+    _KNOWN_TOOLS = {
+        "search_code", "list_files", "read_file", "read_symbol", "expand",
+        "edit_file", "submit",
+        "cbmem_search", "cbmem_trace", "cbmem_snippet", "cbmem_arch",
+        "graphify_search", "graphify_explain",
+    }
+
+    def _tool_row(arm, rs):
+        from collections import Counter as _Counter
+        totals: dict = {}
+        n = 0
+        for r in rs:
+            tc = r.get("tool_counts") or {}
+            if not tc:
+                continue
+            n += 1
+            for t, c in tc.items():
+                totals[t] = totals.get(t, 0) + c
+        if n == 0:
+            return None
+        avgs = {t: totals[t] / n for t in totals}
+
+        # Primary retrieval tool for this arm
+        pri = _NATIVE_SEARCH.get(arm)
+        pri_val = avgs.get(pri, 0.0) if pri else 0.0
+
+        # Secondary (read_symbol / cbmem_snippet / graphify_explain)
+        sec = _NATIVE_SECONDARY.get(arm)
+        sec_val = avgs.get(sec, 0.0) if sec else 0.0
+
+        rf = avgs.get("read_file", 0.0)
+        ef = avgs.get("edit_file", 0.0)
+        ex = avgs.get("expand", 0.0)
+
+        # Hallucinated = anything not in the known tool set AND not a doubled name
+        halluc = sum(v for t, v in avgs.items()
+                     if t not in _KNOWN_TOOLS and not any(t == k + k for k in _KNOWN_TOOLS))
+        # Doubled names (streaming bug artifact)
+        doubled = sum(v for t, v in avgs.items()
+                      if any(t == k + k for k in _KNOWN_TOOLS))
+
+        return (arm, len(rs), pri, pri_val, sec, sec_val, rf, ef, ex, halluc, doubled)
+
+    tool_rows = [_tool_row(arm, by_arm[arm]) for arm in sorted(by_arm)]
+    tool_rows = [r for r in tool_rows if r is not None]
+
+    lines += ["", "## Tool usage per arm", "",
+              "_native_search_ = arm's primary retrieval tool (varies per arm); "
+              "_secondary_ = read_symbol / cbmem_snippet / graphify_explain; "
+              "_read_file_ = universal file read (high rate → retrieval not helping); "
+              "_hallucinated_ = model called a tool not in its schema (pure noise).",
+              "",
+              "| Arm | n | native_search | /task | secondary | /task "
+              "| read_file | edit_file | expand | hallucinated | doubled_names |",
+              "| --- | ---:| --- | ---:| --- | ---:| ---:| ---:| ---:| ---:| ---:|"]
+    for row in tool_rows:
+        arm, n, pri, pv, sec, sv, rf, ef, ex, hal, dbl = row
+        pri_s = f"`{pri}`" if pri else "_(repo map)_"
+        sec_s = f"`{sec}`" if sec else "—"
+        lines.append(
+            f"| `{arm}` | {n} | {pri_s} | {pv:.2f} | {sec_s} | {sv:.2f} "
+            f"| {rf:.2f} | {ef:.2f} | {ex:.2f} | {hal:.2f} | {dbl:.2f} |"
+        )
 
     # ── Stop reason (failure mode) ───────────────────────────────────────────
     lines += ["", "## Stop reason by arm", "",

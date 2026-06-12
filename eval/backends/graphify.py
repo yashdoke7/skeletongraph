@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -119,13 +120,39 @@ def _walk_dicts(node):
             yield from _walk_dicts(it)
 
 
+# graphify >=0.8 `query` returns a PLAIN-TEXT subgraph, not JSON:
+#   Traversal: BFS depth=2 | Start: ['Header'] | 557 nodes found
+#   NODE Header [src=astropy/io/fits/header.py loc=L40 community=5]
+#   NODE catch_warnings() [src=astropy/tests/helper.py loc=L283 community=35]
+# (older versions returned JSON). We parse the NODE lines, falling back to the
+# JSON walker for older output. Nodes with an empty src= (Exception, community
+# nodes) are skipped — they have no file to localize.
+_NODE_RE = re.compile(
+    r"^NODE\s+(?P<name>.+?)\s+\[src=(?P<src>[^\]]*?)\s+loc=(?P<loc>\S*)\s+community=",
+    re.MULTILINE)
+
+
 def _extract_symbols(blob: str, repo: Path) -> list:
-    """(name, file) pairs from a graphify subgraph JSON, ranked/deduped."""
+    """(name, file) pairs from a graphify subgraph, in graphify's emitted order."""
+    out, seen = [], set()
+    # 1) Text NODE format (graphify >= 0.8)
+    for m in _NODE_RE.finditer(blob or ""):
+        name = (m.group("name") or "").strip().lstrip(".").rstrip("()")
+        src = (m.group("src") or "").strip().replace("\\", "/")
+        if not name or not src:
+            continue
+        key = (name, src)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((name, src))
+    if out:
+        return out
+    # 2) Fallback: older JSON subgraph
     try:
         data = json.loads(blob)
     except Exception:
         return []
-    out, seen = [], set()
     for d in _walk_dicts(data):
         name = d.get("name") or d.get("symbol") or d.get("qualified_name") or d.get("id")
         fp = next((d[k] for k in _PATH_KEYS if isinstance(d.get(k), str)), "")
