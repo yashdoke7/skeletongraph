@@ -1,16 +1,44 @@
 # SkeletonGraph
 
-**Graph-based context assembly and model routing for AI coding workflows.**
+**A zero-LLM, tree-sitter structural index that reranks cheap lexical retrieval
+and fetches one function at a time — for AI coding agents.**
 
-SkeletonGraph indexes a codebase into function-level structure, dependency
-edges, tests, and project metadata. It then builds compact context packets for
-IDE agents and CLI model runs, so the model starts with the code it most likely
-needs instead of burning turns on broad exploration.
+SkeletonGraph (SG) indexes a codebase into function-level structure, a cross-file
+call graph, and PageRank centrality — **with no LLM**. At query time it resolves the
+symbols an issue names, expands the call graph, and reranks a BM25 recall pool so the
+agent lands the **right function** instead of burning turns reading files. Its
+companion operating point, **`sg-rerank`** (the product default), takes BM25's wide
+recall pool and reorders it by structural confirmation — best file *and* function
+recall of any method we tested, at the lowest token cost.
 
-SkeletonGraph is wrapper-first: it can return a full packet or expose a
-retrieval index (AST skeletons + summaries + graph neighbors + memory) so the
-IDE agent can choose targets. For CLI, a cheap retrieval planner can propose
-targets before a heavier model does the actual reasoning and edits.
+The thesis: code-context tools have been validated as a **token-optimization** game
+(token-count math). We re-center on **retrieval quality** — landing the correct
+function — of which lower token cost is a *consequence*, visible only end-to-end
+inside the agent loop.
+
+## Results (SWE-bench Verified, nemotron-120B, 100 tasks)
+
+![Solve rate vs. token cost](docs/paper/figures/fig1_pareto.png)
+
+| arm | pass@1 | file recall | function recall@10 | tokens (k) | $ |
+|---|--:|--:|--:|--:|--:|
+| **`sg`** (lean core) | **45.5** | .854 | .319 | **176** | .051 |
+| **`sg-rerank`** (method) | 45.0 | **.924** | **.404** | **175** | .051 |
+| `cbmem` (zero-LLM graph) | 44.4 | .746 | .228 | 254 | .072 |
+| `grep` | 44.0 | .883 | — | 297 | .084 |
+| `none` (no retrieval) | 44.0 | — | — | 244 | .070 |
+| `aider` (repo-map) | 43.9 | — | — | 1,167 | .319 |
+| `bm25` | 41.0 | .846 | .342 | 267 | .076 |
+
+**Findings:** (1) on contaminated benchmarks **solve rate is retrieval-insensitive**
+(`none` = 44%, no arm significantly better) — so tokens and function recall are the
+honest axes; (2) **file recall ≠ function recall** — most arms find the file, not the
+function; (3) the **`sg` family is cheapest** while `sg-rerank` has the **best retrieval
+quality**, with **no LLM** in its index.
+
+SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
+retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
+so the IDE agent or CLI can choose targets.
 
 SkeletonGraph has two product surfaces:
 
