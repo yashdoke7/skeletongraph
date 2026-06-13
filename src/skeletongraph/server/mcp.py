@@ -582,8 +582,11 @@ class MCPServer:
 
         try:
             store = self._engine.get_store()
+            # Over-fetch so the test-demotion below can pull a buried source file
+            # up into the returned window (BM25 often ranks tests above source).
+            fetch_n = max(top_n * 3, 30)
             result = self._engine.heuristic_query(
-                query, top_n=top_n, file_filter=file_filter or None,
+                query, top_n=fetch_n, file_filter=file_filter or None,
                 mode_hint=intent_arg,
                 graph_policy=graph_policy,
             )
@@ -591,6 +594,15 @@ class MCPServer:
             return str(e)
 
         candidates = result.candidates
+        # Bug-fix searches want the implementation, not its tests. BM25 ranks test
+        # files high (they mention the symbol many times), often burying the source
+        # below the cutoff (e.g. Card.fromstring source sat at rank 16). Demote test
+        # files — stable, so rank within source and within tests is preserved —
+        # unless the query is explicitly about tests. Then trim to the requested N.
+        if candidates and "test" not in query.lower():
+            candidates = sorted(
+                candidates, key=lambda c: self._is_test_path(c.skeleton.file_path))
+        candidates = candidates[:top_n]
         confidence = getattr(result, "confidence", "MEDIUM")
         # Full bodies are valuable, but broad body dumps cause MCP results to be
         # re-read by some IDEs as separate content resources. Keep MEDIUM/LOW
@@ -717,6 +729,16 @@ class MCPServer:
                 lines.append(bundle)
                 lines.append("")
                 used_chars += len(bundle)
+
+            # Module-level constants the targets reference (VALID_HEADER_CHARS,
+            # END_CARD, …). The function graph can't index these, so surfacing
+            # them here stops the agent grepping for them after a successful
+            # search — a measured source of redundant native tool calls.
+            consts = self._module_constants(candidates[:expand_top], store)
+            if consts and used_chars < char_budget:
+                lines.append(consts)
+                lines.append("")
+                used_chars += len(consts)
         else:
             lines.append(f"No graph matches for {query!r}.")
             lines.append("")
@@ -757,6 +779,45 @@ class MCPServer:
                      "spill — it is a duplicate of this result). Search again only "
                      "if a needed target is absent or confidence is LOW/MISS._")
         return "\n".join(lines)
+
+    def _module_constants(self, candidates: List, store, max_chars: int = 700) -> str:
+        """Module-level UPPER_CASE constants defined in the edit-target files, so
+        the model gets them inline instead of grepping.
+
+        The function graph indexes functions/classes, not module constants, so an
+        agent that finds `Card.fromstring` still has to grep for `CARD_LENGTH` /
+        `VALID_HEADER_CHARS`. We list the top-level constants of the files the top
+        results live in — the developer-opens-the-file view (budgeted)."""
+        import re as _re
+        files: List[str] = []
+        for c in candidates[:3]:
+            fp = c.skeleton.file_path
+            if fp not in files:
+                files.append(fp)
+        found, seen = [], set()
+        for fp in files:
+            try:
+                lines = (self._root / fp).read_text(
+                    encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                continue
+            for ln in lines:
+                m = _re.match(r"^([A-Z][A-Z0-9_]{2,})\s*(?::[^=]+)?=\s*(.+)$", ln)
+                if not m:
+                    continue
+                name, val = m.group(1), m.group(2).strip()
+                if name in seen:
+                    continue
+                seen.add(name)
+                found.append(f"  {name} = {val[:80]}  # {fp}")
+                if len(found) >= 12 or len("\n".join(found)) > max_chars:
+                    break
+            if len(found) >= 12 or len("\n".join(found)) > max_chars:
+                break
+        if not found:
+            return ""
+        return ("## Module constants (in the target files — no need to grep)\n"
+                + "\n".join(found))
 
     def _render_quick_map(self, query: str, candidates: List, store) -> str:
         """Front-load the few routing facts agents need before reading bodies."""
@@ -1507,6 +1568,21 @@ class MCPServer:
             ".java", ".go", ".rs", ".cpp", ".c", ".h", ".hpp",
             ".cs", ".rb", ".php",
         ))
+
+    @staticmethod
+    def _is_test_path(path: str) -> int:
+        """1 for a test file, 0 for source — used as a stable sort key to demote
+        tests below the implementation. Covers Python (test_*/_test, /tests/) and
+        JS/TS (*.test.*, *.spec.*, __tests__)."""
+        p = path.replace("\\", "/").lower()
+        base = p.rsplit("/", 1)[-1]
+        return int(
+            "/tests/" in p or "/test/" in p or "/__tests__/" in p
+            or base.startswith("test_")
+            or base.endswith(("_test.py", "_test.go",
+                              ".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+                              ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"))
+        )
 
     @staticmethod
     def _looks_symbolic(query: str) -> bool:
