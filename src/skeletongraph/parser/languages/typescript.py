@@ -73,6 +73,11 @@ def extract_typescript(
     for child in root.children:
         _process_top_level(child, file_path, source_bytes, source, result)
 
+    # CommonJS / prototype method assignments anywhere in the file — including
+    # methods attached inside a `module.exports = function (App) { App.x = ... }`
+    # factory (the dominant NodeBB pattern), which top-level walking can't reach.
+    _walk_member_assign_fns(root, file_path, source_bytes, result)
+
     return result
 
 
@@ -119,7 +124,7 @@ def _process_top_level(
 
     elif node.type == "expression_statement":
         # module.exports = ... (CJS)
-        _process_cjs_export(node, source_bytes, result)
+        _process_cjs_export(node, file_path, source_bytes, result)
 
 
 def _extract_function_decl(
@@ -531,6 +536,106 @@ def _process_export(
                 result.exports.append(name)
 
 
+def _wrapped_function_arg(call_node: Node) -> Optional[Node]:
+    """For an HOC call like forwardRef(fn) / memo(fn) / observer(fn) / React.memo(fn),
+    return the arrow/function passed as a direct argument, so the bound name gets
+    indexed as a component. Returns None for non-function calls (e.g.
+    connect(...)(Comp), where the component is a reference defined elsewhere)."""
+    args = call_node.child_by_field_name("arguments")
+    if not args:
+        return None
+    for a in args.children:
+        if a.type in ("arrow_function", "function_expression"):
+            return a
+    return None
+
+
+def _fn_value(value_node: Node, source_bytes: bytes) -> Tuple[Optional[Node], str]:
+    """If a value is a function/arrow or an HOC-wrapped function (forwardRef/memo),
+    return (function_node, wrapper_text); else (None, "")."""
+    if value_node.type in ("arrow_function", "function_expression"):
+        return value_node, ""
+    if value_node.type == "call_expression":
+        inner = _wrapped_function_arg(value_node)
+        if inner is not None:
+            callee = value_node.child_by_field_name("function")
+            return inner, (node_text(callee, source_bytes) if callee else "")
+    return None, ""
+
+
+def _raw_fn(name: str, display: str, fn_node: Node, decl_node: Node,
+            file_path: str, source_bytes: bytes, wrapper: str = "",
+            is_exported: bool = False) -> RawFunction:
+    """Build a RawFunction from an arrow/function node bound to `name`."""
+    params = fn_node.child_by_field_name("parameters")
+    ret_type = fn_node.child_by_field_name("return_type")
+    body = fn_node.child_by_field_name("body")
+    sig = f"{display} = "
+    if wrapper:
+        sig += f"{wrapper}("
+    sig += node_text(params, source_bytes) if params else "()"
+    if ret_type:
+        sig += node_text(ret_type, source_bytes)
+    if fn_node.type == "arrow_function":
+        sig += " =>"
+    if wrapper:
+        sig += ")"
+    return RawFunction(
+        name=name, fqn=f"{file_path}::{name}", file_path=file_path,
+        line_start=decl_node.start_point[0] + 1,
+        line_end=decl_node.end_point[0] + 1,
+        signature=sig, kind=NodeKind.FUNCTION,
+        body_text=node_text(body, source_bytes) if body else "",
+        is_exported=is_exported,
+    )
+
+
+def _member_prop_name(left: Node, source_bytes: bytes) -> str:
+    """Rightmost identifier of a member_expression: 'User.getAvatar' -> 'getAvatar',
+    'module.exports.foo' -> 'foo'."""
+    if left.type == "member_expression":
+        prop = left.child_by_field_name("property")
+        if prop:
+            return node_text(prop, source_bytes)
+    return node_text(left, source_bytes)
+
+
+def _walk_member_assign_fns(root: Node, file_path: str, source_bytes: bytes,
+                            result: FileExtractionResult) -> None:
+    """Index `Obj.method = function(){}` / `exports.x = () => {}` assignments
+    anywhere in the file — including methods attached inside a
+    `module.exports = function (App) { App.x = ... }` factory, the dominant
+    CommonJS pattern (NodeBB etc.). Without this they are never indexed and so
+    never retrievable. JSX props / object literals are NOT assignment_expressions,
+    so this stays free of inline-callback noise."""
+    seen = {(f.line_start, f.name) for f in result.functions}
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "assignment_expression":
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            if left is not None and left.type == "member_expression" and right is not None:
+                fn_node, wrapper = _fn_value(right, source_bytes)
+                if fn_node is not None:
+                    name = _member_prop_name(left, source_bytes)
+                    display = node_text(left, source_bytes)
+                    # bare `module.exports = fn` is handled by _process_cjs_export
+                    # (named by file stem); indexing it here too would add a
+                    # spurious "exports" function.
+                    if display != "module.exports":
+                        is_exp = display.startswith(("module.exports", "exports."))
+                        key = (n.start_point[0] + 1, name)
+                        if name and key not in seen:
+                            seen.add(key)
+                            result.functions.append(
+                                _raw_fn(name, display, fn_node, n, file_path,
+                                        source_bytes, wrapper, is_exp))
+                            if is_exp:
+                                result.exports.append(name)
+        stack.extend(n.children)
+
+
 def _process_lexical_declaration(
     node: Node,
     file_path: str,
@@ -539,7 +644,8 @@ def _process_lexical_declaration(
     result: FileExtractionResult,
     is_exported: bool = False,
 ) -> None:
-    """Process const/let/var declarations. Arrow functions become RawFunction."""
+    """Process const/let/var declarations. Function-valued bindings (incl.
+    HOC-wrapped React components) become RawFunction so they are retrievable."""
 
     for child in node.children:
         if child.type == "variable_declarator":
@@ -551,36 +657,16 @@ def _process_lexical_declaration(
 
             name = node_text(name_node, source_bytes)
 
-            # Arrow function: const X = (...) => { ... }
-            if value_node.type == "arrow_function":
-                params = value_node.child_by_field_name("parameters")
-                ret_type = value_node.child_by_field_name("return_type")
-                body = value_node.child_by_field_name("body")
-
-                sig = f"const {name} = "
-                if params:
-                    sig += node_text(params, source_bytes)
-                else:
-                    sig += "()"
-                if ret_type:
-                    sig += f": {node_text(ret_type, source_bytes)}"
-                sig += " =>"
-
-                body_text = node_text(body, source_bytes) if body else ""
-
-                fn = RawFunction(
-                    name=name,
-                    fqn=f"{file_path}::{name}",
-                    file_path=file_path,
-                    line_start=node.start_point[0] + 1,
-                    line_end=node.end_point[0] + 1,
-                    signature=sig,
-                    kind=NodeKind.FUNCTION,
-                    body_text=body_text,
-                    is_exported=is_exported,
-                )
-                result.functions.append(fn)
-
+            # A const binding holds a function/component when its value is a bare
+            # arrow, a function expression, or an HOC-wrapped function
+            # (forwardRef/memo/observer) — the wrapped case is essential for
+            # modern TS/JS UIs (element-web etc.) where most components are
+            # forwardRef/memo; missing it leaves them unindexed ("avatar" gap).
+            fn_node, wrapper = _fn_value(value_node, source_bytes)
+            if fn_node is not None:
+                result.functions.append(
+                    _raw_fn(name, f"const {name}", fn_node, node, file_path,
+                            source_bytes, wrapper, is_exported))
                 if is_exported:
                     result.exports.append(name)
 
@@ -597,28 +683,53 @@ def _process_lexical_declaration(
 
 def _process_cjs_export(
     node: Node,
+    file_path: str,
     source_bytes: bytes,
     result: FileExtractionResult,
 ) -> None:
-    """Handle module.exports = { ... } CommonJS pattern."""
+    """Handle CommonJS `module.exports = ...` (object, single function, or HOC)."""
     if not node.children:
         return
-
     child = node.children[0]
-    if child.type == "assignment_expression":
-        left = child.child_by_field_name("left")
-        right = child.child_by_field_name("right")
-        if left:
-            left_text = node_text(left, source_bytes)
-            if left_text == "module.exports" and right:
-                if right.type == "object":
-                    for prop in right.children:
-                        if prop.type == "shorthand_property_identifier":
-                            result.exports.append(node_text(prop, source_bytes))
-                        elif prop.type == "pair":
-                            key = prop.child_by_field_name("key")
-                            if key:
-                                result.exports.append(node_text(key, source_bytes))
+    if child.type != "assignment_expression":
+        return
+    left = child.child_by_field_name("left")
+    right = child.child_by_field_name("right")
+    if not left or not right:
+        return
+    if node_text(left, source_bytes) != "module.exports":
+        return
+
+    # module.exports = { ... }  → export names + index function-valued props.
+    if right.type == "object":
+        for prop in right.children:
+            if prop.type == "shorthand_property_identifier":
+                result.exports.append(node_text(prop, source_bytes))
+            elif prop.type == "pair":
+                key = prop.child_by_field_name("key")
+                val = prop.child_by_field_name("value")
+                if not key:
+                    continue
+                kname = node_text(key, source_bytes)
+                result.exports.append(kname)
+                if val is not None:
+                    fn_node, wrapper = _fn_value(val, source_bytes)
+                    if fn_node is not None and kname:
+                        result.functions.append(
+                            _raw_fn(kname, f"module.exports.{kname}", fn_node,
+                                    prop, file_path, source_bytes, wrapper,
+                                    is_exported=True))
+        return
+
+    # module.exports = function (...) { ... }  → index the whole module factory,
+    # named by the file stem so it's retrievable (NodeBB-style modules).
+    fn_node, wrapper = _fn_value(right, source_bytes)
+    if fn_node is not None:
+        stem = file_path.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0] or "module"
+        result.functions.append(
+            _raw_fn(stem, "module.exports", fn_node, child, file_path,
+                    source_bytes, wrapper, is_exported=True))
+        result.exports.append(stem)
 
 
 def extract_call_sites_ts(
