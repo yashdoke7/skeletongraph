@@ -52,7 +52,8 @@ def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
     classes: List[RawClass] = []
     imports: List[RawImport] = []
     call_sites: List[RawCallSite] = []
-    
+    constants: List[Tuple[str, str]] = []
+
     package_name = ""
     # Find package declaration
     pkg_node = _get_child_by_type(root_node, "package_declaration")
@@ -162,6 +163,19 @@ def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                 else:
                     functions.append(func)
 
+        # static final fields are Java's constants (TIMEOUT, DEFAULT_*, etc.) —
+        # index them so the file is retrievable by the constant name.
+        elif node.type == "field_declaration":
+            mods = _get_child_by_type(node, "modifiers")
+            modtext = node_text(mods, source_bytes) if mods else ""
+            if "static" in modtext and "final" in modtext:
+                for vd in node.children:
+                    if vd.type == "variable_declarator":
+                        nm = _get_child_by_type(vd, "identifier")
+                        if nm:
+                            constants.append((node_text(nm, source_bytes),
+                                              node_text(node, source_bytes).strip()[:80]))
+
         # Call site extraction logic
         elif node.type == "method_invocation":
             fn = _get_child_by_type(node, "identifier")
@@ -194,6 +208,7 @@ def extract_java(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         classes=classes,
         imports=imports,
         call_sites=call_sites,
+        constants=constants,
         file_hash=_hash_text(source),
         total_lines=source.count("\n") + 1,
         exports=[c.name for c in classes] # Java exports public classes

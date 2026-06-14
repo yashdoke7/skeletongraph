@@ -52,7 +52,8 @@ def extract_php(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
     classes: List[RawClass] = []
     imports: List[RawImport] = []
     call_sites: List[RawCallSite] = []
-    
+    constants: List[Tuple[str, str]] = []
+
     base_fqn = Path(file_path).stem
 
     def traverse(node: Node, current_class: Optional[RawClass] = None, current_ns: str = ""):
@@ -153,6 +154,15 @@ def extract_php(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
                 else:
                     functions.append(func)
 
+        # `const NAME = ...;` at file or class scope (PHP's constants).
+        elif node.type == "const_declaration":
+            for el in node.children:
+                if el.type == "const_element":
+                    nm = _get_child_by_type(el, "name")
+                    if nm:
+                        constants.append((node_text(nm, source_bytes),
+                                          node_text(el, source_bytes).strip()[:80]))
+
         elif node.type == "member_call_expression" or node.type == "function_call_expression":
             fn = _get_child_by_type(node, "name") or _get_child_by_type(node, "identifier")
             if fn:
@@ -175,6 +185,7 @@ def extract_php(file_path: str, source: str, source_bytes: bytes, tree: Tree) ->
         classes=classes,
         imports=imports,
         call_sites=call_sites,
+        constants=constants,
         file_hash=_hash_text(source),
         total_lines=source.count("\n") + 1,
         exports=[]

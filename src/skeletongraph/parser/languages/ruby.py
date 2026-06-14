@@ -48,7 +48,8 @@ def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
     classes: List[RawClass] = []
     imports: List[RawImport] = []
     call_sites: List[RawCallSite] = []
-    
+    constants: List[Tuple[str, str]] = []
+
     base_fqn = Path(file_path).stem
 
     def traverse(node: Node, current_class: Optional[RawClass] = None, current_module: str = ""):
@@ -75,8 +76,21 @@ def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                         line=node.start_point[0] + 1
                     ))
 
+        elif node.type == "assignment":
+            # Ruby constants are ALL_CAPS / CamelCase names; the LHS parses as a
+            # `constant` node. Index them as file beacons.
+            left = node.children[0] if node.children else None
+            if left is not None and left.type == "constant":
+                constants.append((node_text(left, source_bytes),
+                                  node_text(node, source_bytes).strip()[:80]))
+
         elif node.type == "module":
             mod_name = _get_name(node, source_bytes)
+            if mod_name:
+                classes.append(RawClass(
+                    name=mod_name, fqn=f"{file_path}::{mod_name}",
+                    file_path=file_path, line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1, kind=NodeKind.MODULE))
             mod_fqn = f"{current_module}::{mod_name}" if current_module else mod_name
             for child in node.children:
                 traverse(child, current_class, current_module=mod_fqn)
@@ -152,6 +166,7 @@ def extract_ruby(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         classes=classes,
         imports=imports,
         call_sites=call_sites,
+        constants=constants,
         file_hash=_hash_text(source),
         total_lines=source.count("\n") + 1,
         exports=[]

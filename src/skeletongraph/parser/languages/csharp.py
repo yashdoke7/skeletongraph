@@ -51,6 +51,7 @@ def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree)
     classes: List[RawClass] = []
     imports: List[RawImport] = []
     call_sites: List[RawCallSite] = []
+    constants: List[Tuple[str, str]] = []
     
     base_fqn = Path(file_path).stem
 
@@ -157,6 +158,20 @@ def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree)
                 else:
                     functions.append(func)
 
+        # `const`/`static readonly` fields are C#'s constants — index them.
+        elif node.type == "field_declaration":
+            mtext = " ".join(node_text(c, source_bytes) for c in node.children
+                             if c.type == "modifier")
+            if "const" in mtext or "readonly" in mtext:
+                vdcl = _get_child_by_type(node, "variable_declaration")
+                if vdcl:
+                    for vd in vdcl.children:
+                        if vd.type == "variable_declarator":
+                            nm = _get_child_by_type(vd, "identifier")
+                            if nm:
+                                constants.append((node_text(nm, source_bytes),
+                                                  node_text(node, source_bytes).strip()[:80]))
+
         elif node.type == "invocation_expression":
             fn = _get_child_by_type(node, "identifier") or _get_child_by_type(node, "member_access_expression")
             if fn:
@@ -179,6 +194,7 @@ def extract_csharp(file_path: str, source: str, source_bytes: bytes, tree: Tree)
         classes=classes,
         imports=imports,
         call_sites=call_sites,
+        constants=constants,
         file_hash=_hash_text(source),
         total_lines=source.count("\n") + 1,
         exports=[c.name for c in classes]

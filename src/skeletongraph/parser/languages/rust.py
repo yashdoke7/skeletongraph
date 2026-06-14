@@ -48,7 +48,8 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
     classes: List[RawClass] = []
     imports: List[RawImport] = []
     call_sites: List[RawCallSite] = []
-    
+    constants: List[Tuple[str, str]] = []
+
     # FQN prefix MUST be the file_path (see go.py rationale) — the old
     # Path(file_path).stem dropped the directory and extension, so the split
     # prefix never matched gold file paths → 0 recall on every Rust task.
@@ -66,6 +67,14 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                     line=node.start_point[0] + 1
                 ))
 
+        elif node.type in ("const_item", "static_item"):
+            nm = _get_child_by_type(node, "identifier")
+            if nm:
+                cname = node_text(nm, source_bytes)
+                if cname:
+                    constants.append(
+                        (cname, node_text(node, source_bytes).strip()[:80]))
+
         elif node.type in ("struct_item", "trait_item", "enum_item"):
             cls_name = _get_name(node, source_bytes)
             if cls_name:
@@ -74,7 +83,7 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                     "trait_item": NodeKind.TRAIT,
                     "enum_item": NodeKind.ENUM
                 }
-                
+
                 classes.append(RawClass(
                     name=cls_name,
                     fqn=f"{base_fqn}::{cls_name}",
@@ -83,7 +92,26 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                     line_end=node.end_point[0] + 1,
                     kind=kind_map.get(node.type, NodeKind.STRUCT)
                 ))
-                
+
+                # enum variants → searchable beacons for the file
+                if node.type == "enum_item":
+                    body = _get_child_by_type(node, "enum_variant_list")
+                    if body:
+                        for v in body.children:
+                            if v.type == "enum_variant":
+                                vn = _get_child_by_type(v, "identifier")
+                                if vn:
+                                    constants.append(
+                                        (node_text(vn, source_bytes),
+                                         f"{cls_name} variant"))
+
+                # trait method signatures are the API contract — recurse with the
+                # trait as current_impl so required/default methods bind to it.
+                if node.type == "trait_item":
+                    for child in node.children:
+                        traverse(child, current_impl=cls_name)
+                    return
+
         elif node.type == "impl_item":
             # Extract the actual type from impl TypeName { ... }
             type_id = _get_child_by_type(node, "type_identifier") or _get_child_by_type(node, "generic_type")
@@ -153,6 +181,26 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
                     # Regardless, we keep flattened functions list
                 functions.append(func)
 
+        # Trait required-method declarations (no body) — bind to current trait.
+        elif node.type == "function_signature_item" and current_impl:
+            func_name = _get_name(node, source_bytes)
+            if func_name:
+                func = RawFunction(
+                    name=func_name,
+                    fqn=f"{base_fqn}::{current_impl}.{func_name}",
+                    file_path=file_path,
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    signature=node_text(node, source_bytes).strip()[:160],
+                    kind=NodeKind.METHOD, body_text="",
+                    is_exported=True, parent_class=current_impl,
+                )
+                for cls in classes:
+                    if cls.name == current_impl:
+                        cls.methods.append(func)
+                        break
+                functions.append(func)
+
         # Call extraction
         elif node.type == "call_expression":
             fn = _get_child_by_type(node, "identifier") or _get_child_by_type(node, "field_expression")
@@ -176,6 +224,7 @@ def extract_rust(file_path: str, source: str, source_bytes: bytes, tree: Tree) -
         classes=classes,
         imports=imports,
         call_sites=call_sites,
+        constants=constants,
         file_hash=_hash_text(source),
         total_lines=source.count("\n") + 1,
         exports=[f.name for f in functions if f.is_exported] + [c.name for c in classes] # simplified export logic

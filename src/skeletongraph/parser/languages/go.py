@@ -27,9 +27,20 @@ def _get_child_by_type(node: Node, child_type: str) -> Optional[Node]:
     return None
 
 def _get_name(node: Node, source_bytes: bytes) -> str:
-    name_node = _get_child_by_type(node, "identifier")
-    if name_node:
-        return node_text(name_node, source_bytes)
+    # tree-sitter-go names live under DIFFERENT node types per declaration:
+    #   function_declaration -> `identifier`        (e.g. NewHTTPServer)
+    #   type_spec (struct/iface) -> `type_identifier`  (e.g. HTTPServer)
+    #   method_declaration -> `field_identifier`    (e.g. Start)
+    # The old identifier-only lookup returned "" for the latter two, so EVERY Go
+    # struct, interface, and receiver method was silently dropped from the index
+    # — only free functions survived → ~0 recall on method-heavy Go (the bulk of
+    # real Go code). Order matters: method_declaration ALSO has a direct
+    # `type_identifier` child for its return type, so `field_identifier` must be
+    # tried before `type_identifier` or methods would be named after their return.
+    for nt in ("identifier", "field_identifier", "type_identifier"):
+        name_node = _get_child_by_type(node, nt)
+        if name_node:
+            return node_text(name_node, source_bytes)
     return ""
 
 def _extract_go_doc(node: Node, source_bytes: bytes) -> str:
@@ -48,7 +59,8 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
     classes: List[RawClass] = []
     imports: List[RawImport] = []
     call_sites: List[RawCallSite] = []
-    
+    constants: List[Tuple[str, str]] = []
+
     package_name = ""
     # Find package clause
     pkg_node = _get_child_by_type(root_node, "package_clause")
@@ -90,15 +102,38 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
                     if struct_name:
                         type_node = _get_child_by_type(spec, "struct_type") or _get_child_by_type(spec, "interface_type")
                         kind = NodeKind.STRUCT if type_node and type_node.type == "struct_type" else NodeKind.INTERFACE
-                        
-                        classes.append(RawClass(
+
+                        cls = RawClass(
                             name=struct_name,
                             fqn=f"{base_fqn}::{struct_name}",
                             file_path=file_path,
                             line_start=spec.start_point[0] + 1,
                             line_end=spec.end_point[0] + 1,
                             kind=kind
-                        ))
+                        )
+                        # Interface method specs are the API contract — index them
+                        # so a search for the method name finds the interface.
+                        if type_node and type_node.type == "interface_type":
+                            for m in type_node.children:
+                                if m.type not in ("method_elem", "method_spec"):
+                                    continue
+                                mn = _get_child_by_type(m, "field_identifier")
+                                if not mn:
+                                    continue
+                                mname = node_text(mn, source_bytes)
+                                cls.methods.append(RawFunction(
+                                    name=mname,
+                                    fqn=f"{base_fqn}::{struct_name}.{mname}",
+                                    file_path=file_path,
+                                    line_start=m.start_point[0] + 1,
+                                    line_end=m.end_point[0] + 1,
+                                    signature=node_text(m, source_bytes)[:120],
+                                    kind=NodeKind.METHOD,
+                                    body_text="",
+                                    is_exported=bool(mname) and mname[0].isupper(),
+                                    parent_class=struct_name,
+                                ))
+                        classes.append(cls)
                         
         elif node.type == "function_declaration":
             func_name = _get_name(node, source_bytes)
@@ -185,6 +220,21 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
                 else:
                     functions.append(func)
 
+        # Package-level const/var declarations (config values, ErrX sentinels,
+        # defaults) — indexed as constants so the file is retrievable by name.
+        # Guard on source_file parent so local vars inside functions are skipped.
+        elif (node.type in ("const_declaration", "var_declaration")
+              and node.parent is not None
+              and node.parent.type == "source_file"):
+            for spec in node.children:
+                if spec.type in ("const_spec", "var_spec"):
+                    for c in spec.children:
+                        if c.type == "identifier":
+                            cname = node_text(c, source_bytes)
+                            if cname and cname != "_":
+                                constants.append(
+                                    (cname, node_text(spec, source_bytes)[:80]))
+
         # Call site extraction logic
         elif node.type == "call_expression":
             fn = _get_child_by_type(node, "identifier") or _get_child_by_type(node, "selector_expression")
@@ -208,6 +258,7 @@ def extract_go(file_path: str, source: str, source_bytes: bytes, tree: Tree) -> 
         classes=classes,
         imports=imports,
         call_sites=call_sites,
+        constants=constants,
         file_hash=_hash_text(source),
         total_lines=source.count("\n") + 1,
         exports=[f.name for f in functions if f.is_exported] + [c.name for c in classes if c.name and c.name[0].isupper()]
