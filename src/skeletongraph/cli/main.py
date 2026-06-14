@@ -1944,7 +1944,7 @@ def log_cmd(path: str, last_n: int, session_id: str):
 @click.argument("event_name",
                 type=click.Choice([
                     "session_start", "user_prompt_submit",
-                    "post_tool_use", "file_changed",
+                    "pre_tool_use", "post_tool_use", "file_changed",
                     # legacy aliases kept for backward compat
                     "pre_prompt", "post_tool", "session_end",
                 ]))
@@ -1979,6 +1979,7 @@ def hook_cmd(event_name: str, path: str):
     from ..hooks.claude_code import (
         hook_session_start,
         hook_user_prompt_submit,
+        hook_pre_tool_use,
         hook_post_tool_use,
         hook_file_changed,
     )
@@ -1988,6 +1989,8 @@ def hook_cmd(event_name: str, path: str):
             result = hook_session_start(project_root, event_data)
         elif event_name in ("user_prompt_submit", "pre_prompt"):
             result = hook_user_prompt_submit(project_root, event_data)
+        elif event_name in ("pre_tool_use",):
+            result = hook_pre_tool_use(project_root, event_data)
         elif event_name in ("post_tool_use", "post_tool"):
             result = hook_post_tool_use(project_root, event_data)
         elif event_name in ("file_changed",):

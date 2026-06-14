@@ -95,6 +95,11 @@ def install(project_root: Path, verbose: bool = True) -> List[str]:
               _build_hook_cmd(sg_cmd, "session_start", path_arg))
     _set_hook(hooks, "UserPromptSubmit",
               _build_hook_cmd(sg_cmd, "user_prompt_submit", path_arg))
+    # SG-first gate: deny native Grep/Glob until the agent has used sg_search
+    # (then allow / fall back). Matcher scopes it to grep-style search only.
+    _set_hook(hooks, "PreToolUse",
+              _build_hook_cmd(sg_cmd, "pre_tool_use", path_arg),
+              matcher="Grep|Glob")
     _set_hook(hooks, "PostToolUse",
               _build_hook_cmd(sg_cmd, "post_tool_use", path_arg),
               matcher="")

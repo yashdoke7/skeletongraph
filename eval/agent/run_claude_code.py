@@ -165,6 +165,14 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
     marker = repo / ".sg_prepared"
 
     if marker.exists() and not rebuild:
+        # Refresh Claude Code hooks/MCP config (idempotent, gitignored) so copies
+        # prepared before a hook/install change pick it up — e.g. the SG-first
+        # PreToolUse gate — without a slow re-index.
+        if arm == ARM_SG:
+            try:
+                _sg(repo, "install", "--ide", "claude-code", "--path", str(repo))
+            except Exception:
+                pass
         reset_repo(repo)
         return repo
 

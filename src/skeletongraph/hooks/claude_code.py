@@ -43,6 +43,35 @@ _USE_SG_SYSTEM_MSG = (
     "MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log."
 )
 
+# ── SG-first gate ─────────────────────────────────────────────────────────
+# Native search tools (Grep/Glob) are what sg_search replaces. The PreToolUse
+# hook denies them UNTIL the agent has genuinely used SG (_GATE_MIN_SG searches),
+# then lets them through. It also gives up gracefully (falls back to native)
+# after _GATE_MAX_DENIALS blocks, so a task SG can't locate never deadlocks.
+# Read/Edit/Bash are never gated — only the grep-style search the agent should
+# do through SG. Env-tunable for the eval / opt-out (SG_GATE=0 disables).
+_GATED_TOOLS = {"Grep", "Glob"}
+_GATE_MIN_SG = int(os.environ.get("SG_GATE_MIN_SG", "2"))
+_GATE_MAX_DENIALS = int(os.environ.get("SG_GATE_MAX_DENIALS", "3"))
+
+
+def _gate_state_path(sg_dir: Path) -> Path:
+    return sg_dir / "gate_state.json"
+
+
+def _read_gate_state(sg_dir: Path) -> Dict[str, int]:
+    try:
+        return json.loads(_gate_state_path(sg_dir).read_text(encoding="utf-8"))
+    except Exception:
+        return {"sg_search": 0, "denials": 0}
+
+
+def _write_gate_state(sg_dir: Path, st: Dict[str, int]) -> None:
+    try:
+        _gate_state_path(sg_dir).write_text(json.dumps(st), encoding="utf-8")
+    except Exception:
+        pass
+
 
 # ── Public hook handlers ─────────────────────────────────────────────────
 
@@ -58,6 +87,7 @@ def hook_session_start(project_root: Path, event_data: Dict[str, Any]) -> Dict[s
         session_id = str(uuid.uuid4())[:8]
         # Persist current session id so PostToolUse can find it
         (sg_dir / "current_session.txt").write_text(session_id, encoding="utf-8")
+        _write_gate_state(sg_dir, {"sg_search": 0, "denials": 0})  # reset SG-first gate
         _write_hook_log(sg_dir, "session_start", f"session_id={session_id}")
     except Exception as e:
         _write_hook_log(sg_dir, "session_start", f"ERROR: {e}")
@@ -150,6 +180,40 @@ def hook_user_prompt_submit(project_root: Path, event_data: Dict[str, Any]) -> D
         return {"additionalContext": _USE_SG_SYSTEM_MSG}
 
 
+def hook_pre_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """PreToolUse: SG-first gate. Deny native Grep/Glob until the agent has used
+    SG, then allow (or fall back after repeated blocks). Honored even under
+    --dangerously-skip-permissions (the flag skips prompts, not hooks)."""
+    if os.environ.get("SG_GATE", "1") == "0":
+        return {}
+    tool = event_data.get("tool_name", "")
+    if tool not in _GATED_TOOLS:
+        return {}                       # only grep-style search is gated
+    sg_dir = project_root / ".skeletongraph"
+    st = _read_gate_state(sg_dir)
+    if (st.get("sg_search", 0) >= _GATE_MIN_SG
+            or st.get("denials", 0) >= _GATE_MAX_DENIALS):
+        return {}                       # SG engaged, or graceful fallback
+    st["denials"] = st.get("denials", 0) + 1
+    _write_gate_state(sg_dir, st)
+    _write_hook_log(sg_dir, "pre_tool_use",
+                    f"denied {tool} (sg={st.get('sg_search', 0)}, "
+                    f"denials={st['denials']}/{_GATE_MAX_DENIALS})")
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Use sg_search first for this — it returns the whole task context "
+                "in one call (edit targets with their bodies, helper functions, "
+                "module constants, and likely tests) with exact file:line ranges, "
+                "so you usually won't need grep. Native search unlocks once you've "
+                "used SG, and falls back automatically if SG can't locate it."
+            ),
+        }
+    }
+
+
 def hook_post_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
     """PostToolUse: append a session log entry.
 
@@ -166,6 +230,13 @@ def hook_post_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[s
         tool_name = event_data.get("tool_name", "")
         tool_input = event_data.get("tool_input", {})
         tool_response = event_data.get("tool_response", {})
+
+        # Count SG retrieval calls so the PreToolUse gate knows the agent engaged
+        # SG before unlocking native search.
+        if any(t in tool_name for t in ("sg_search", "sg_get", "sg_expand")):
+            gst = _read_gate_state(sg_dir)
+            gst["sg_search"] = gst.get("sg_search", 0) + 1
+            _write_gate_state(sg_dir, gst)
 
         # Detect modified files
         files_touched = _extract_modified_files(tool_name, tool_input, tool_response)
