@@ -66,11 +66,61 @@ def _read_gate_state(sg_dir: Path) -> Dict[str, int]:
         return {"sg_search": 0, "denials": 0}
 
 
-def _write_gate_state(sg_dir: Path, st: Dict[str, int]) -> None:
+def _write_gate_state(sg_dir: Path, st: Dict) -> None:
     try:
         _gate_state_path(sg_dir).write_text(json.dumps(st), encoding="utf-8")
     except Exception:
         pass
+
+
+def _fresh_gate() -> Dict:
+    return {"sg_search": 0, "denials": 0, "returned": [], "read_denied": []}
+
+
+def _sg_returned_files(text: str) -> list:
+    """Repo-relative files for which an sg_search/sg_get/sg_expand result already
+    returned a BODY (so re-reading them is redundant). Parses the `File:`,
+    `Edit target:`, and `### … (path:line-line)` markers — not the metadata-only
+    'Other matches' bullets (whose bodies were NOT returned)."""
+    import re as _re
+    files = set()
+    for m in _re.finditer(r"File:\s*([^\s:]+):\d+-\d+", text):
+        files.add(m.group(1).replace("\\", "/"))
+    for m in _re.finditer(r"Edit target:\s*([^\s:]+):\d+-\d+", text):
+        files.add(m.group(1).replace("\\", "/"))
+    for m in _re.finditer(r"###\s+[^\n(]*\(([^\s:]+):\d+-\d+\)", text):
+        files.add(m.group(1).replace("\\", "/"))
+    return sorted(files)
+
+
+def _rel_norm(path: str, project_root: Path) -> str:
+    """Absolute (or any) path -> repo-relative forward-slash, to match SG paths."""
+    p = str(path or "").replace("\\", "/")
+    rp = str(project_root).replace("\\", "/").rstrip("/")
+    if p.startswith(rp):
+        p = p[len(rp):].lstrip("/")
+    return p
+
+
+def _tool_response_text(tool_response) -> str:
+    """Pull text out of a tool_response (MCP returns {content:[{type:text,text}]})."""
+    if isinstance(tool_response, str):
+        return tool_response
+    if isinstance(tool_response, dict):
+        c = tool_response.get("content")
+        if isinstance(c, list):
+            return "\n".join(b.get("text", "") for b in c if isinstance(b, dict))
+        if isinstance(c, str):
+            return c
+        return json.dumps(tool_response)[:20000]
+    return ""
+
+
+def _deny(reason: str) -> Dict[str, Any]:
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason}}
 
 
 # ── Public hook handlers ─────────────────────────────────────────────────
@@ -87,7 +137,7 @@ def hook_session_start(project_root: Path, event_data: Dict[str, Any]) -> Dict[s
         session_id = str(uuid.uuid4())[:8]
         # Persist current session id so PostToolUse can find it
         (sg_dir / "current_session.txt").write_text(session_id, encoding="utf-8")
-        _write_gate_state(sg_dir, {"sg_search": 0, "denials": 0})  # reset SG-first gate
+        _write_gate_state(sg_dir, _fresh_gate())  # reset SG-first gate
         _write_hook_log(sg_dir, "session_start", f"session_id={session_id}")
     except Exception as e:
         _write_hook_log(sg_dir, "session_start", f"ERROR: {e}")
@@ -181,37 +231,55 @@ def hook_user_prompt_submit(project_root: Path, event_data: Dict[str, Any]) -> D
 
 
 def hook_pre_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
-    """PreToolUse: SG-first gate. Deny native Grep/Glob until the agent has used
-    SG, then allow (or fall back after repeated blocks). Honored even under
-    --dangerously-skip-permissions (the flag skips prompts, not hooks)."""
+    """PreToolUse gate (honored even under --dangerously-skip-permissions):
+      - Grep/Glob: SG-first — deny until the agent has queried SG, then allow
+        (bounded fallback so a task SG can't locate never deadlocks).
+      - Read: dedup — gently block the FIRST re-read of a file sg_search already
+        returned a body for (point to the result / sg_expand); allow if the agent
+        insists. This removes the dominant token waste without breaking workflow.
+    Read/Edit/Bash are otherwise never gated."""
     if os.environ.get("SG_GATE", "1") == "0":
         return {}
     tool = event_data.get("tool_name", "")
-    if tool not in _GATED_TOOLS:
-        return {}                       # only grep-style search is gated
     sg_dir = project_root / ".skeletongraph"
     st = _read_gate_state(sg_dir)
-    if (st.get("sg_search", 0) >= _GATE_MIN_SG
-            or st.get("denials", 0) >= _GATE_MAX_DENIALS):
-        return {}                       # SG engaged, or graceful fallback
-    st["denials"] = st.get("denials", 0) + 1
-    _write_gate_state(sg_dir, st)
-    _write_hook_log(sg_dir, "pre_tool_use",
-                    f"denied {tool} (sg={st.get('sg_search', 0)}, "
-                    f"denials={st['denials']}/{_GATE_MAX_DENIALS})")
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                "Use sg_search first for this — it returns the whole task context "
-                "in one call (edit targets with their bodies, helper functions, "
-                "module constants, and likely tests) with exact file:line ranges, "
-                "so you usually won't need grep. Native search unlocks once you've "
-                "used SG, and falls back automatically if SG can't locate it."
-            ),
-        }
-    }
+
+    if tool in _GATED_TOOLS:
+        if (st.get("sg_search", 0) >= _GATE_MIN_SG
+                or st.get("denials", 0) >= _GATE_MAX_DENIALS):
+            return {}                   # SG engaged, or graceful fallback
+        st["denials"] = st.get("denials", 0) + 1
+        _write_gate_state(sg_dir, st)
+        _write_hook_log(sg_dir, "pre_tool_use",
+                        f"denied {tool} (sg={st.get('sg_search', 0)}, "
+                        f"denials={st['denials']}/{_GATE_MAX_DENIALS})")
+        return _deny(
+            "Use sg_search first for this — it returns the whole task context in "
+            "one call (edit targets with their bodies, helper functions, module "
+            "constants, and likely tests) with exact file:line ranges, so you "
+            "usually won't need grep. Native search unlocks once you've used SG, "
+            "and falls back automatically if SG can't locate it.")
+
+    if tool == "Read":
+        path = (event_data.get("tool_input", {}) or {}).get("file_path", "")
+        norm = _rel_norm(path, project_root)
+        returned = set(st.get("returned", []))
+        denied = set(st.get("read_denied", []))
+        # Only nudge once per file, and only after SG has actually returned it.
+        if norm and norm in returned and norm not in denied:
+            st["read_denied"] = sorted(denied | {norm})
+            _write_gate_state(sg_dir, st)
+            _write_hook_log(sg_dir, "pre_tool_use", f"nudged Read {norm}")
+            return _deny(
+                f"sg_search already returned {norm} with its relevant code and "
+                f"exact file:line range — edit directly from that result instead "
+                f"of re-reading the whole file. If you need a different part, call "
+                f"sg_expand('{norm}::<symbol>') or sg_expand('{norm}:<start>-<end>'). "
+                f"(If you really need the full file, call Read again and it will "
+                f"go through.)")
+        return {}
+
+    return {}
 
 
 def hook_post_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -231,11 +299,17 @@ def hook_post_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[s
         tool_input = event_data.get("tool_input", {})
         tool_response = event_data.get("tool_response", {})
 
-        # Count SG retrieval calls so the PreToolUse gate knows the agent engaged
-        # SG before unlocking native search.
+        # Count SG retrieval calls (so the gate knows SG was engaged) and record
+        # the files whose bodies SG returned (so the Read-dedup nudge can fire).
         if any(t in tool_name for t in ("sg_search", "sg_get", "sg_expand")):
             gst = _read_gate_state(sg_dir)
             gst["sg_search"] = gst.get("sg_search", 0) + 1
+            try:
+                rfiles = _sg_returned_files(_tool_response_text(tool_response))
+                if rfiles:
+                    gst["returned"] = sorted(set(gst.get("returned", [])) | set(rfiles))
+            except Exception:
+                pass
             _write_gate_state(sg_dir, gst)
 
         # Detect modified files
