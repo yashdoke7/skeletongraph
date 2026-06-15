@@ -712,23 +712,35 @@ class MCPServer:
                     lines.append(entry)
             lines.append("")
 
-            # Task bundle (likely tests + likely callers) — kept always-on.
-            # Copilot's v3 review explicitly cited needing test neighbors as
-            # the reason for falling back to native grep; removing the bundle
-            # on MEDIUM confidence would make that worse. The bundle already
-            # respects the tightened max_tokens budget (remaining_chars below),
-            # so it naturally shrinks without being gated off.
-            bundle = self._render_task_bundle(
-                query=query,
-                candidates=candidates[:expand_top],
-                store=store,
-                remaining_chars=max(0, char_budget - used_chars),
-                intent=intent_arg or "",
+            # Task bundle (likely tests + likely callers) — fired ON DEMAND, not
+            # always. It exists to stop a client from native-grepping for test
+            # neighbors after a search. But it is the single largest part of the
+            # response (helpers + test bodies), and when SG already returned the
+            # edit target with HIGH/MEDIUM confidence, that bundle is dead weight
+            # that persists in the agent's context every turn (measured: it made
+            # the MCP arm token-NEGATIVE vs native). So include it only when SG is
+            # unsure (LOW/MISS — the model genuinely needs more to go on) or the
+            # caller explicitly asked for debug/test context via `intent`. A
+            # confident match returns target + neighbors; if the model then needs
+            # tests/helpers it calls sg_search(intent='debug') — which the
+            # SG-first gate keeps in-pipeline instead of grep.
+            intent_l = (intent_arg or "").lower()
+            wants_bundle = (
+                confidence in ("LOW", "MISS")
+                or "debug" in intent_l or "test" in intent_l
             )
-            if bundle:
-                lines.append(bundle)
-                lines.append("")
-                used_chars += len(bundle)
+            if wants_bundle:
+                bundle = self._render_task_bundle(
+                    query=query,
+                    candidates=candidates[:expand_top],
+                    store=store,
+                    remaining_chars=max(0, char_budget - used_chars),
+                    intent=intent_arg or "",
+                )
+                if bundle:
+                    lines.append(bundle)
+                    lines.append("")
+                    used_chars += len(bundle)
 
             # Module-level constants the targets reference (VALID_HEADER_CHARS,
             # END_CARD, …). The function graph can't index these, so surfacing
