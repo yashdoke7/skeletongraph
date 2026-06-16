@@ -22,19 +22,33 @@ inside the agent loop.
 
 | arm | pass@1 | file recall | function recall@10 | tokens (k) | $ |
 |---|--:|--:|--:|--:|--:|
-| **`sg`** (lean core) | **45.5** | .854 | .319 | **176** | .051 |
-| **`sg-rerank`** (method) | 45.0 | **.924** | **.404** | **175** | .051 |
-| `cbmem` (zero-LLM graph) | 44.4 | .746 | .228 | 254 | .072 |
-| `grep` | 44.0 | .883 | — | 297 | .084 |
-| `none` (no retrieval) | 44.0 | — | — | 244 | .070 |
-| `aider` (repo-map) | 43.9 | — | — | 1,167 | .319 |
-| `bm25` | 41.0 | .846 | .342 | 267 | .076 |
+| **`sg-rerank`** (method) | **42.0** | **.924** | **.404** | 175 | .051 |
+| **`sg`** (lean core) | 35.0 | .854 | .319 | 172 | .050 |
+| `sg-chain` (graph-path) | 36.0 | .902 | .312 | **159** | **.046** |
+| `cbmem` (zero-LLM graph) | 38.0 | .746 | .228 | 286 | .080 |
+| `graphify` (knowledge graph) | 38.0 | — | — | 282 | .080 |
+| `grep` | 39.0 | .883 | — | 286 | .081 |
+| `bm25` | 38.0 | .846 | .342 | 265 | .075 |
+| `none` (no retrieval) | 37.0 | — | — | 279 | .079 |
+| `aider` (repo-map) | 42.0 | — | — | 1,218 | .333 |
 
-**Findings:** (1) on contaminated benchmarks **solve rate is retrieval-insensitive**
-(`none` = 44%, no arm significantly better) — so tokens and function recall are the
-honest axes; (2) **file recall ≠ function recall** — most arms find the file, not the
-function; (3) the **`sg` family is cheapest** while `sg-rerank` has the **best retrieval
-quality**, with **no LLM** in its index.
+**Findings:** (1) on this contaminated benchmark **solve rate is retrieval-insensitive** —
+pass@1 spans just 35–42%, `none` (no retrieval) scores 37%, and McNemar finds **no arm
+significantly better than no-retrieval** (`sg-rerank` vs `none`, p = 0.27). The same 100
+tasks re-scored ~7 points lower on *every* arm — including `none` — between runs, so
+pass@1 is run-noise; **tokens and function recall are the honest axes**. (2) **file recall
+≠ function recall** — most arms find the file, not the function. (3) the **`sg` family is
+cheapest** (159–175k tokens vs 265–286k for baselines and 1,218k for aider) while
+**`sg-rerank` has the best retrieval quality of any arm** (file recall .924, function
+recall .404), with **no LLM** in its index — ahead of the strong-RAG (`hybrid`, 44% in
+the prior run) and deployed-graph (`aider`) baselines, not just the keyword floor.
+
+_File/function recall are from a deterministic retrieval pass (model-independent); pass@1,
+tokens and $ are from the latest agent run (v3, nemotron-120B). Scope: SWE-bench Verified
+(Python). A contamination-controlled multi-language split (SWE-bench Pro, 10 languages —
+file recall ~0.78 across Go/TS/JS/Python; function recall pending gold-FQN scoring) and a
+real-agent deployment study (SkeletonGraph as an MCP server in Claude Code) are evaluated
+separately and reported as they complete._
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
