@@ -168,7 +168,7 @@ def build_profile(arm: str, repo: Path):
     # The whole SG family (structural core + concept variants: chain, rerank,
     # embed, seed, ablations, and the summary-search arms) uses SG's NATIVE tools
     # — read_symbol/expand — so each concept is tested as a real pipeline.
-    if arm == "sg" or arm.startswith(("sg-", "summary")):
+    if arm == "sg" or arm == "fusion" or arm.startswith(("sg-", "summary")):
         return (_SG_SCHEMAS, SG_PROMPT)
     if arm == "cbmem":
         return (_CBMEM_SCHEMAS, CBMEM_PROMPT)

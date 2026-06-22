@@ -20,12 +20,22 @@ Needs: pip install 'sentence-transformers>=3,<4'  (CPU is fine — MiniLM is 22M
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from pathlib import Path
 from typing import List, Tuple
 
-_MODEL_NAME = "all-MiniLM-L6-v2"
-_MODEL = None        # lazily-loaded SentenceTransformer (load once per process)
+
+def _model_name() -> str:
+    """Embedding model. Default = generic MiniLM (the original control). Set
+    SG_DENSE_MODEL to a CODE-SEARCH model (e.g.
+    'flax-sentence-embeddings/st-codesearch-distilroberta-base') to enable
+    NL->code retrieval — the natural-language-adaptable arm. The cache key
+    includes the model name, so switching models never reuses stale vectors."""
+    return os.environ.get("SG_DENSE_MODEL", "all-MiniLM-L6-v2")
+
+
+_MODELS: dict = {}   # name -> lazily-loaded SentenceTransformer
 
 
 def _ensure_paths() -> None:
@@ -40,29 +50,53 @@ def _ensure_paths() -> None:
 
 
 def _model():
-    global _MODEL
-    if _MODEL is None:
+    name = _model_name()
+    if name not in _MODELS:
         from sentence_transformers import SentenceTransformer
-        _MODEL = SentenceTransformer(_MODEL_NAME)
-    return _MODEL
+        try:
+            _MODELS[name] = SentenceTransformer(name, trust_remote_code=True)
+        except TypeError:
+            _MODELS[name] = SentenceTransformer(name)
+    return _MODELS[name]
+
+
+# Maximum characters per document — truncate BEFORE the tokenizer sees it.
+# Jina v2 supports 8192 tokens, but large repos have 50K-char functions that
+# blow up the tokenizer's internal attention matrix. 2048 chars ≈ 500 tokens —
+# captures the signature, docstring, and first ~40 lines of body, which is
+# where the signal lives. Keeps peak VRAM under 2 GB for batch_size=8.
+_MAX_DOC_CHARS = int(os.environ.get("SG_DENSE_MAX_CHARS", "2048"))
 
 
 def _encode(texts: List[str]):
     import numpy as np
     if not texts:
-        return np.zeros((0, 384), dtype="float32")
-    embs = _model().encode(
-        texts, batch_size=64, show_progress_bar=False,
-        convert_to_numpy=True, normalize_embeddings=True,   # cosine == dot product
-    )
+        m = _model()
+        dim = m.get_sentence_embedding_dimension() or 384
+        return np.zeros((0, dim), dtype="float32")
+    # Truncate to prevent tokenizer OOM on huge function bodies.
+    texts = [t[:_MAX_DOC_CHARS] for t in texts]
+    m = _model()
+    # Clamp the model's internal max_seq_length to avoid attention-matrix OOM.
+    orig_max = getattr(m, 'max_seq_length', 8192)
+    m.max_seq_length = min(orig_max, 512)
+    try:
+        embs = m.encode(
+            texts, batch_size=8, show_progress_bar=False,
+            convert_to_numpy=True, normalize_embeddings=True,
+        )
+    finally:
+        m.max_seq_length = orig_max
     return embs.astype("float32")
 
 
 def _doc_embeddings(fqns: List[str], docs: List[str], cache_dir: Path, tag: str):
     """Encode docs once, cache by (model, tag, content-hash). Returns (N, d) array."""
     import numpy as np
+    # Truncate BEFORE hashing so the cache key matches what was actually encoded.
+    docs = [d[:_MAX_DOC_CHARS] for d in docs]
     fp = hashlib.sha1(
-        (_MODEL_NAME + "|" + tag + "|" +
+        (_model_name() + f"|maxc={_MAX_DOC_CHARS}" + "|" + tag + "|" +
          "\n".join(f"{f}\t{d}" for f, d in zip(fqns, docs))).encode("utf-8")
     ).hexdigest()[:16]
     cache_dir.mkdir(parents=True, exist_ok=True)

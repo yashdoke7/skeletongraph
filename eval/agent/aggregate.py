@@ -329,12 +329,22 @@ def aggregate(stage: str | None, task_ids: set | None = None,
         # NON-empty run only counts once it has a `resolved` verdict (we can't
         # score an unverified patch). This stops the bug where arms with
         # unverified empty patches got an inflated pass@1 (smaller denominator).
+        # An arm is "evaluated" only if at least one run carries a real (non-null)
+        # `resolved` verdict. If NONE do (e.g. the Pro harness never executed),
+        # the arm has no pass@1 at all — not even 0% — and empty-patch fails must
+        # NOT manufacture a 0/denominator. This is what stops a null harness run
+        # from being misread as a real 0% pass@1.
+        arm_has_verdict = any(r.get("resolved") is not None for r in rs)
+
         def _verdict(r):
-            if "resolved" in r:
+            # A real verdict is a non-null `resolved`. An explicit `resolved: null`
+            # (Pro: instance never executed by the harness) is NOT a fail — it is
+            # unevaluated and must be excluded, exactly like a missing verdict.
+            if r.get("resolved") is not None:
                 return 1 if r.get("resolved") else 0
-            if not (r.get("model_patch") or "").strip():
-                return 0          # empty patch = guaranteed fail
-            return None           # non-empty, unverified → exclude
+            if arm_has_verdict and not (r.get("model_patch") or "").strip():
+                return 0          # empty patch = guaranteed fail (evaluated arm)
+            return None           # unverified/unevaluated → exclude
         resolved = [v for v in (_verdict(r) for r in rs) if v is not None]
         arm_pass[arm] = {r["task_id"]: bool(_verdict(r))
                          for r in rs if _verdict(r) is not None}
@@ -730,7 +740,7 @@ def aggregate(stage: str | None, task_ids: set | None = None,
                     if r.get("stopped") in ("submit", "max_turns")]
         pass_vals = []
         for r in recs:
-            if "resolved" in r:
+            if r.get("resolved") is not None:
                 pass_vals.append(1 if r.get("resolved") else 0)
             elif "verdict" in r and r.get("verdict") is not None:
                 pass_vals.append(1 if r.get("verdict") else 0)

@@ -102,8 +102,14 @@ sg-*.json
 cbmem.*.json
 aider.*.json
 graphify.*.json
+fusion.*.json
+native.*.json
 summary-*.json
 logs/
+
+# External benchmark clone (huge, has its own .git + submodules: mini-swe-agent,
+# SWE-agent). Cloned per machine; never part of this repo.
+SWE-bench_Pro-os/
 
 # graphify extract output (per-repo graph; never commit, never let it leak into a patch)
 graphify-out/

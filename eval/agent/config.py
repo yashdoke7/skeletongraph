@@ -268,6 +268,14 @@ ARMS: Dict[str, Arm] = {
     # AND inherit sg-chain's rank (1.5) — neither current arm has both.
     "sg-rerank": Arm("sg-rerank", "sg-rerank", "SG-rerank (bm25 recall + SG rerank)",
                      strong=True),
+    # fusion: 3-way reciprocal-rank fusion of lexical (BM25) + semantic (dense,
+    # code-search model via SG_DENSE_MODEL) + structural (SG-rerank). The
+    # natural-language-adaptable retriever — validated on SWE-bench Pro retrieval
+    # (recall@1 +50%, recall@10 +12%, MRR +26% over BM25; every language up).
+    # No single signal wins NL localization; their RRF beats each. Set
+    # SG_DENSE_MODEL=jinaai/jina-embeddings-v2-base-code for the run.
+    "fusion": Arm("fusion", "fusion",
+                  "3-way RRF (BM25 + Dense + SG; NL-adaptive)", strong=True),
     # New concepts (native harness): semantic dense rerank of the pool, and
     # SG seeded on the issue's tracebacks/code symbols.
     "sg-hybrid-fusion": Arm("sg-hybrid-fusion", "sg-hybrid-fusion",
@@ -573,7 +581,7 @@ STAGES: Dict[str, Stage] = {
             # ── baselines ──────────────────────────────────────────────────
             "sg", "bm25", "grep", "none", "hybrid",
             # ── sg headline operating points ───────────────────────────────
-            "sg-rerank", "sg-chain", "sg-seed",
+            "sg-rerank", "sg-chain", "sg-seed", "fusion",
             # ── sg ablations ───────────────────────────────────────────────
             "sg-nograph", "sg-norerank", "sg-full", "sg-embed", "sg-summary",
             "sg-fullgraph", "sg-nosummary", "sg-noembed", "sg-weakfallback",

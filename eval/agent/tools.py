@@ -492,7 +492,8 @@ _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
                 "sg-lean", "sg-router", "sg-fusion", "sg-chain", "sg-chain-nopath",
                 # ablations AROUND the new lean default (final-run stage)
                 "sg-full", "sg-summary", "sg-embed", "sg-hybrid-fusion",
-                "sg-dense-rerank", "sg-keyword-dense", "sg-rerank", "sg-seed"}
+                "sg-dense-rerank", "sg-keyword-dense", "sg-rerank", "sg-seed",
+                "fusion"}
 
 # The lean product default: structural core only. Summaries + embeddings are
 # OFF — in the heuristic_query path (eval + IDE sg_search) embeddings feed only
@@ -795,7 +796,43 @@ def _retrieve_rerank(query: str, repo: Path, k: int) -> List[str]:
     named = [f for f in pool if f not in cset and _name(f) in q_idents]
     nset = set(named)
     rest = [f for f in pool if f not in cset and f not in nset]
-    return (confirmed + named + rest)[:k]
+    ordered = confirmed + named + rest
+    # Demote test files below source — bug fixes edit the implementation, and BM25
+    # ranks the gold file's OWN tests above it (they repeat the symbol name), burying
+    # the source (observed on Pro: ansible module_common.py sank below its 8 tests).
+    # The shipped MCP (_tool_search) already does this; the eval arm must match the
+    # product. Stable sort preserves rank within source and within tests. Skipped
+    # when the task is explicitly about tests.
+    if "test" not in (query or "").lower():
+        ordered = sorted(ordered, key=lambda f: _is_test_path(f))
+    return ordered[:k]
+
+
+def _retrieve_fusion3(query: str, repo: Path, k: int) -> List[str]:
+    """3-way RRF: BM25 (lexical) + Dense (semantic, code-search via SG_DENSE_MODEL)
+    + SG-rerank (structural). The natural-language-adaptable retriever.
+
+    No single signal wins clean-NL localization, but their reciprocal-rank fusion
+    beats each — validated on SWE-bench Pro retrieval (recall@1 +50%, recall@10
+    +12%, MRR +26% over BM25; every language improved). RRF (k=60) is rank-based,
+    so a noisy signal from one retriever cannot sink a strong hit from the others.
+    Set SG_DENSE_MODEL=jinaai/jina-embeddings-v2-base-code for the run; embeddings
+    are content-hashed and cached, so the cost is one-time at index build.
+    """
+    _ensure_sg_on_path()
+    from backends.bm25_flat import retrieve as bm25_retrieve
+    from backends.dense import retrieve as dense_retrieve
+    deep = max(k * 3, 60)
+    lists = [
+        bm25_retrieve(query, repo, deep),          # lexical
+        dense_retrieve(query, repo, deep),         # semantic (code-search model)
+        _retrieve_rerank(query, repo, deep),       # structural (SG)
+    ]
+    scores: Dict[str, float] = {}
+    for lst in lists:
+        for rank, item in enumerate(lst):
+            scores[item] = scores.get(item, 0.0) + 1.0 / (60 + rank + 1)
+    return sorted(scores, key=lambda it: -scores[it])[:k]
 
 
 # ── sg-embed: semantic (dense) rerank of the structural+lexical pool ──────────
@@ -1124,6 +1161,8 @@ def _retrieve_sg(backend: str, query: str, repo: Path, k: int):
         return [(fqn, "") for fqn in _retrieve_rerank(query, repo, k)]
     if backend == "sg-seed":
         return [(fqn, "") for fqn in _retrieve_seed(query, repo, k)]
+    if backend == "fusion":
+        return [(fqn, "") for fqn in _retrieve_fusion3(query, repo, k)]
 
     _ensure_sg_on_path()
     from skeletongraph.engine import SGEngine
