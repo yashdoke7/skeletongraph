@@ -34,6 +34,11 @@ _RETRYABLE_TOKENS = (
     "429", "RateLimit", "Timeout", "timed out", "APIConnection",
     "ServiceUnavailable", "InternalServer", "overloaded", "Overloaded",
     "Gateway", "temporarily",
+    # NIM (nvidia) phrases its transient failures differently from OpenAI — none
+    # of the above match, so without these a rate-limit/decode-timeout FAILS the
+    # task instead of backing off + retrying (observed: dozens of sg-rerank runs
+    # dropped at turns=0 on "ResourceExhausted (32/32)"). These ARE transient.
+    "ResourceExhausted", "request limit reached", "wall clock timeout",
 )
 # Exact HTTP status codes to retry (server-side transient errors only).
 _RETRYABLE_STATUS = {"500", "502", "503", "504"}

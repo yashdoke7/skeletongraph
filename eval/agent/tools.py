@@ -1058,6 +1058,20 @@ def _sg_config(backend: str):
         # learned picks the mode via curator. Config is identical lean otherwise.
         return cfg
 
+    # ── generate-then-rerank arms (sg-rerank, sg-seed) ──────────────────────
+    # Their RANKING is a bm25 recall pool reordered by an INTERNAL lean-SG pass
+    # (_retrieve_rerank / _retrieve_seed call _sg_config("sg-chain")). This config
+    # object is consulted ONLY for the embeddings_used honesty flag — the arm never
+    # uses embeddings for ranking (heuristic_query embeddings feed a confidence
+    # score, not candidate order). So declare it lean: the flag reads N/A instead
+    # of a spurious "degraded" False. Kept as a separate ablation arm; the shipped
+    # product headline is `fusion` (3-way RRF); sg-rerank is the structural-only
+    # rerank reference point.
+    if backend in ("sg-rerank", "sg-seed"):
+        cfg.enable_summaries = False
+        cfg.enable_embeddings = False
+        return cfg
+
     # ── ablations AROUND the lean default (final-run ablation stage) ─────────
     if backend == "sg-full":
         # Lean + BOTH add-ons = the OLD full SG. Reference point: "did going
