@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -70,9 +71,13 @@ def _get_model():
         logger.warning(f"Failed to load embedding model: {e}")
         try:
             from rich.console import Console
-            Console().print(f"[bold yellow]WARNING:[/bold yellow] Skipping embeddings! Failed to load model '{_MODEL_NAME}': {e}")
+            # stderr=True is load-bearing, not cosmetic: this runs inside the MCP
+            # stdio server too, where stdout carries ONLY JSON-RPC responses. A
+            # plain Console() defaults to stdout and corrupts the protocol stream
+            # mid-session (confirmed: broke tools/call response parsing outright).
+            Console(stderr=True).print(f"[bold yellow]WARNING:[/bold yellow] Skipping embeddings! Failed to load model '{_MODEL_NAME}': {e}")
         except ImportError:
-            print(f"WARNING: Skipping embeddings! Failed to load model '{_MODEL_NAME}': {e}")
+            print(f"WARNING: Skipping embeddings! Failed to load model '{_MODEL_NAME}': {e}", file=sys.stderr)
         return None
 
 

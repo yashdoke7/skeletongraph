@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -350,6 +352,13 @@ class MCPServer:
         # already returned (by sg_search bodies or earlier sg_expand ranges). Stops
         # the agent paging through a file with overlapping sg_expand calls.
         self._returned_ranges: dict = {}
+        # Whether the STATIC overview briefing (project.md + architecture.md +
+        # top-functions map) has been sent this session. It never changes within a
+        # session and is already in the model's context after the first call, so
+        # re-sending it on every sg_overview call is pure waste (measured on a real
+        # Claude run: 5 calls × ~3.4k chars, cached + re-read every later turn).
+        # Repeat calls return only the DYNAMIC parts (index stats + session digest).
+        self._overview_sent: bool = False
 
     # ── range-dedup helpers ──────────────────────────────────────────────
 
@@ -479,6 +488,29 @@ class MCPServer:
         # Callers can still request more via top_n=20 explicitly.
         top_n = int(args.get("top_n", 10))
         include_session = bool(args.get("include_session", True))
+        # Force a full re-send only if the caller explicitly asks (rare).
+        force_full = bool(args.get("force", False))
+
+        # Repeat call in the same session: the static briefing is already in the
+        # model's context. Return only the dynamic parts (fresh index stats +
+        # session digest) so the map isn't re-billed on every re-orientation.
+        if self._overview_sent and not force_full:
+            parts = ["(Overview briefing already provided this session — project "
+                     "map, architecture, and top functions are in your context "
+                     "above. Dynamic state only:)"]
+            try:
+                meta = self._engine.get_store().meta
+                parts.append(
+                    f"## Index\n  {meta.total_files} files  •  "
+                    f"{meta.total_functions} functions  •  "
+                    f"{', '.join(meta.languages) or 'unknown'}")
+            except RuntimeError:
+                pass
+            if include_session:
+                digest = format_log_digest(read_log(self._sg_dir, last_n=5), max_turns=5)
+                if digest:
+                    parts.append(digest)
+            return "\n\n".join(parts)
 
         parts = [_USE_SG_REMINDER, ""]
 
@@ -557,6 +589,7 @@ class MCPServer:
         except Exception:
             pass
 
+        self._overview_sent = True
         return "\n\n".join(parts)
 
     # ── Tool: sg_search ──────────────────────────────────────────────────
@@ -580,30 +613,77 @@ class MCPServer:
         if not query:
             return "Error: query is required"
 
+        # Retrieval strategy. `fusion` (3-way RRF: BM25 + dense + SG structural
+        # rerank) is the DEFAULT — it's the algorithm the benchmark numbers are
+        # actually validated on (SWE-bench Pro: recall@1 +50%, MRR +26% over BM25
+        # alone), not the engine's older raw `heuristic_query` ("structural"),
+        # which was the historical MCP default but was never the winning
+        # configuration. Safe to default: the dense leg degrades gracefully (2-
+        # signal bm25+rerank) on ANY failure OR timeout (SG_DENSE_TIMEOUT_S,
+        # default 20s — bounded so a slow/stuck model load can never hang a tool
+        # call), and the whole retrieval build now warms in a BACKGROUND thread
+        # at server startup so it never blocks the MCP handshake regardless of
+        # repo size (validated end-to-end via a real subprocess JSON-RPC test on
+        # the exact repo that previously broke the handshake). Override with
+        # SG_MCP_RETRIEVAL=rerank (skip dense entirely) or =structural (old path).
+        mode = os.environ.get("SG_MCP_RETRIEVAL", "fusion").strip().lower()
         try:
             store = self._engine.get_store()
             # Over-fetch so the test-demotion below can pull a buried source file
             # up into the returned window (BM25 often ranks tests above source).
             fetch_n = max(top_n * 3, 30)
-            result = self._engine.heuristic_query(
-                query, top_n=fetch_n, file_filter=file_filter or None,
-                mode_hint=intent_arg,
-                graph_policy=graph_policy,
-            )
+            if mode in ("fusion", "rerank"):
+                from ..retrieval.fusion import retrieve_fusion, retrieve_rerank
+                fn = retrieve_fusion if mode == "fusion" else retrieve_rerank
+                # Neither algorithm has a native file_filter concept (unlike the
+                # structural resolver, which applies it INSIDE ranking). Applying
+                # the filter AFTER truncating to fetch_n could miss a real match
+                # sitting just outside the top-30 pool, so widen the fetch first
+                # when a filter is active — filtering, not the ranker, narrows.
+                pool_n = max(fetch_n, 200) if file_filter else fetch_n
+                fqns = fn(query, self._engine._root, pool_n)
+                candidates = self._candidates_from_fqns(fqns, store)
+                if file_filter:
+                    candidates = [c for c in candidates if file_filter in c.skeleton.file_path]
+                # Cheap confidence proxy (fusion/rerank don't compute the 5-factor
+                # score structural mode does): HIGH if the query names the top
+                # hit's own symbol — the same "exact reference" signal structural
+                # confidence is built on. A hardcoded MEDIUM here silently capped
+                # expand_top at 3 instead of 5, forcing extra follow-up sg_expand
+                # calls (measured contributor to the turn-count increase).
+                confidence = "MEDIUM"
+                if candidates:
+                    top_name = candidates[0].skeleton.fqn.split("::")[-1].split(".")[-1].lower()
+                    if top_name and top_name in query.lower():
+                        confidence = "HIGH"
+                if intent_arg or graph_arg not in ("auto", ""):
+                    # Not silently ignored — surfaced so a caller relying on these
+                    # (structural-resolver-only concepts; no equivalent in the
+                    # bm25/dense/rerank pipeline) knows they had no effect here.
+                    logger.debug(
+                        "sg_search: intent/graph args are structural-mode-only, "
+                        "ignored under SG_MCP_RETRIEVAL=%s", mode)
+            else:
+                result = self._engine.heuristic_query(
+                    query, top_n=fetch_n, file_filter=file_filter or None,
+                    mode_hint=intent_arg,
+                    graph_policy=graph_policy,
+                )
+                candidates = result.candidates
+                confidence = getattr(result, "confidence", "MEDIUM")
         except RuntimeError as e:
             return str(e)
 
-        candidates = result.candidates
         # Bug-fix searches want the implementation, not its tests. BM25 ranks test
         # files high (they mention the symbol many times), often burying the source
         # below the cutoff (e.g. Card.fromstring source sat at rank 16). Demote test
         # files — stable, so rank within source and within tests is preserved —
         # unless the query is explicitly about tests. Then trim to the requested N.
+        # (fusion/rerank already demote internally; this keeps the two paths uniform.)
         if candidates and "test" not in query.lower():
             candidates = sorted(
                 candidates, key=lambda c: self._is_test_path(c.skeleton.file_path))
         candidates = candidates[:top_n]
-        confidence = getattr(result, "confidence", "MEDIUM")
         # Full bodies are valuable, but broad body dumps cause MCP results to be
         # re-read by some IDEs as separate content resources. Keep MEDIUM/LOW
         # searches tight; HIGH-confidence exact matches can carry a bit more.
@@ -1582,6 +1662,23 @@ class MCPServer:
         ))
 
     @staticmethod
+    def _candidates_from_fqns(fqns: List[str], store) -> List:
+        """Wrap fusion/rerank FQN results as objects the body-renderer expects.
+
+        retrieve_fusion/retrieve_rerank return bare ranked FQN strings; the
+        rendering path only touches `c.skeleton`, so a lightweight namespace per
+        resolvable FQN (preserving rank order, skipping any not in the index) is
+        all that's needed to feed them through the same output formatting as the
+        structural path."""
+        from types import SimpleNamespace
+        out = []
+        for fqn in fqns:
+            sk = store.skeleton_table.get(fqn)
+            if sk is not None:
+                out.append(SimpleNamespace(skeleton=sk))
+        return out
+
+    @staticmethod
     def _is_test_path(path: str) -> int:
         """1 for a test file, 0 for source — used as a stable sort key to demote
         tests below the implementation. Covers Python (test_*/_test, /tests/) and
@@ -1919,6 +2016,39 @@ def serve(project_root: Path, config: Optional[SGConfig] = None) -> None:
     """Run the MCP server over stdio until EOF."""
     server = MCPServer(project_root, config)
     logger.info("SG MCP server started (project=%s)", project_root)
+
+    # Pre-warm ALL lazy retrieval state in the BACKGROUND — not synchronously
+    # before the stdio loop starts. A blocking warm-up here delayed the MCP
+    # "initialize" handshake past Claude Code's connection timeout on
+    # larger/slower repos (confirmed: django/matplotlib sessions came up with
+    # ZERO SG tools registered, mcp_servers status stuck at "pending" — a
+    # session with NO SG tools is strictly worse than one with a slow first
+    # call, since the agent falls back to pure native grep/read with no
+    # fallback path). The stdio loop must start immediately; warming happens
+    # in parallel and whatever's ready by the agent's first real call is a
+    # bonus — the per-call caching in retrieval/bm25_flat.py + fusion.py
+    # already handles "not warm yet" correctly (it just builds then, exactly
+    # like before this existed), so there's no race to guard against.
+    def _background_warm() -> None:
+        try:
+            server._engine.heuristic_query("warm-up", top_n=1)
+        except Exception:
+            logger.warning("structural warm-up failed — falling back to lazy load", exc_info=True)
+        # Must match _tool_search's default exactly, or the wrong cache warms.
+        mode = os.environ.get("SG_MCP_RETRIEVAL", "fusion").strip().lower()
+        if mode in ("fusion", "rerank"):
+            try:
+                from ..retrieval import warm as warm_retrieval
+                # full_dense=False: this background thread must never spend minutes
+                # encoding a cold corpus (it would wedge behind a stuck download and
+                # the first query would degrade anyway). It opportunistically LOADS
+                # an already-prewarmed cache (fast) or gives up cleanly. The full
+                # encode belongs to `sg warm` / prepare, run before serving.
+                warm_retrieval(project_root, mode=mode, full_dense=False)
+            except Exception:
+                logger.warning("%s warm-up failed — falling back to lazy load", mode, exc_info=True)
+
+    threading.Thread(target=_background_warm, daemon=True).start()
 
     for line in sys.stdin:
         line = line.strip()

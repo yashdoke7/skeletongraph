@@ -1117,6 +1117,46 @@ def serve(path: str, port: int):
 
 
 @app.command()
+@click.option("--path", "-p", default=".", help="Project root directory")
+@click.option("--mode", type=click.Choice(["fusion", "rerank"], case_sensitive=False),
+              default="fusion", help="Which retrieval to warm (default: fusion, "
+                                     "which includes the dense embedding leg)")
+def warm(path: str, mode: str):
+    """Pre-build retrieval caches so the FIRST agent query is instant.
+
+    \b
+    Fusion (default) embeds every function once — a one-time cost that is minutes
+    on CPU, seconds on GPU. After that it is INCREMENTAL: only functions whose
+    text changed are re-embedded on the next build/edit, so keeping it warm is
+    cheap. Run this after `sg build` and before launching your agent:
+        sg warm --path .            # fusion (with embeddings)
+        sg warm --path . --mode rerank   # structural only, no embeddings
+
+    Rerank mode skips the dense leg entirely (no embedding time), for users who
+    want lower setup cost and are fine without the semantic signal.
+    """
+    project_root = Path(path).resolve()
+    if not (project_root / ".skeletongraph").exists():
+        console.print("[yellow]No index found — run `sg build` first.[/yellow]")
+        sys.exit(1)
+
+    import time as _time
+    from ..retrieval import warm as warm_retrieval
+    console.print(f"[bold]> Warming {mode} retrieval[/bold] for {project_root.name}")
+    if mode == "fusion":
+        console.print("  [dim]Embedding functions (one-time; incremental after this "
+                      "— only changed functions re-embed).[/dim]")
+    t0 = _time.time()
+    try:
+        warm_retrieval(project_root, mode=mode)
+    except Exception as e:
+        console.print(f"[red]Warm failed:[/red] {e}")
+        sys.exit(1)
+    console.print(f"  [green]Done[/green] in {_time.time()-t0:.1f}s — "
+                  f"first `sg_search` will now be fast.")
+
+
+@app.command()
 @click.argument("platform", required=False, default=None)
 @click.option("--path", "-p", default=".", help="Project root directory")
 @click.option("--ide", default=None,
