@@ -57,9 +57,20 @@ from .run_agent import load_tasks
 SG = shutil.which("sg") or "sg"
 CLAUDE = shutil.which("claude") or "claude"
 
-ARM_SG = "sg-rerank"    # MCP server's heuristic_query IS engine-side sg-rerank
-ARM_NATIVE = "native"   # Claude Code on its own — no SG, native tools only
-ARMS = (ARM_SG, ARM_NATIVE)
+ARM_SG = "sg-rerank"     # MCP server pinned to SG_MCP_RETRIEVAL=rerank (BM25+structural, no dense)
+ARM_FUSION = "sg-fusion"  # MCP server pinned to SG_MCP_RETRIEVAL=fusion (3-way RRF incl. dense)
+ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
+ARMS = (ARM_SG, ARM_FUSION, ARM_NATIVE)
+
+# Every non-native arm launches the same MCP server binary — what actually
+# differs is which retrieval algorithm it serves. The server defaults to
+# "fusion" (product default — see retrieval/fusion.py), so without pinning
+# this explicitly per arm, an "sg-rerank"-labeled run silently tests whatever
+# the server's current default is, not what its own name promises. Bit us
+# once already: every claude-code "sg-rerank" run after the fusion port
+# landed was actually measuring fusion. Pin it here so the arm label is a
+# guarantee, not a hope.
+_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion"}
 
 # SG artifacts + standard caches kept OUT of the agent's patch. Written to the
 # copy's .gitignore BEFORE the baseline commit, so `git add -A` never stages
@@ -91,6 +102,30 @@ _SG_APPEND_SYSTEM = (
     "does not return what you need."
 )
 
+# Scope-discipline block — BYTE-IDENTICAL in both prompts on purpose. It is
+# about task scope, not retrieval, so both arms must get exactly the same words
+# or the cost comparison stops being apples-to-apples. Motivated directly by the
+# observed failure: richer retrieval made the SG arm AWARE of adjacent code (the
+# mathtext render path, .pyi type stubs) and it "helpfully" extended the fix and
+# synced stubs / added changelog notes the issue never asked for — same core
+# outcome, ~2x the turns/tokens. This tells BOTH arms to stop at the fix the
+# issue actually requires, so any remaining cost delta is retrieval, not
+# gold-plating. The "the fix does not require" qualifier keeps genuinely needed
+# stub/related edits allowed — it forbids thoroughness-for-its-own-sake, not
+# correctness.
+_SCOPE_BLOCK = """\
+- Make the smallest change that correctly fixes the issue, and nothing more.
+- Stop as soon as the issue's described behaviour is correct. Do NOT keep \
+searching or reading "to be thorough" once you already have the code needed to \
+make the fix — only look further if you are still missing something THIS fix \
+requires.
+- Do NOT add changelog / whatsnew / release-note entries, update type-stub \
+(.pyi) files, write documentation, or reformat/refactor code that the fix does \
+not require.
+- Only touch extra files or extend to related features/dependencies if the \
+issue explicitly asks for it.
+- Do NOT run or write tests — the test environment is not available."""
+
 _SG_PROMPT = """Fix the following GitHub issue in this repository by editing the \
 source files directly.
 
@@ -98,16 +133,16 @@ source files directly.
 {issue}
 
 Guidelines:
-- Make the smallest change that correctly fixes the issue.
 - Prefer the SkeletonGraph MCP tools (sg_overview, sg_search, sg_get, sg_expand) \
 to locate the relevant code before reading or grepping.
-- Do NOT run or write tests — the test environment is not available.
+{scope}
 - When the fix is complete, stop.
 """
 
 # Native baseline — Claude Code on its own. No SG mention, so the agent uses its
 # own tools (Grep/Read/Edit/...) exactly as it would for any user. This is the
-# control the SG-wrapped arm is measured against.
+# control the SG-wrapped arm is measured against. Same scope block as the SG arm
+# (see _SCOPE_BLOCK) so the ONLY prompt difference is the SG-tool guidance.
 _NATIVE_PROMPT = """Fix the following GitHub issue in this repository by editing \
 the source files directly.
 
@@ -115,8 +150,7 @@ the source files directly.
 {issue}
 
 Guidelines:
-- Make the smallest change that correctly fixes the issue.
-- Do NOT run or write tests — the test environment is not available.
+{scope}
 - When the fix is complete, stop.
 """
 
@@ -168,11 +202,13 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         # Refresh Claude Code hooks/MCP config (idempotent, gitignored) so copies
         # prepared before a hook/install change pick it up — e.g. the SG-first
         # PreToolUse gate — without a slow re-index.
-        if arm == ARM_SG:
+        if arm != ARM_NATIVE:
             try:
                 _sg(repo, "install", "--ide", "claude-code", "--path", str(repo))
             except Exception:
                 pass
+        if arm == ARM_FUSION:
+            _warm_dense_cache(repo)   # no-op if already warm (cache present)
         reset_repo(repo)
         return repo
 
@@ -211,12 +247,14 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
     # Clean git baseline — the agent's diff is taken against this commit.
     _init_baseline(repo)
 
-    if arm == ARM_SG:
+    if arm != ARM_NATIVE:
         # Build the SG index, then install Claude Code integration (.mcp.json +
         # hooks + CLAUDE.md). Both write only gitignored paths. The native arm
         # skips this entirely so it stays a genuine SG-free baseline.
         _sg(repo, "build", "--path", str(repo))
         _sg(repo, "install", "--ide", "claude-code", "--path", str(repo))
+        if arm == ARM_FUSION:
+            _warm_dense_cache(repo)
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
@@ -226,6 +264,51 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
 
     marker.write_text("ok\n", encoding="utf-8")
     return repo
+
+
+def _dense_cache_dir(repo: Path) -> Path:
+    return repo / ".skeletongraph" / "dense_cache"
+
+
+def _warm_dense_cache(repo: Path) -> None:
+    """Fully build fusion's dense-embedding cache BEFORE the timed agent run.
+
+    Fusion's dense leg (retrieval/dense.py) encodes the entire function corpus on
+    first use and caches it to .skeletongraph/dense_cache/embcache_code.npz. COLD,
+    that encode can approach or exceed the live SG_DENSE_TIMEOUT_S bound the MCP
+    server guards each call with — so the agent's very first sg_search could
+    silently degrade to a 2-way (bm25+structural) fusion instead of the intended
+    3-way, and the LLM would be handed a weaker result than the paper claims.
+
+    Building it here, once, with NO timeout, guarantees every in-run fusion call
+    reloads a ready .npy (fast) and is the real 3-way retrieval. This is one-time,
+    index-class cost OUTSIDE the agent's clock — same bucket as `sg build`, not
+    charged to agent latency/tokens. Idempotent: a present cache is a no-op.
+
+    Runs in the harness interpreter (sg-env), writing the same on-disk cache the
+    MCP child process later reads — the cache key is (model, repo-content-hash),
+    identical across both, so the child gets a guaranteed hit.
+    """
+    cache = _dense_cache_dir(repo)
+    if cache.is_dir() and any(cache.glob("embcache_*.npz")):
+        return   # already warm
+    t0 = time.time()
+    try:
+        from skeletongraph.retrieval import dense as _dense
+        # A real retrieve() builds + writes the corpus doc-embeddings cache. The
+        # query is irrelevant — only the doc-side .npy is cached (keyed by repo
+        # content + model), and that is exactly what the runtime call reloads.
+        _dense.retrieve("warm-up", repo, 1)
+        n = len(list(cache.glob("embcache_*.npz"))) if cache.is_dir() else 0
+        print(f"  dense pre-warm {repo.name}: {round(time.time()-t0,1)}s "
+              f"({n} cache file(s)) — first sg_search now full 3-way fusion")
+    except Exception as e:
+        # Non-fatal: without the cache the run still works, it just risks a
+        # degraded first call. Surface it loudly so a paper run isn't silently
+        # 2-way. (Most likely cause: sentence-transformers/model not available
+        # in this interpreter — the same dep the MCP child needs anyway.)
+        print(f"  WARN dense pre-warm FAILED for {repo.name} ({round(time.time()-t0,1)}s): "
+              f"{e} — fusion may degrade to 2-way on first call")
 
 
 def _init_baseline(repo: Path) -> None:
@@ -289,7 +372,11 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
                arm: str = ARM_SG, disallow_grep: bool = False) -> dict:
     """Launch `claude -p` in the repo.
 
-    SG arm: SG as the strict MCP server + an SG-first system nudge + SG prompt.
+    SG arms (sg-rerank / sg-fusion): SG as the strict MCP server, pinned via
+    SG_MCP_RETRIEVAL to the algorithm the arm name promises (see
+    _RETRIEVAL_MODE — the server's own default is a moving target as the
+    product evolves, so every arm must nail it down explicitly or the label
+    lies about what actually ran) + an SG-first system nudge + SG prompt.
     Native arm: `--strict-mcp-config` with NO config (disables ALL project/global
     MCP, so it is SG-free) + a neutral prompt.
     disallow_grep: block native Grep/Glob (forces search through SG / read) —
@@ -304,19 +391,23 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         "--model", model,
         "--dangerously-skip-permissions",
     ]
-    if arm == ARM_SG:
+    env = dict(os.environ)
+    if arm != ARM_NATIVE:
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
                 "--append-system-prompt", _SG_APPEND_SYSTEM]
-        prompt = _SG_PROMPT.format(issue=issue)
+        prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+        # Claude Code spawns the MCP server (`sg serve`) as a child process
+        # inheriting this env, which is where `sg serve` reads it from.
+        env["SG_MCP_RETRIEVAL"] = _RETRIEVAL_MODE[arm]
     else:
         # An explicit EMPTY config + --strict-mcp-config ⇒ exactly zero MCP
         # servers (no project or global leakage). Truly Claude-on-its-own.
         cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
-        prompt = _NATIVE_PROMPT.format(issue=issue)
+        prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     if disallow_grep:
         cmd += ["--disallowedTools", "Grep", "Glob"]
     try:
-        r = subprocess.run(cmd, cwd=str(repo), input=prompt,
+        r = subprocess.run(cmd, cwd=str(repo), input=prompt, env=env,
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout)
         raw, exit_code = r.stdout, r.returncode
@@ -530,6 +621,165 @@ def _retrieval_from_transcript(objs: list, gold_files: list) -> dict:
     }
 
 
+# ── native-arm retrieval reconstruction ──────────────────────────────────────
+# The native arm has no sg_search, so its "retrieval" is whatever its own tools
+# surface. Claude Code stream-json attaches a `tool_use_result` to every tool
+# call with the STRUCTURED outcome (not just the text the model saw), so this is
+# a faithful reconstruction, not a guess:
+#   Grep  — files_with_matches mode: `filenames`; content mode: files appear as
+#           `path:line:` prefixes in `content`; single-file content grep has
+#           neither, so the file IS the input `path` (a non-empty result = a hit).
+#   Glob  — `filenames` (a pure file lister; every returned path is a "hit").
+#   Read  — `file.filePath` / input `file_path` — the exact file opened.
+# Grep+Glob are the SEARCH tools (parallel to sg_search); Read is navigation
+# (parallel to sg_get/sg_expand, which SG also excludes from search_calls). So
+# retrieval_hit/rank/precision are computed over Grep+Glob only — an apples-to-
+# apples "how well did each arm's SEARCH surface gold" — while `reached_gold_via`
+# additionally records if native ever touched gold through ANY tool (incl. Read),
+# so native's read-driven navigation isn't hidden from the paper.
+
+def _rel(path: str, repo_root: str) -> str:
+    """Normalise a tool path to repo-relative forward-slash form."""
+    p = str(path).replace("\\", "/").strip()
+    rr = str(repo_root).replace("\\", "/").rstrip("/")
+    if rr:
+        low_p, low_r = p.lower(), rr.lower()
+        i = low_p.find(low_r)
+        if i != -1:
+            p = p[i + len(rr):].lstrip("/")
+    return p
+
+
+def _grep_hits(inp: dict, tur: dict, repo_root: str) -> list:
+    """Repo-relative files a single Grep call surfaced, in first-seen order."""
+    files, seen = [], set()
+
+    def _add(p):
+        p = _rel(p, repo_root)
+        if p and p not in seen:
+            seen.add(p); files.append(p)
+
+    fn = tur.get("filenames")
+    if isinstance(fn, list) and fn:
+        for p in fn:
+            _add(p)
+        return files
+    content = tur.get("content") or ""
+    # content-mode over a directory: every match line is `path:line:...` /
+    # `path-line-...`. Anchor to line start so we don't catch inline colons.
+    got_prefix = False
+    for line in content.splitlines():
+        m = re.match(r"^([\w./\\+-]+\.\w+)[:-]\d+[:-]", line)
+        if m:
+            _add(m.group(1)); got_prefix = True
+    if got_prefix:
+        return files
+    # content-mode over a single FILE: no path prefix, but a non-empty result
+    # means that specific input file matched → the input path is the hit.
+    if content.strip():
+        path = inp.get("path") or ""
+        if path and re.search(r"\.\w+$", str(path)):
+            _add(path)
+    return files
+
+
+def _retrieval_from_native_transcript(objs: list, gold_files: list,
+                                      repo_root: str) -> dict:
+    """Reconstruct native-arm retrieval (Grep/Glob search + Read navigation)
+    into the SAME schema as _retrieval_from_transcript, so aggregate.py scores
+    both arms identically. File-level only — native has no function ranking, so
+    the function-level metrics (funcR@10/funcHit) are honestly 0 for it."""
+    gold = {g.replace("\\", "/") for g in gold_files}
+    tid: dict = {}      # tool_use_id -> (name, input, order)
+    order = 0
+    events = []         # (order, name, input, tool_use_result)
+    for o in objs:
+        typ = o.get("type")
+        if typ == "assistant":
+            for b in (o.get("message", {}) or {}).get("content", []) or []:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    tid[b.get("id")] = (b.get("name"), b.get("input") or {}, order)
+                    order += 1
+        elif typ == "user":
+            tur = o.get("tool_use_result")
+            for b in (o.get("message", {}) or {}).get("content", []) or []:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    nm, inp, od = tid.get(b.get("tool_use_id"), (None, {}, None))
+                    if nm is not None and isinstance(tur, dict):
+                        events.append((od, nm, inp, tur))
+    events.sort(key=lambda e: (e[0] if e[0] is not None else 1e9))
+
+    search_calls, seen_gold = [], set()
+    reached, reached_seen = [], set()   # every file touched via ANY tool, in order
+    reached_gold_via = None
+
+    def _touch(paths, via):
+        nonlocal reached_gold_via
+        for p in paths:
+            if p not in reached_seen:
+                reached_seen.add(p); reached.append(p)
+            if p in gold and reached_gold_via is None:
+                reached_gold_via = via
+
+    for od, nm, inp, tur in events:
+        if nm == "Grep":
+            hits = _grep_hits(inp, tur, repo_root)
+            query = str(inp.get("pattern", ""))
+        elif nm == "Glob":
+            fn = tur.get("filenames")
+            hits = [_rel(p, repo_root) for p in fn] if isinstance(fn, list) else []
+            query = str(inp.get("pattern", ""))
+        elif nm == "Read":
+            fp = (tur.get("file") or {}).get("filePath") if isinstance(tur.get("file"), dict) else None
+            fp = fp or inp.get("file_path") or ""
+            _touch([_rel(fp, repo_root)] if fp else [], "Read")
+            continue     # navigation, not a search call
+        else:
+            continue
+        # de-dup within a call, preserve order
+        seen, ordered = set(), []
+        for h in hits:
+            if h not in seen:
+                seen.add(h); ordered.append(h)
+        gih = sorted(gold & set(ordered))
+        seen_gold |= set(gih)
+        _touch(ordered, nm)
+        search_calls.append({
+            "turn": od, "query": query, "tool": nm, "hits": ordered,
+            "n_hits": len(ordered), "gold_in_hits": gih,
+            "precision": round(len(gih) / len(ordered), 4) if ordered else 0.0,
+            "cumulative_recall": round(len(seen_gold) / len(gold), 4) if gold else 0.0,
+            "error": False,
+        })
+
+    first_files = search_calls[0]["hits"] if search_calls else []
+    all_files, seen = [], set()
+    for sc in search_calls:
+        for f in sc["hits"]:
+            if f not in seen:
+                seen.add(f); all_files.append(f)
+    rank = next((i for i, f in enumerate(first_files, 1) if f in gold), 0)
+    n_gold_first = len([f for f in first_files if f in gold])
+    return {
+        "search_calls": search_calls,
+        # File paths (not FQNs) — native retrieves at file granularity. aggregate
+        # treats these as the localization list; function-match simply won't fire,
+        # so funcR@10/funcHit come out 0 for native (honest, not a bug).
+        "first_search_fqns": first_files,
+        "all_search_fqns": all_files,
+        "retrieval_hit": bool(gold & set(first_files)),
+        "retrieval_precision": (round(n_gold_first / len(first_files), 4)
+                                if first_files else 0.0),
+        "retrieval_rank": rank,
+        # Transparency beyond the parallel search metric: did native EVER reach a
+        # gold file, and through which tool (Grep/Glob = search, Read = it already
+        # knew the path from the issue). Not fed to the headline metrics.
+        "reached_gold": bool(gold & set(reached)),
+        "reached_gold_via": reached_gold_via,
+        "reached_rank": next((i for i, f in enumerate(reached, 1) if f in gold), 0),
+    }
+
+
 def run_one_task(task: dict, arm: str, model: str, timeout: int,
                  rebuild: bool = False, disallow_grep: bool = False,
                  keep_transcript: bool = True) -> dict:
@@ -546,12 +796,14 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
     patch = extract_patch(repo)
     meta = parse_transcript(run["transcript"], run["result"])
     pm = _patch_metrics(patch)
-    # Retrieval metrics only exist for the SG arm (native has no sg_search).
-    ret = (_retrieval_from_transcript(run["transcript"], task.get("gold_files", []))
-           if arm == ARM_SG else {
-               "search_calls": [], "first_search_fqns": [], "all_search_fqns": [],
-               "retrieval_hit": False, "retrieval_precision": 0.0,
-               "retrieval_rank": 0})
+    # Retrieval metrics for BOTH arm families: SG arms from sg_search, native
+    # from its own Grep/Glob/Read (reconstructed at file granularity) — so the
+    # paper can compare SG retrieval head-to-head against Claude Code's own.
+    gold_files = task.get("gold_files", [])
+    if arm == ARM_NATIVE:
+        ret = _retrieval_from_native_transcript(run["transcript"], gold_files, str(repo))
+    else:
+        ret = _retrieval_from_transcript(run["transcript"], gold_files)
     wall = round(time.time() - t0, 1)
 
     if run["timed_out"]:
@@ -591,7 +843,7 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         "n_tool_calls": meta["n_tool_calls"],
         "sg_tool_calls": meta["sg_tool_calls"],
         "native_tool_calls": meta["native_tool_calls"],
-        # ── retrieval (reconstructed from sg_search; empty for native) ──
+        # ── retrieval — SG arms from sg_search, native from Grep/Glob/Read ──
         "retrieval_hit": ret["retrieval_hit"],
         "retrieval_precision": ret["retrieval_precision"],
         "retrieval_rank": ret["retrieval_rank"],
@@ -599,6 +851,12 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         "n_search_calls": len(ret["search_calls"]),
         "first_search_fqns": ret["first_search_fqns"],
         "all_search_fqns": ret["all_search_fqns"],
+        # native-only transparency (present only when populated) — did native
+        # ever reach gold at all, and via which tool (Read = it already knew the
+        # path from the issue, not a search win).
+        **({"reached_gold": ret["reached_gold"],
+            "reached_gold_via": ret["reached_gold_via"],
+            "reached_rank": ret["reached_rank"]} if "reached_gold" in ret else {}),
         "files_read": [], "edit_attempts": [],
         # ── patch shape + consolidation (so patch% / patch figures fill) ──
         "patch_lines_added": pm["lines_added"],
@@ -704,6 +962,64 @@ def _already_done(task: dict, arm: str, model_tag: str) -> bool:
     return rec.get("stopped") in ("submit", "max_turns")
 
 
+def reprocess_retrieval(runs_dir: Path) -> None:
+    """Re-derive retrieval metrics for EVERY saved run from its transcript, in
+    place — no agent rerun. Backfills native-arm retrieval (Grep/Glob/Read) onto
+    runs recorded before that extractor existed, and refreshes SG-arm retrieval
+    if the parser improved. Reads gold_files from the run JSON and the repo root
+    from the transcript's own `cwd`, so it needs nothing but this results dir."""
+    tdir = runs_dir / "_claude_transcripts"
+    patched = 0
+    for p in sorted(runs_dir.glob("*.json")):
+        if p.name.startswith("_"):
+            continue
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if rec.get("harness") != "claude-code":
+            continue
+        tf = tdir / f"{rec['run_id']}.jsonl"
+        if not tf.exists():
+            print(f"  skip {rec['run_id']}: no transcript")
+            continue
+        objs = []
+        for line in tf.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    objs.append(json.loads(line))
+                except Exception:
+                    pass
+        gold = rec.get("gold_files", [])
+        if rec.get("arm") == ARM_NATIVE:
+            cwd = next((o.get("cwd") for o in objs
+                        if o.get("type") == "system" and o.get("cwd")), "")
+            ret = _retrieval_from_native_transcript(objs, gold, cwd)
+        else:
+            ret = _retrieval_from_transcript(objs, gold)
+        rec.update({
+            "retrieval_hit": ret["retrieval_hit"],
+            "retrieval_precision": ret["retrieval_precision"],
+            "retrieval_rank": ret["retrieval_rank"],
+            "search_calls": ret["search_calls"],
+            "n_search_calls": len(ret["search_calls"]),
+            "first_search_fqns": ret["first_search_fqns"],
+            "all_search_fqns": ret["all_search_fqns"],
+        })
+        if "reached_gold" in ret:
+            rec["reached_gold"] = ret["reached_gold"]
+            rec["reached_gold_via"] = ret["reached_gold_via"]
+            rec["reached_rank"] = ret["reached_rank"]
+        p.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+        patched += 1
+        print(f"  {rec['run_id']}: {rec['arm']:9} hit={ret['retrieval_hit']} "
+              f"rank={ret['retrieval_rank']} n_search={len(ret['search_calls'])}"
+              + (f" reached_via={ret.get('reached_gold_via')}" if "reached_gold" in ret else ""))
+    print(f"Reprocessed {patched} run(s) in {runs_dir}. "
+          f"Re-run `python -m eval.agent.aggregate` to refresh the table.")
+
+
 def _parse_shard(shard: str):
     if not shard:
         return None
@@ -719,13 +1035,19 @@ def _parse_shard(shard: str):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", required=True, help="tasks jsonl (e.g. swebench_100.jsonl)")
+    ap.add_argument("--dataset", default="", help="tasks jsonl (e.g. swebench_100.jsonl); not needed with --reprocess")
+    ap.add_argument("--reprocess", action="store_true",
+                    help="re-derive retrieval metrics for all runs in the results "
+                         "dir from their saved transcripts (backfills native-arm "
+                         "retrieval), then exit. No agent rerun.")
     ap.add_argument("--arm", default=ARM_SG, choices=list(ARMS),
-                    help="sg-rerank = Claude + SkeletonGraph MCP (default); "
+                    help="sg-rerank = Claude + SkeletonGraph MCP pinned to BM25+"
+                         "structural rerank (default, no dense leg); "
+                         "sg-fusion = same MCP pinned to 3-way RRF incl. dense; "
                          "native = Claude on its own, no SG (the baseline).")
     ap.add_argument("--disallow-grep", action="store_true",
                     help="block native Grep/Glob so search goes through SG "
-                         "(SG-as-sole-retrieval). Only meaningful for sg-rerank.")
+                         "(SG-as-sole-retrieval). Only meaningful for sg-rerank/sg-fusion.")
     ap.add_argument("--model", default="sonnet",
                     help="Claude model: alias ('sonnet'/'opus') or full id "
                          "(default: sonnet)")
@@ -745,6 +1067,12 @@ def main() -> None:
                     help="only stage the editable copies (copy+index+install); "
                          "run no agent. Use once up front to pre-copy all repos.")
     args = ap.parse_args()
+
+    if args.reprocess:
+        reprocess_retrieval(config.RUNS_DIR)
+        return
+    if not args.dataset:
+        raise SystemExit("--dataset is required (unless --reprocess)")
 
     tasks = load_tasks(Path(args.dataset))
     if args.limit > 0:
