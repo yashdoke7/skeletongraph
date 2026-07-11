@@ -45,6 +45,10 @@ SG is active. Follow these rules:
    re-read code `sg_search` already returned, and ignore any `content.txt` spill.
 4. Check `sg_constraint` before proposing architectural changes.
 5. Use `sg_log` to review recent session history.
+6. Stay scoped: make the smallest change that satisfies the request and stop when
+   it's done. Don't add changelog/release notes, sync `.pyi` stubs, write docs, or
+   refactor code the task doesn't require. SG surfaces related code precisely — use
+   it to find the RIGHT edit, not to edit everything nearby.
 
 MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log
 """

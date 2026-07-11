@@ -42,6 +42,13 @@ SG MCP tools are available. Use them every session:
                     and ignore any `content.txt` spill (it duplicates the result).
 - `sg_constraint` — view/propose project constraints
 - `sg_log`        — recent session log entries
+
+**Stay scoped — stop when the task is done.** Make the smallest change that
+correctly satisfies the request; once you have enough to complete it, stop
+searching/reading. Do NOT add changelog/release notes, sync `.pyi` stubs, write
+docs, or refactor code the task does not require. SG surfaces related code
+precisely — use it to find the RIGHT edit, not to edit everything nearby. Widen
+scope only if the request explicitly asks.
 """
 
 

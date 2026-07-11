@@ -60,6 +60,13 @@ SG is active for this project. Follow these rules every session:
    ignore any `content.txt` spill (it just duplicates the result).
 4. **Check `sg_constraint` before proposing changes** — see project rules that must not be violated.
 5. **Use `sg_log` to review recent session turns** — avoids re-reading history.
+6. **Stay scoped — stop when the task is done.** Make the smallest change that
+   correctly satisfies the request. Once the code you have is enough to complete
+   it, stop searching/reading "to be thorough". Do NOT add changelog/release
+   notes, sync type-stub (`.pyi`) files, write docs, or refactor code the task
+   does not require. SG surfaces related code precisely — treat that as a map to
+   the RIGHT edit, not an invitation to edit everything nearby. Broaden scope
+   only if the request explicitly asks for it.
 
 Available MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log
 """
