@@ -383,6 +383,22 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
     _NUDGE_AFTER = 20            # late enough that normal (<20-turn) runs are untouched
     submit_nudged = edit_nudged = False
 
+    # The MODEL always gets the full, untruncated tool result (see below — the
+    # `content`/`content: result` sent to the API is never sliced). This cap only
+    # bounds what gets written into turn.tool_calls[].result for the SAVED run
+    # record. That copy is not just a log: _search_call_metrics (run_agent.py)
+    # recomputes hits/gold_in_hits/cumulative_recall FROM IT — so a cap too small
+    # for SG's payload silently erases real recall data before the metric ever
+    # sees it. Measured directly (with the old body-dumping default): the rank-1
+    # body alone already filled 1500 chars, so rank 2+ and the "Other matches"
+    # list never appeared in the log — rec@1/rec@cum read the gold file as "not
+    # found" even when SG's OWN retrieval_rank field (computed from the
+    # untruncated FQN list, a separate pathway) correctly showed it WAS found,
+    # just not at #1. The unified lean payload is far smaller, but 12000 keeps
+    # headroom for the full anchor list (+ any body_top inline) so the metric
+    # parser always sees every ranked candidate.
+    _LOGGED_RESULT_CHARS = 12000
+
     # no_tool tolerance: some models emit a reasoning paragraph before acting, or
     # phrase one call in a format the parser misses. Bailing after 2 such turns
     # discards an otherwise-valid run (it's then excluded from metrics → smaller,
@@ -433,7 +449,29 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
             messages.append({"role": "assistant", "content": content})
             consecutive_no_tool += 1
             if consecutive_no_tool >= _MAX_NO_TOOL:
-                traj.stopped = "no_tool"
+                # Safety net, not a nudge: the model already fixed the bug (a real
+                # edit_file succeeded) but stalled — reasoning-only turns with no
+                # visible content or tool call (see _stream_completion, which
+                # deliberately excludes reasoning_content from `content`) — before
+                # ever saying "submit". Observed directly: two runs stopped here
+                # with a correct, non-empty patch already on disk that a later
+                # `edited_gold_file` check confirmed touched the right file. Those
+                # were being thrown away as "no_tool" (excluded from every metric,
+                # n shrinks, unpaired) despite having done the actual work. A
+                # prompt nudge already exists just below and isn't reliable against
+                # this failure mode (the model isn't reading it, it's not emitting
+                # visible tokens at all) — auto-submitting on its behalf when real
+                # work exists is the harness telling the truth about what happened,
+                # not the model. Only auto-submits genuine edits: a give-up with
+                # ZERO edits_made still correctly records as "no_tool" (nothing to
+                # credit).
+                if executor.edits_made > 0:
+                    executor.submitted = True
+                    traj.stopped = "submit"
+                    traj.error = (f"auto-submitted after {_MAX_NO_TOOL} "
+                                  "consecutive no-tool turns (edits already made)")
+                else:
+                    traj.stopped = "no_tool"
                 break
             messages.append({"role": "user", "content":
                 "You did not make a tool call. Respond with EXACTLY ONE tool call "
@@ -463,7 +501,7 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
                     args = {}
                 result = executor.run(name, args)
                 turn.tool_calls.append({"name": name, "args": args,
-                                        "result": result[:1500]})
+                                        "result": result[:_LOGGED_RESULT_CHARS]})
                 messages.append({"role": "tool", "tool_call_id": tc.id,
                                  "content": result})
         else:
@@ -475,7 +513,7 @@ def run_react(task: dict, arm: str, executor: ToolExecutor,
                 name, args = call["name"], call["arguments"]
                 result = executor.run(name, args)
                 turn.tool_calls.append({"name": name, "args": args,
-                                        "result": result[:1500]})
+                                        "result": result[:_LOGGED_RESULT_CHARS]})
                 messages.append({"role": "user",
                                  "content": f"[tool result: {name}]\n{result}"})
 

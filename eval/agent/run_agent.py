@@ -177,21 +177,35 @@ def _retrieval_metrics(gold_files: list, hits: list) -> dict:
 
 
 _RANK_LINE = re.compile(r"^\s*\d+\.\s+(.+?)\s*$")
+# SG's real MCP payload (since the Phase-5 alignment routes SG arms through the
+# same _tool_search Claude Code sees) renders candidates as Markdown headers
+# `## N. file::symbol` and, further down, bullets `- \`file::symbol\``  — NOT the
+# old flat "N. text" line _RANK_LINE was written for. Without this, the "##"/"-"
+# prefix means _RANK_LINE never matches an SG result, so hits/gold_in_hits/
+# cumulative_recall silently come back empty for every SG search call (rec@1 and
+# rec@cum read 0.0 even when retrieval_hit/rank — computed separately, straight
+# from the ranking function — are correct). BM25/grep/other backends still use
+# the old bare-line format, so both patterns are matched.
+_SG_HEADER_LINE = re.compile(r"^##\s*\d+\.\s+(\S.+?)\s*$")
+_SG_BULLET_LINE = re.compile(r"^-\s+`([^`]+)`")
 
 
 def _parse_search_result_files(result: str) -> List[str]:
     """Extract ordered file paths from a search_code tool result.
 
-    Backends differ: BM25/grep return bare paths; SG returns FQNs (file::symbol).
-    We strip the symbol part and dedup-preserve order. ERROR results yield [].
-    Windows separators normalized to forward slash to match gold_files.
+    Backends differ: BM25/grep return bare paths (plain "N. text" lines); SG
+    returns its real rendered MCP payload — FQNs as "## N. file::symbol" headers
+    and "- `file::symbol`" bullets for the remainder. We strip the symbol part
+    and dedup-preserve order. ERROR results yield []. Windows separators
+    normalized to forward slash to match gold_files.
     """
     if not result or result.startswith("ERROR"):
         return []
     out: List[str] = []
     seen: set = set()
     for line in result.splitlines():
-        m = _RANK_LINE.match(line)
+        m = (_SG_HEADER_LINE.match(line) or _SG_BULLET_LINE.match(line)
+             or _RANK_LINE.match(line))
         if not m:
             continue
         path = m.group(1).split("::", 1)[0].strip().replace("\\", "/")

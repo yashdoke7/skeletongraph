@@ -193,15 +193,19 @@ _TOOL_SCHEMAS = [
             "class, or file.\n\n"
             "PREFER an FQN or a bare file path — that returns the complete unit in "
             "ONE call. Avoid line ranges: they force you to page through a file.\n\n"
+            "BATCH multiple targets in ONE call to save round-trips: pass a "
+            "comma-separated list, e.g. 'a.py::f, b.py::g, c.py::h'. Do this when a "
+            "fix spans several functions instead of calling sg_expand once each.\n\n"
             "target formats:\n"
             "  - FQN: 'src/file.py::MyClass.my_method' (full function body)\n"
             "  - File path: 'src/file.py' (full file)\n"
+            "  - Several: 'src/a.py::f, src/b.py::g' (comma-separated, one call)\n"
             "  - Range: 'src/file.py:42-80' (only if you truly need a slice)"
         ),
         {
             "target": {
                 "type": "string",
-                "description": "FQN or file path (preferred); file:start-end range only if needed",
+                "description": "FQN or file path (preferred); comma-separate several to batch; file:start-end range only if needed",
             },
             "max_tokens": {
                 "type": "integer",
@@ -330,6 +334,11 @@ _TOOL_SCHEMAS = [
 
 
 # ── MCPServer ────────────────────────────────────────────────────────────
+
+# Cap for any body inlined by sg_search when body_top>0 (the lean+rankN A/B
+# lever). Keeps an inlined body a bounded, edit-ready slice instead of a whole-
+# function dump that then rides in every subsequent turn's context.
+_BODY_INLINE_MAX_LINES = 80
 
 
 class MCPServer:
@@ -610,23 +619,41 @@ class MCPServer:
         graph_arg = str(args.get("graph", "auto")).strip().lower()
         graph_policy = {"on": "always", "off": "off", "auto": None}.get(graph_arg)
 
+        # PAYLOAD SHAPE — the single knob that decides product cost. DEFAULT is
+        # LEAN: ranked anchors (file::fqn + line range + signature + structural
+        # neighbours) but NO full bodies. Measured cost problem with body dumps:
+        # they inflate peak context ~20-25% and ride in every later turn, yet the
+        # agent re-Reads the file anyway for exact edit context — additive dead
+        # weight. Lean keeps SG's real value (localization) and lets the agent pull
+        # exactly what it needs via sg_expand (or a single Read). `body_top`>0
+        # inlines the top-N bodies (capped) and exists ONLY as the lean-vs-
+        # lean+rank1 A/B lever (arg `body_top` or env SG_MCP_BODY_TOP); default 0,
+        # so the shipping product is lean. This is the SAME payload both the NIM
+        # react harness and Claude Code MCP consume — one contract, no per-harness
+        # format drift.
+        try:
+            body_top = int(args.get("body_top", os.environ.get("SG_MCP_BODY_TOP", 0)))
+        except (TypeError, ValueError):
+            body_top = 0
+        body_top = min(max(body_top, 0), 3)
+
         if not query:
             return "Error: query is required"
 
-        # Retrieval strategy. `fusion` (3-way RRF: BM25 + dense + SG structural
-        # rerank) is the DEFAULT — it's the algorithm the benchmark numbers are
-        # actually validated on (SWE-bench Pro: recall@1 +50%, MRR +26% over BM25
-        # alone), not the engine's older raw `heuristic_query` ("structural"),
-        # which was the historical MCP default but was never the winning
-        # configuration. Safe to default: the dense leg degrades gracefully (2-
-        # signal bm25+rerank) on ANY failure OR timeout (SG_DENSE_TIMEOUT_S,
-        # default 20s — bounded so a slow/stuck model load can never hang a tool
-        # call), and the whole retrieval build now warms in a BACKGROUND thread
-        # at server startup so it never blocks the MCP handshake regardless of
-        # repo size (validated end-to-end via a real subprocess JSON-RPC test on
-        # the exact repo that previously broke the handshake). Override with
-        # SG_MCP_RETRIEVAL=rerank (skip dense entirely) or =structural (old path).
-        mode = os.environ.get("SG_MCP_RETRIEVAL", "fusion").strip().lower()
+        # Retrieval strategy. DEFAULT is `rerank` (BM25 recall + SG structural
+        # rerank): no dense embeddings, so a fresh install needs NO model download
+        # and NO prewarm — retrieval is instant on any hardware and already scores
+        # strongly (react loop: on par with the best arms at a fraction of native's
+        # cost). `fusion` (3-way RRF: BM25 + dense + SG structural rerank) is the
+        # OPT-IN best-retrieval mode (SWE-bench Pro: recall@1 +50%, MRR +26% over
+        # BM25 alone) — it needs a one-time dense build (minutes/repo on CPU,
+        # seconds on GPU; incremental after) plus the embed model, so it's a
+        # deliberate choice, not forced on everyone. Enable with
+        # SG_MCP_RETRIEVAL=fusion; when enabled the dense leg degrades gracefully
+        # to bm25+rerank on any failure/timeout (SG_DENSE_TIMEOUT_S, default 20s)
+        # and warms in a BACKGROUND thread at startup so it never blocks the MCP
+        # handshake. `structural` = the old heuristic_query path.
+        mode = os.environ.get("SG_MCP_RETRIEVAL", "rerank").strip().lower()
         try:
             store = self._engine.get_store()
             # Over-fetch so the test-demotion below can pull a buried source file
@@ -684,10 +711,13 @@ class MCPServer:
             candidates = sorted(
                 candidates, key=lambda c: self._is_test_path(c.skeleton.file_path))
         candidates = candidates[:top_n]
-        # Full bodies are valuable, but broad body dumps cause MCP results to be
-        # re-read by some IDEs as separate content resources. Keep MEDIUM/LOW
-        # searches tight; HIGH-confidence exact matches can carry a bit more.
-        expand_top = min(requested_expand_top, 5 if confidence == "HIGH" else 3)
+        # expand_top = how many top candidates get the DETAILED anchor (signature,
+        # summary, callers/callees) vs the terse "Other matches" pointer list.
+        # Tight for MEDIUM/LOW, a bit wider for HIGH-confidence exact matches.
+        # (Bodies are a separate axis — body_top, default 0/off.)
+        expand_top = min(requested_expand_top, 2 if confidence == "HIGH" else 1)
+        # If a body is requested for rank i, it must be in the detailed window.
+        expand_top = max(expand_top, body_top)
 
         char_budget = max_tokens * 4
         used_chars = 0
@@ -696,10 +726,11 @@ class MCPServer:
 
         # ── Graph matches ────────────────────────────────────────────────
         if candidates:
+            body_note = (f"Bodies inline for top {body_top}" if body_top
+                         else "Anchors only — sg_expand or Read the target to edit")
             lines.append(
                 f"Confidence: {confidence}  |  Graph: {graph_arg or 'auto'}  "
-                f"|  Matches: {len(candidates)}  "
-                f"|  Full bodies for top {min(expand_top, len(candidates))}")
+                f"|  Matches: {len(candidates)}  |  {body_note}")
             lines.append("")
 
             quick_map = self._render_quick_map(
@@ -722,33 +753,41 @@ class MCPServer:
                 if summary:
                     lines.append(f"   Summary: {summary[:160]}")
 
+                # Bodies (and their file prelude) are inlined ONLY for the top
+                # `body_top` ranks — 0 by default (lean). The agent pulls any body
+                # it actually needs via sg_expand, so lean skips the prelude too.
                 prelude = ""
-                if sk.file_path not in preludes_seen:
+                if i <= body_top and sk.file_path not in preludes_seen:
                     prelude = self._read_file_prelude(sk, max_chars=800)
                     preludes_seen.add(sk.file_path)
                 if prelude and used_chars + len(prelude) < char_budget:
                     lines += ["", "File prelude/imports:", "```", prelude, "```"]
                     used_chars += len(prelude)
 
-                # Session dedup: if body was already sent this session, skip it.
-                # The model's context already has it — re-sending wastes tokens.
-                if sk.fqn in self._returned_fqns:
+                # Session dedup: if a body we'd inline was already sent this
+                # session, skip re-sending it — the model's context already has it.
+                if i <= body_top and sk.fqn in self._returned_fqns:
                     lines.append("   [body already returned this session — "
                                  "check earlier search result]")
                     lines.append("")
                     continue
 
-                include_body = self._should_include_body(query, sk, i)
-                if include_body and used_chars < char_budget:
-                    body = self._read_body(sk)
+                if i <= body_top and used_chars < char_budget:
+                    # A/B lever only (default body_top=0 never reaches here). Cap
+                    # every inlined body to keep it a bounded, edit-ready slice
+                    # rather than a whole-function dump that rides every turn.
+                    max_lines = _BODY_INLINE_MAX_LINES
+                    body = self._read_body(sk, max_lines=max_lines)
                     if body:
                         body = self._cap_to_remaining(body, char_budget - used_chars)
                         lines += ["", "```", body, "```"]
                         used_chars += len(body)
-                        self._returned_fqns.add(sk.fqn)
-                        self._record_range(sk.file_path, sk.line_start, sk.line_end)
-                elif not include_body:
-                    lines.append("   [body skipped: metadata match, not a likely edit target]")
+                        # Register as "fully in context" only if it wasn't truncated.
+                        was_truncated = (sk.line_end - sk.line_start + 1) > max_lines
+                        if not was_truncated:
+                            self._returned_fqns.add(sk.fqn)
+                        actual_end = min(sk.line_end, sk.line_start + max_lines - 1)
+                        self._record_range(sk.file_path, sk.line_start, actual_end)
 
                 callers = self._callers_of(store, sk.fqn, limit=3)
                 if callers:
@@ -864,12 +903,16 @@ class MCPServer:
             return (f"No results for {query!r}. Try different keywords, "
                     f"or sg_overview to see what's indexed.")
 
-        lines.append("_This result is complete and self-contained: each body "
-                     "above is the exact current source, and its header gives the "
-                     "file:line range — edit directly from it. Do NOT re-fetch the "
-                     "same code with grep/read_file (and ignore any content.txt "
-                     "spill — it is a duplicate of this result). Search again only "
-                     "if a needed target is absent or confidence is LOW/MISS._")
+        if confidence == "HIGH":
+            lines.append("🛑 **CONFIDENCE: HIGH** — All likely targets returned above. "
+                         "Proceed to edit. Do NOT call sg_search again unless this "
+                         "result is missing a specific file you need.\n")
+
+        lines.append("_Each match above gives the exact file:line range. To read a "
+                     "body, call sg_expand(target=\"<fqn>\") — batch several comma-"
+                     "separated in one call. Do NOT grep/read_file for anything "
+                     "already listed here; when you edit, Read only the one file you "
+                     "change (ignore any content.txt spill — it duplicates this)._")
         return "\n".join(lines)
 
     def _module_constants(self, candidates: List, store, max_chars: int = 700) -> str:
@@ -923,7 +966,8 @@ class MCPServer:
 
         lines = [
             "## SG quick map",
-            "Use these anchors before native grep/read calls; the full bodies follow below.",
+            "Exact anchors — use these instead of native grep/read; sg_expand a "
+            "target for its body.",
         ]
         for c in edit_candidates[:3]:
             sk = c.skeleton
@@ -1825,7 +1869,35 @@ class MCPServer:
     # ── Tool: sg_expand ──────────────────────────────────────────────────
 
     def _tool_expand(self, args: Dict) -> str:
-        target = str(args.get("target", "")).strip()
+        """Expand one OR SEVERAL targets in a single call.
+
+        BATCHING: `target` may be a list, or a comma/newline-separated string, of
+        FQNs (and/or file:line-range specs). Fixes the measured cost pattern where,
+        for a fix spanning N functions, the agent called sg_expand N times — each a
+        separate turn that re-sends the whole conversation. One batched call
+        collapses those N turns into 1. FQNs never contain commas, so splitting on
+        commas/newlines is unambiguous. Per-target dedup still applies to each."""
+        import re as _re
+        raw = args.get("target", "") or args.get("fqn", "") or args.get("fqns", "")
+        if isinstance(raw, (list, tuple)):
+            targets = [str(t).strip() for t in raw if str(t).strip()]
+        else:
+            # split on commas / newlines only (FQNs use :: . / but never ,)
+            targets = [t.strip() for t in _re.split(r"[,\n]", str(raw)) if t.strip()]
+
+        if not targets:
+            return "Error: target is required"
+        if len(targets) == 1:
+            return self._expand_one(targets[0], args)
+
+        parts = []
+        for t in targets:
+            body = self._expand_one(t, args)
+            parts.append(f"### {t}\n{body}")
+        return f"# Expanded {len(targets)} targets\n\n" + "\n\n".join(parts)
+
+    def _expand_one(self, target: str, args: Dict) -> str:
+        target = str(target).strip()
         # Default 2500 / CAP 4000. The cap matters as much as the default:
         # observed regression where the model passed max_tokens=5000 to
         # override the default — putting the response back above VS Code
@@ -1847,13 +1919,22 @@ class MCPServer:
                 sk = self._engine.get_store().skeleton_table.get(target)
             except Exception:
                 sk = None
-            loc = f"{sk.file_path}:{sk.line_start}-{sk.line_end}" if sk else target
+            if sk:
+                loc = f"{sk.file_path}:{sk.line_start}-{sk.line_end}"
+                return (
+                    f"✓ Body for `{target}` was already returned by sg_search "
+                    f"earlier this session.\n\n"
+                    f"**Location:** `{loc}`\n\n"
+                    f"Edit directly from that earlier result — do NOT re-Read "
+                    f"this file. The body is already in your context above.\n\n"
+                    f"If you need a DIFFERENT part of the same file (e.g. lines "
+                    f"around it), use: sg_expand(target=\"{sk.file_path}:"
+                    f"{max(1, sk.line_start - 10)}-{sk.line_end + 10}\")"
+                )
             return (
-                f"Note: `{target}` body was already returned by sg_search this "
-                f"session — it is in your context at `{loc}`. Check the earlier "
-                f"search result instead of re-reading. If you need a different "
-                f"part of the file, pass the file path and line range directly, "
-                f"e.g. sg_expand('{loc.split('::')[0]}')"
+                f"✓ Body for `{target}` was already returned by sg_search "
+                f"earlier this session — it is in your context. "
+                f"Edit directly from the earlier result."
             )
 
         # Parse range syntax: file.py:42-80

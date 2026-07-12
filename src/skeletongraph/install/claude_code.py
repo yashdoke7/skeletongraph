@@ -42,31 +42,44 @@ _SG_RULES_BLOCK = """\
 
 SG is active for this project. Follow these rules every session:
 
-1. **Call `sg_overview` first** — at session start, before reading any files.
-   It is the project briefing: project purpose, important structure, constraints,
-   recent decisions/turns, and index status.
+1. **`sg_overview` is OPTIONAL — call it only when you need orientation.**
+   Use it for an unfamiliar codebase, architecture/cross-cutting work, or when
+   you need project purpose/constraints/recent decisions. For a focused bug fix,
+   SKIP it and go straight to `sg_search` — the briefing is a cost you only pay
+   when it earns its keep.
 2. **Use `sg_search` as a task-context assembler, not as grep.**
-   Ask for the whole task/symptom once. For coding/debug tasks it returns likely
-   edit targets, imports/prelude, compact helper context, and likely tests.
-   Normal bug-fix searches stay precise; use `graph="on"` only for impact
-   analysis, callers/callees, architecture, migration, review, or refactor work.
-   Do not split one task into many symbol searches unless confidence is LOW/MISS
-   or the target is absent.
-3. **Use `sg_get` / `sg_expand` only for exact follow-up.**
-   Expand a specific FQN only when you are about to edit it and the body was not
-   already in `sg_search`. `sg_search` results are complete and self-contained
-   (each body is exact current source with its file:line range) — edit directly
-   from them; do NOT re-grep or re-read code `sg_search` already returned, and
-   ignore any `content.txt` spill (it just duplicates the result).
-4. **Check `sg_constraint` before proposing changes** — see project rules that must not be violated.
-5. **Use `sg_log` to review recent session turns** — avoids re-reading history.
-6. **Stay scoped — stop when the task is done.** Make the smallest change that
+   Ask for the whole task/symptom once. For coding/debug tasks it returns the
+   likely edit targets as exact anchors (`file::symbol` + line range). Normal
+   bug-fix searches stay precise; use `graph="on"` only for impact analysis,
+   callers/callees, architecture, migration, review, or refactor work. Do not
+   split one task into many symbol searches unless confidence is LOW/MISS or the
+   target is absent.
+3. **`sg_search` locates; `sg_expand` shows the code — edit from `sg_expand`, don't re-read.**
+   `sg_search` returns exact anchors (`file::symbol` + line range), NOT bodies —
+   it tells you WHERE. To see a body, call `sg_expand(target="<fqn>")`; it returns
+   the exact current source with file:line, so edit straight from that. `sg_expand`
+   accepts SEVERAL FQNs at once (comma-separated) — batch them in ONE call when a
+   fix spans multiple functions, instead of one call each. Do NOT re-Read or
+   re-grep a symbol whose body `sg_expand` already returned; that repeats work and
+   adds turns for nothing. Reach for native Grep/Read only for what SG did not give
+   you (e.g. finding where to insert NEW code). Ignore any `content.txt` spill (it
+   just duplicates the result).
+4. **SG indexes code files only.** It indexes Python, Go, and JS/TS. If you need
+   to search or edit unstructured files (JSON, Markdown, YAML, configs, templates),
+   use your native grep/read tools directly.
+5. **Check `sg_constraint` before proposing changes** — see project rules that must not be violated.
+6. **Use `sg_log` to review recent session turns** — avoids re-reading history.
+7. **Stay scoped — stop when the task is done.** Make the smallest change that
    correctly satisfies the request. Once the code you have is enough to complete
    it, stop searching/reading "to be thorough". Do NOT add changelog/release
    notes, sync type-stub (`.pyi`) files, write docs, or refactor code the task
    does not require. SG surfaces related code precisely — treat that as a map to
    the RIGHT edit, not an invitation to edit everything nearby. Broaden scope
    only if the request explicitly asks for it.
+8. **Do NOT verify edits by running `inspect.getsource()` on the installed
+   package or grepping the site-packages directory.** Trust the file content SG
+   gave you and the edits you made. Post-edit verification via Bash is wasteful
+   — if you need to confirm, re-Read the few edited lines with a narrow range.
 
 Available MCP tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log
 """
@@ -268,16 +281,19 @@ def _print_postinstall_report(sg_cmd: str, on_path: bool,
         out("    Windows: System Properties → Environment Variables → add\n")
         out("    %LOCALAPPDATA%\\Programs\\Python\\Python311\\Scripts\n\n")
 
-    # Embedder check — optional but recommended for retrieval quality
+    # Embedder check — only needed for OPT-IN fusion mode. The default (rerank:
+    # BM25 + structural) runs without it, so a missing embedder is informational.
     try:
         import sentence_transformers  # noqa: F401
-        out("  Embedder: sentence-transformers detected. Semantic retrieval enabled.\n")
+        out("  Embedder: sentence-transformers detected — fusion mode available.\n")
+        out("  (enable per-session with SG_MCP_RETRIEVAL=fusion; needs a one-time\n")
+        out("   dense build, minutes/repo on CPU. Default rerank needs nothing.)\n\n")
     except ImportError:
-        out("  WARNING — sentence-transformers is NOT installed.\n")
-        out("  SG will work with BM25+graph retrieval only (semantic search disabled).\n")
-        out("  To enable semantic retrieval (recommended):\n")
+        out("  Embedder: sentence-transformers not installed — that's fine.\n")
+        out("  Default retrieval (rerank) is ready now: no model download, no prewarm.\n")
+        out("  Install it only if you want fusion mode (best retrieval, one-time build):\n")
         out("    pip install sentence-transformers\n")
-        out(f"    sg index --path '{_posix_path(project_root)}' --force\n\n")
+        out(f"    SG_MCP_RETRIEVAL=fusion sg index --path '{_posix_path(project_root)}' --force\n\n")
 
     # Index status — if index doesn't exist yet, user must run sg index
     if not (project_root / ".skeletongraph").exists():

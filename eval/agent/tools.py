@@ -280,7 +280,43 @@ class ToolExecutor:
         # other arms return bare file/FQN strings. Metrics always use the FQN
         # list, so retrieval recall/precision are unaffected by the summaries.
         summaries: List[str] = []
-        if self.backend in _SG_BACKENDS:
+        mcp_payload: str = ""
+        # Only sg-rerank / fusion (/sg-fusion) map onto the product's real MCP
+        # modes (SG_MCP_RETRIEVAL=rerank|fusion) — route THESE through the real
+        # MCPServer, so the agent sees exactly what Claude Code's MCP serves and
+        # gets the product's caching/incremental-dense/timeout fixes (was: an
+        # UNCACHED, unbounded eval-only `_retrieve_sg` running strictly for
+        # metrics IN ADDITION to this, which for backend=="fusion" meant an
+        # unbounded eval/backends/dense.py corpus re-encode per search call —
+        # measured directly: catastrophically slow, and its rankings (used for
+        # ALL top-level retrieval_hit/rank/fRank metrics!) were a completely
+        # different, unfixed pipeline than what the agent's payload contained).
+        # Every OTHER _SG_BACKENDS entry is a fine-grained SGConfig ablation
+        # (enable_graph/enable_summaries/etc.) that the MCP's two-mode toggle
+        # cannot express — those keep the ORIGINAL _retrieve_sg-only path
+        # unchanged, so their intended isolation stays correct (routing them
+        # through SG_MCP_RETRIEVAL would silently collapse ~20 distinct configs
+        # into just "fusion" or "rerank" for whatever the agent actually sees).
+        if self.backend in _MCP_ALIGNED_BACKENDS:
+            import os
+            from skeletongraph.server.mcp import MCPServer
+            if getattr(self, "_mcp_server", None) is None:
+                self._mcp_server = MCPServer(self.repo, config=_sg_config(self.backend))
+            mode = "fusion" if "fusion" in self.backend else "rerank"
+            old_mode = os.environ.get("SG_MCP_RETRIEVAL")
+            os.environ["SG_MCP_RETRIEVAL"] = mode
+            try:
+                mcp_payload = self._mcp_server._tool_search({"query": query, "top_n": k})
+            finally:
+                if old_mode is not None:
+                    os.environ["SG_MCP_RETRIEVAL"] = old_mode
+                else:
+                    os.environ.pop("SG_MCP_RETRIEVAL", None)
+            # Single source of truth: hits/first_search_hits/retrieval_rank all
+            # come from what the agent actually received, not a second, possibly
+            # divergent computation.
+            hits = _parse_mcp_fqns(mcp_payload)
+        elif self.backend in _SG_BACKENDS:
             pairs = _retrieve_sg(self.backend, query, self.repo, k)
             hits = [fqn for fqn, _ in pairs]
             summaries = [s for _, s in pairs]
@@ -340,10 +376,17 @@ class ToolExecutor:
         self._search_calls += 1
         if not hits:
             return "No results."
-        # SG-with-summaries: surface "fqn — summary" so the agent can triage
-        # what to open without reading the file (this is what shrinks the
-        # consolidation gap). Falls back to bare lines when no summary text.
-        if summaries and any(summaries):
+            
+        # PAYLOAD — SINGLE CONTRACT. Aligned arms (sg-rerank/fusion) routed through
+        # the real MCPServer._tool_search above, so the model sees EXACTLY the lean
+        # payload Claude Code's MCP serves — one shape, no per-harness drift (was an
+        # SG_EVAL_RICH_PAYLOAD env toggle re-rendering a divergent format). Body
+        # inlining for the lean-vs-lean+rank1 A/B lives inside the MCP server
+        # (body_top / SG_MCP_BODY_TOP), not here. Other (ablation/baseline) arms
+        # keep their own lightweight ranked-list rendering below.
+        if mcp_payload:
+            result = mcp_payload
+        elif summaries and any(summaries):
             lines = []
             for i, h in enumerate(hits[:k]):
                 s = summaries[i] if i < len(summaries) else ""
@@ -494,6 +537,32 @@ _SG_BACKENDS = {"sg", "sg-nograph", "sg-gatedgraph", "sg-fullgraph",
                 "sg-full", "sg-summary", "sg-embed", "sg-hybrid-fusion",
                 "sg-dense-rerank", "sg-keyword-dense", "sg-rerank", "sg-seed",
                 "fusion"}
+
+# Subset of _SG_BACKENDS that map onto the product's real, shipped MCP modes
+# (SG_MCP_RETRIEVAL=rerank|fusion) — see _search()'s routing comment for why
+# only these two get the real MCPServer / rich payload, and every other
+# ablation arm above stays on its own distinct SGConfig path.
+_MCP_ALIGNED_BACKENDS = {"sg-rerank", "fusion", "sg-fusion"}
+
+# Mirrors aggregate.py's _parse_ranked / run_agent.py's _parse_search_result_files
+# — the real MCP payload renders candidates as "## N. file::symbol" headers and,
+# for the remainder, "- `file::symbol`" bullets. A third copy is unfortunate but
+# this module can't import from eval-report-only aggregate.py without a layering
+# inversion (aggregate imports run results, not the other way round).
+_MCP_HEADER_LINE = re.compile(r"^##\s*\d+\.\s+(\S.+?)\s*$")
+_MCP_BULLET_LINE = re.compile(r"^-\s+`([^`]+)`")
+
+
+def _parse_mcp_fqns(payload: str) -> List[str]:
+    out, seen = [], set()
+    for line in (payload or "").splitlines():
+        m = _MCP_HEADER_LINE.match(line) or _MCP_BULLET_LINE.match(line)
+        if m:
+            fqn = m.group(1).strip()
+            if fqn not in seen:
+                seen.add(fqn)
+                out.append(fqn)
+    return out
 
 # The lean product default: structural core only. Summaries + embeddings are
 # OFF — in the heuristic_query path (eval + IDE sg_search) embeddings feed only

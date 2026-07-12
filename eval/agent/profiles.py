@@ -45,6 +45,7 @@ Process:
 
 Rules:
 - Make the smallest change that correctly fixes the issue.
+- SG indexes code files only (Python, Go, JS/TS). Use read_file or list_files directly for unstructured files like JSON, Markdown, or configs.
 - Do NOT run or write tests — the test environment is not available.
 - Do NOT explain at length; act through tools.
 - When the fix is complete, call submit.
@@ -58,7 +59,7 @@ repository. You can only see the code through your tools.
 Available tools: search_code, read_symbol, expand, read_file, edit_file, submit.
 
 Process:
-1. search_code(query) — locate relevant functions/classes (ranked file::symbol).
+1. search_code(query) — locate relevant functions/classes (ranked file::symbol + line ranges).
 2. read_symbol(fqn) — read ONE function/class body from a result (cheap). Prefer
    this over read_file; only read_file when you need the whole file.
 3. expand(fqn) — see a function's callers and callees to follow the real flow.
@@ -66,6 +67,7 @@ Process:
 
 Rules:
 - Make the smallest change that correctly fixes the issue.
+- SG indexes code files only (Python, Go, JS/TS). Use read_file or list_files directly for unstructured files like JSON, Markdown, or configs.
 - Do NOT run or write tests — the test environment is not available.
 - Do NOT explain at length; act through tools.
 - When the fix is complete, call submit.

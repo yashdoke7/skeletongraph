@@ -107,6 +107,16 @@ def _cost_cached(r) -> float:
 # 'header.py::Header.fromstring'). Surfaces the file→function gap.
 
 _RANK_LINE = re.compile(r"^\s*\d+\.\s+(.+?)\s*$")
+# SG's real MCP payload (react/NIM arms now route through the SAME _tool_search
+# Claude Code sees — see eval/agent/tools.py) renders candidates as Markdown
+# headers "## N. file::symbol" and, for the remainder, bullets "- `file::symbol`"
+# — not the old flat "N. text" line _RANK_LINE was written for. Same bug as
+# run_agent.py's _search_call_metrics (fixed there), but a SEPARATE copy of the
+# regex here that was missed — this is the one that feeds the function-level
+# columns (funcR@10/funcHit/fnRank), which is why they read 0/blank for SG arms
+# even after that first fix: this parser never matched the FQN at all.
+_SG_HEADER_LINE = re.compile(r"^##\s*\d+\.\s+(\S.+?)\s*$")
+_SG_BULLET_LINE = re.compile(r"^-\s+`([^`]+)`")
 
 
 def _parse_ranked(result: str) -> list:
@@ -114,6 +124,11 @@ def _parse_ranked(result: str) -> list:
         return []
     out = []
     for line in result.splitlines():
+        m = _SG_HEADER_LINE.match(line) or _SG_BULLET_LINE.match(line)
+        if m:
+            # SG lines are already the bare FQN (no trailing annotation to strip).
+            out.append(m.group(1).strip())
+            continue
         m = _RANK_LINE.match(line)
         if m:
             # first whitespace-token = the FQN/file (drops trailing annotations

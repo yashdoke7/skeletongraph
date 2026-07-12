@@ -95,11 +95,18 @@ __pycache__/
 # way an interactive session does. Kept short — the MCP tool descriptions and
 # CLAUDE.md carry the detail.
 _SG_APPEND_SYSTEM = (
-    "SkeletonGraph (SG) is wired in as an MCP server for this repo. Prefer its "
-    "tools to locate code: call sg_overview once at the start, then sg_search "
-    "(a whole-task context assembler, not grep) to find edit targets, and "
-    "sg_get/sg_expand for exact follow-ups. Use native Grep/Read only when SG "
-    "does not return what you need."
+    "SkeletonGraph (SG) is wired in as an MCP server for this repo. To locate "
+    "code, use sg_search (a whole-task context assembler, not grep); it returns "
+    "the edit targets as exact anchors (file::symbol + line range), NOT bodies. "
+    "To read a body, call sg_expand(target=\"<fqn>\") — it returns the exact "
+    "current source with file:line, so edit DIRECTLY from that. Do NOT re-Read or "
+    "re-grep a symbol whose body sg_expand already gave you; that just repeats "
+    "work and adds turns. sg_expand accepts several FQNs at once (comma-separated) "
+    "— batch them in one call instead of one per function. sg_overview is OPTIONAL "
+    "— call it only if you actually need project orientation (unfamiliar codebase, "
+    "architecture or cross-cutting work); skip it for a focused bug fix. Use native "
+    "Grep/Read only for what SG did not return (e.g. finding where to insert NEW "
+    "code)."
 )
 
 # Scope-discipline block — BYTE-IDENTICAL in both prompts on purpose. It is
@@ -369,7 +376,8 @@ def extract_patch(repo: Path) -> str:
 # ── run Claude Code headless ─────────────────────────────────────────────────
 
 def run_claude(repo: Path, issue: str, model: str, timeout: int,
-               arm: str = ARM_SG, disallow_grep: bool = False) -> dict:
+               arm: str = ARM_SG, disallow_grep: bool = False,
+               body_top: int = 0) -> dict:
     """Launch `claude -p` in the repo.
 
     SG arms (sg-rerank / sg-fusion): SG as the strict MCP server, pinned via
@@ -399,6 +407,10 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         # Claude Code spawns the MCP server (`sg serve`) as a child process
         # inheriting this env, which is where `sg serve` reads it from.
         env["SG_MCP_RETRIEVAL"] = _RETRIEVAL_MODE[arm]
+        # Payload shape: body_top=0 (default) = lean anchors only; >0 inlines the
+        # top-N bodies (the lean-vs-lean+rank1 A/B lever). Passed to the MCP child
+        # the same way as the retrieval mode.
+        env["SG_MCP_BODY_TOP"] = str(body_top)
     else:
         # An explicit EMPTY config + --strict-mcp-config ⇒ exactly zero MCP
         # servers (no project or global leakage). Truly Claude-on-its-own.
@@ -782,7 +794,7 @@ def _retrieval_from_native_transcript(objs: list, gold_files: list,
 
 def run_one_task(task: dict, arm: str, model: str, timeout: int,
                  rebuild: bool = False, disallow_grep: bool = False,
-                 keep_transcript: bool = True) -> dict:
+                 keep_transcript: bool = True, body_top: int = 0) -> dict:
     model_tag = _model_tag(model)
     rid = run_id(task["task_id"], arm, 0, model_tag)
     out_path = config.RUNS_DIR / f"{rid}.json"
@@ -792,7 +804,7 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
     repo = prepare_repo(task, arm, rebuild=rebuild, verbose=True)
     reset_repo(repo)   # guarantee a clean tree even if a prior run left edits
 
-    run = run_claude(repo, task["query"], model, timeout, arm, disallow_grep)
+    run = run_claude(repo, task["query"], model, timeout, arm, disallow_grep, body_top)
     patch = extract_patch(repo)
     meta = parse_transcript(run["transcript"], run["result"])
     pm = _patch_metrics(patch)
@@ -1048,6 +1060,11 @@ def main() -> None:
     ap.add_argument("--disallow-grep", action="store_true",
                     help="block native Grep/Glob so search goes through SG "
                          "(SG-as-sole-retrieval). Only meaningful for sg-rerank/sg-fusion.")
+    ap.add_argument("--body-top", type=int, default=0, dest="body_top",
+                    help="SG_MCP_BODY_TOP — sg_search inlines the top-N function "
+                         "bodies (capped). 0 (default) = lean anchors only, the "
+                         "agent pulls bodies via sg_expand. Use 1 for the "
+                         "lean+rank1 A/B; the default lean is what ships.")
     ap.add_argument("--model", default="sonnet",
                     help="Claude model: alias ('sonnet'/'opus') or full id "
                          "(default: sonnet)")
@@ -1115,7 +1132,7 @@ def main() -> None:
         for t in tasks:
             try:
                 rec = run_one_task(t, arm, args.model, args.timeout,
-                                   args.rebuild, args.disallow_grep)
+                                   args.rebuild, args.disallow_grep, body_top=args.body_top)
                 done += 1
                 _report(done + fail, len(tasks), rec)
             except Exception as e:
@@ -1125,7 +1142,8 @@ def main() -> None:
     else:
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futs = {pool.submit(run_one_task, t, arm, args.model, args.timeout,
-                                args.rebuild, args.disallow_grep): t
+                                args.rebuild, args.disallow_grep,
+                                body_top=args.body_top): t
                     for t in tasks}
             for fut in as_completed(futs):
                 t = futs[fut]

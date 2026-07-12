@@ -24,24 +24,30 @@ _SG_RULES_BLOCK = """\
 
 SG MCP tools are available. Use them every session:
 
-- `sg_overview`   — project briefing: project purpose, structure, constraints,
-                    recent turns/decisions, and index status (call FIRST).
+- `sg_overview`   — OPTIONAL project briefing (purpose, structure, constraints,
+                    recent decisions). Call it only when you need orientation
+                    (unfamiliar codebase, architecture/cross-cutting work); SKIP
+                    it for a focused bug fix and go straight to sg_search.
 - `sg_search`     — task-context assembler, not grep. Ask for the whole task or
-                    symptom once; for coding/debug tasks it returns likely edit
-                    targets, imports/prelude, compact helper context, and likely
-                    tests. Normal bug-fix searches stay precise; use `graph="on"`
+                    symptom once; for coding/debug tasks it returns the likely edit
+                    targets as exact anchors (`file::symbol` + line range), not
+                    bodies. Normal bug-fix searches stay precise; use `graph="on"`
                     only for impact analysis, callers/callees, architecture,
-                    migration, review, or refactor work. Do not split one task
-                    into many symbol searches unless confidence is LOW/MISS or
-                    the target is absent.
+                    migration, review, or refactor work. Do not split one task into
+                    many symbol searches unless confidence is LOW/MISS or absent.
 - `sg_get`        — exact FQN metadata when you already know the target.
-- `sg_expand`     — exact follow-up only. Expand a specific FQN when you are
-                    about to edit it and the body was not already returned.
-                    sg_search results are complete inline (exact source + file:line
-                    range) — edit from them; do NOT re-grep/re-read returned code,
-                    and ignore any `content.txt` spill (it duplicates the result).
+- `sg_expand`     — read a body. `sg_search` gives locations; `sg_expand(target=
+                    "<fqn>")` returns the exact current source (+ file:line). Edit
+                    straight from that output — do NOT re-Read or re-grep a symbol
+                    whose body sg_expand already gave you. Batch SEVERAL FQNs in ONE
+                    call (comma-separated) when a fix spans multiple functions.
+                    Ignore any `content.txt` spill.
 - `sg_constraint` — view/propose project constraints
 - `sg_log`        — recent session log entries
+
+**SG indexes code files only (Python, Go, JS/TS).** If you need to search or edit
+unstructured files (JSON, Markdown, YAML, configs, templates), use your native
+grep/read tools directly.
 
 **Stay scoped — stop when the task is done.** Make the smallest change that
 correctly satisfies the request; once you have enough to complete it, stop
@@ -49,6 +55,11 @@ searching/reading. Do NOT add changelog/release notes, sync `.pyi` stubs, write
 docs, or refactor code the task does not require. SG surfaces related code
 precisely — use it to find the RIGHT edit, not to edit everything nearby. Widen
 scope only if the request explicitly asks.
+
+**Do NOT verify edits by running `inspect.getsource()` on the installed
+package or grepping the site-packages directory.** Trust the file content SG
+gave you and the edits you made. Post-edit verification via Bash is wasteful
+— if you need to confirm, re-Read the few edited lines with a narrow range.
 """
 
 
