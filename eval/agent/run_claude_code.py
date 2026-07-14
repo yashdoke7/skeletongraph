@@ -59,8 +59,16 @@ CLAUDE = shutil.which("claude") or "claude"
 
 ARM_SG = "sg-rerank"     # MCP server pinned to SG_MCP_RETRIEVAL=rerank (BM25+structural, no dense)
 ARM_FUSION = "sg-fusion"  # MCP server pinned to SG_MCP_RETRIEVAL=fusion (3-way RRF incl. dense)
+# sg-fusion-v2: same fusion retrieval as sg-fusion, but with the cost-optimization
+# deterrent baked in — the sg-fusion transcripts showed the remaining cost is Claude
+# re-Reading (1.5/task) and Grepping (1.3/task) AFTER SG already located the code. v2
+# (a) inlines the rank-1 body in sg_search (body_top=1) so there's no expand round-
+# trip and the code is already in context, (b) blocks native Grep/Glob so all
+# localization goes through SG, and (c) uses a firmer "edit from what SG gave you,
+# do NOT re-Read" system prompt. Goal: push the ~-19% cost win toward -30-40%.
+ARM_FUSION_V2 = "sg-fusion-v2"
 ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
-ARMS = (ARM_SG, ARM_FUSION, ARM_NATIVE)
+ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V2, ARM_NATIVE)
 
 # Every non-native arm launches the same MCP server binary — what actually
 # differs is which retrieval algorithm it serves. The server defaults to
@@ -70,7 +78,7 @@ ARMS = (ARM_SG, ARM_FUSION, ARM_NATIVE)
 # once already: every claude-code "sg-rerank" run after the fusion port
 # landed was actually measuring fusion. Pin it here so the arm label is a
 # guarantee, not a hope.
-_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion"}
+_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion", ARM_FUSION_V2: "fusion"}
 
 # SG artifacts + standard caches kept OUT of the agent's patch. Written to the
 # copy's .gitignore BEFORE the baseline commit, so `git add -A` never stages
@@ -107,6 +115,25 @@ _SG_APPEND_SYSTEM = (
     "architecture or cross-cutting work); skip it for a focused bug fix. Use native "
     "Grep/Read only for what SG did not return (e.g. finding where to insert NEW "
     "code)."
+)
+
+# sg-fusion-v2 system prompt: firmer deterrent for the cost-optimization arm.
+# Reflects that v2 runs with body_top=1 (sg_search inlines the #1 match's full
+# body) and native Grep/Glob DISABLED, so the message is "you already have the
+# code — edit it, don't go re-reading."
+_SG_APPEND_SYSTEM_V2 = (
+    "SkeletonGraph (SG) is wired in as an MCP server for this repo, and it is your "
+    "ONLY search tool (native Grep/Glob are disabled — do not attempt them). To "
+    "locate code, call sg_search once with the whole task: it returns the #1 edit "
+    "target's FULL SOURCE inline (with its file:line range) plus exact anchors "
+    "(file::symbol + line range) for the other matches. The inline body IS the "
+    "current source — edit DIRECTLY from it; do NOT Read that file again. For any "
+    "other match you need to see, call sg_expand(target=\"<fqn>\") (batch several "
+    "comma-separated) and edit from what it returns — again without re-Reading. "
+    "Only ever Read a file you are about to EDIT and cannot already see, and only "
+    "the specific lines you need. Do NOT re-Read or re-fetch a symbol whose body "
+    "sg_search or sg_expand already gave you — that is the single biggest source "
+    "of wasted turns. sg_overview is OPTIONAL (skip it for a focused bug fix)."
 )
 
 # Scope-discipline block — BYTE-IDENTICAL in both prompts on purpose. It is
@@ -214,7 +241,7 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
                 _sg(repo, "install", "--ide", "claude-code", "--path", str(repo))
             except Exception:
                 pass
-        if arm == ARM_FUSION:
+        if _RETRIEVAL_MODE.get(arm) == "fusion":
             _warm_dense_cache(repo)   # no-op if already warm (cache present)
         reset_repo(repo)
         return repo
@@ -260,7 +287,7 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         # skips this entirely so it stays a genuine SG-free baseline.
         _sg(repo, "build", "--path", str(repo))
         _sg(repo, "install", "--ide", "claude-code", "--path", str(repo))
-        if arm == ARM_FUSION:
+        if _RETRIEVAL_MODE.get(arm) == "fusion":
             _warm_dense_cache(repo)
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
@@ -401,15 +428,22 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
     ]
     env = dict(os.environ)
     if arm != ARM_NATIVE:
+        # sg-fusion-v2 bakes in the cost-optimization deltas: inline the rank-1
+        # body (no expand round-trip) + block native Grep/Glob + firmer no-reread
+        # prompt. Everything else is identical to sg-fusion.
+        is_v2 = (arm == ARM_FUSION_V2)
+        append_sys = _SG_APPEND_SYSTEM_V2 if is_v2 else _SG_APPEND_SYSTEM
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
-                "--append-system-prompt", _SG_APPEND_SYSTEM]
+                "--append-system-prompt", append_sys]
         prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
         # Claude Code spawns the MCP server (`sg serve`) as a child process
         # inheriting this env, which is where `sg serve` reads it from.
         env["SG_MCP_RETRIEVAL"] = _RETRIEVAL_MODE[arm]
+        if is_v2:
+            body_top = max(body_top, 1)   # inline rank-1 body
+            disallow_grep = True          # force all localization through SG
         # Payload shape: body_top=0 (default) = lean anchors only; >0 inlines the
-        # top-N bodies (the lean-vs-lean+rank1 A/B lever). Passed to the MCP child
-        # the same way as the retrieval mode.
+        # top-N bodies. Passed to the MCP child the same way as the retrieval mode.
         env["SG_MCP_BODY_TOP"] = str(body_top)
     else:
         # An explicit EMPTY config + --strict-mcp-config ⇒ exactly zero MCP
