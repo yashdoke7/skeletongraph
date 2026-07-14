@@ -53,21 +53,37 @@ evaluated separately and reported as it completes._
 
 The table above is model-independent retrieval. This is the product itself —
 SkeletonGraph as an MCP server driving **Claude Code (sonnet)**, against Claude Code on
-its own tools (`native`). 20 paired SWE-bench Verified tasks, Docker-verified pass@1:
+its own tools (`native`). 30 paired SWE-bench Verified tasks, Docker-verified pass@1:
 
 | arm | pass@1 | retrieval hit | turns | input tokens (k) | $/task | $/solved |
 |---|--:|--:|--:|--:|--:|--:|
-| `native` (Claude's own Grep/Read) | 15/20 | 16/20 | 17.4 | 838 | .545 | .726 |
-| **`sg-fusion`** (SkeletonGraph MCP) | 15/20 | **19/20** | **12.1** | **503** | **.412** | **.549** |
+| `native` (Claude's own Grep/Read) | 23/30 | 24/30 | 15.6 | 731 | .486 | .634 |
+| **`sg-fusion`** (SkeletonGraph MCP) | 23/30 | **29/30** | **11.8** | **506** | **.394** | **.514** |
 
-**Same solve rate at −24% cost, −30% turns, −40% tokens** (−24% cost per solved task) —
-consistent from n=10 through n=20 as the sample grew. Cost ≈ turns × accumulated context,
-so the win comes from cutting turns where localization is hard — one native run that
-thrashed 54 turns / \$2.12 became 22 turns / \$0.90 with SG. SG's retrieval is essentially
-saturated (19/20 hit); the residual gap to a higher solve rate is fix-quality, not
-localization — outside what a retrieval layer can move. SG's one weak spot: when the issue
-text already hands over the exact file path, any retrieval tool is pure overhead. _n=20,
-sonnet; multi-model runs planned._
+**Same solve rate at −19% cost, −24% turns, −31% tokens** (−19% cost per solved task) —
+the cost edge held steady as the sample grew (−25% at n=10, −22% at n=12, −24% at n=20,
+−19% at n=30), settling in the high-teens/low-20s range rather than drifting to zero. Cost
+≈ turns × accumulated context, so the win comes from cutting turns where localization is
+hard — one native run that thrashed 54 turns / \$2.12 became 22 turns / \$0.90 with SG.
+SG's retrieval is essentially saturated (29/30 hit); the residual gap to a higher solve
+rate is fix-quality, not localization — outside what a retrieval layer can move. SG's one
+weak spot: when the issue text already hands over the exact file path, any retrieval tool
+is pure overhead.
+
+**Against published competitors, on the identical 20 of these 30 tasks, run through the
+NIM/nemotron react loop** (agent-loop cost only, same tool surface for every arm):
+
+| arm | task-completion rate | retrieval hit | turns | $/task | total $ |
+|---|--:|--:|--:|--:|--:|
+| `cbmem` (Codebase-Memory) | 8/20 (40%) | 3/20 | 26.2 | .061 | 1.21 |
+| `graphify` (knowledge-graph) | 11/20 (55%) | 8/20 | 21.7 | .071 | 1.41 |
+| **`sg-fusion`** | **19/20 (95%)** | **15/20** | **18.0** | **.050** | **1.00** |
+
+SG wins every column — highest completion rate, best retrieval, fewest turns, *and*
+lowest cost (not a quality/cost tradeoff — strictly better and cheaper). graphify's figure
+above is agent-loop cost only; it also pays a one-time LLM graph-extraction cost per repo
+that isn't in this table, so its true total cost is higher still. _n=30 Claude Code,
+n=20 NIM-react; sonnet + nemotron; multi-model runs planned._
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
