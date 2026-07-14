@@ -53,18 +53,20 @@ evaluated separately and reported as it completes._
 
 The table above is model-independent retrieval. This is the product itself —
 SkeletonGraph as an MCP server driving **Claude Code (sonnet)**, against Claude Code on
-its own tools (`native`). 10 paired SWE-bench Verified tasks, Docker-verified pass@1:
+its own tools (`native`). 12 paired SWE-bench Verified tasks, Docker-verified pass@1:
 
-| arm | pass@1 | retrieval hit | turns | input tokens (k) | $/task |
-|---|--:|--:|--:|--:|--:|
-| `native` (Claude's own Grep/Read) | 7/10 | 8/10 | 21.1 | 1,031 | .666 |
-| **`sg-fusion`** (SkeletonGraph MCP) | 7/10 | **10/10** | **13.8** | **595** | **.498** |
+| arm | pass@1 | retrieval hit | turns | input tokens (k) | $/task | $/solved |
+|---|--:|--:|--:|--:|--:|--:|
+| `native` (Claude's own Grep/Read) | 9/12 | 10/12 | 18.4 | 885 | .579 | .772 |
+| **`sg-fusion`** (SkeletonGraph MCP) | **10/12** | **12/12** | **12.4** | **527** | **.454** | **.545** |
 
-**Same solve rate at −25% cost, −35% turns, −42% tokens.** Cost ≈ turns × accumulated
-context, so the win comes from cutting turns where localization is hard — one native run
-that thrashed 54 turns / \$2.12 became 22 turns / \$0.90 with SG. SG only loses when the
-issue text already hands over the exact file path, where any retrieval tool is pure
-overhead. _n=10, sonnet; larger-n and multi-model runs in progress._
+**SG solves more (+1 task) at −22% cost, −33% turns, −40% tokens** (−29% cost per solved
+task). Cost ≈ turns × accumulated context, so the win comes from cutting turns where
+localization is hard — one native run that thrashed 54 turns / \$2.12 became 22 turns /
+\$0.90 with SG, and one native run that gave up in 4 turns (wrong fix) took SG 7 turns to
+actually solve. SG's one weak spot: when the issue text already hands over the exact file
+path, any retrieval tool is pure overhead. _n=12, sonnet; larger-n and multi-model runs in
+progress._
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
