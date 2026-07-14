@@ -149,8 +149,8 @@ def run_stage(stage_name: str, workers: int = 8, probe: bool = False,
 
     n_keys = len(config._NIM_KEYS)
     if n_keys:
-        print(f"  Multi-account NIM: {n_keys} API keys → "
-              f"~{n_keys}× rate-limit headroom  "
+        print(f"  Multi-account NIM: {n_keys} API keys -> "
+              f"~{n_keys}x rate-limit headroom  "
               f"(SG_EVAL_API_KEYS)")
     else:
         print(f"  Single-account mode (SG_EVAL_API_KEYS not set)")
