@@ -67,8 +67,12 @@ ARM_FUSION = "sg-fusion"  # MCP server pinned to SG_MCP_RETRIEVAL=fusion (3-way 
 # localization goes through SG, and (c) uses a firmer "edit from what SG gave you,
 # do NOT re-Read" system prompt. Goal: push the ~-19% cost win toward -30-40%.
 ARM_FUSION_V2 = "sg-fusion-v2"
+ARM_CBMEM = "cbmem"      # competitor: Codebase-Memory MCP server (tree-sitter knowledge graph)
 ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
-ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V2, ARM_NATIVE)
+ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V2, ARM_CBMEM, ARM_NATIVE)
+# SG's own MCP-server family (all launch `sg serve`, differ only in retrieval mode).
+# cbmem is a competitor MCP server; native has no MCP. Used to branch prepare/run.
+_SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_FUSION_V2})
 
 # Every non-native arm launches the same MCP server binary — what actually
 # differs is which retrieval algorithm it serves. The server defaults to
@@ -135,6 +139,45 @@ _SG_APPEND_SYSTEM_V2 = (
     "sg_search or sg_expand already gave you — that is the single biggest source "
     "of wasted turns. sg_overview is OPTIONAL (skip it for a focused bug fix)."
 )
+
+# ── cbmem competitor arm: Codebase-Memory as a real Claude Code MCP server ────
+# cbmem's persistent index store is shared between the CLI (which we index with,
+# in prepare) and the stdio MCP server Claude Code launches from .mcp.json — so a
+# repo indexed here is queryable in-session. Every cbmem tool needs a `project`
+# slug; we compute the real slug at prepare/run time and pin it into the prompt.
+_CBMEM_APPEND_SYSTEM = (
+    "Codebase-Memory (cbmem) is wired in as an MCP server for this repo — a "
+    "tree-sitter code knowledge graph. It is your code-search tool; prefer it "
+    "over native grep to locate code. Tools (ALWAYS pass project=\"{slug}\"): "
+    "search_graph(project=\"{slug}\", query=\"<what you're looking for>\") — find "
+    "functions/classes/routes; get_code_snippet(project=\"{slug}\", "
+    "qualified_name=\"<name from a search result>\") — read a symbol's source; "
+    "search_code(project=\"{slug}\", pattern=\"<text>\") — graph-augmented grep; "
+    "trace_path(project=\"{slug}\", function_name=\"<name>\") — follow callers/"
+    "callees. Locate the code with cbmem, read it with get_code_snippet, then edit "
+    "directly. Only fall back to native Read for a file you must edit."
+)
+
+
+def _cbmem_mod():
+    from backends import cbmem as _c
+    return _c
+
+
+def _cbmem_slug(repo: Path) -> str:
+    """Index the repo into cbmem's graph (no-op if already built) and return the
+    ACTUAL registered project slug — cbmem derives its own slug, so we read it back
+    rather than compute it."""
+    c = _cbmem_mod()
+    return c._ensure_indexed(c._bin(), Path(repo).resolve())
+
+
+def _write_cbmem_mcp(repo: Path) -> None:
+    """Write .mcp.json pointing Claude Code at the cbmem stdio MCP server."""
+    binp = _cbmem_mod()._bin().replace("\\", "/")
+    cfg = {"mcpServers": {"codebase-memory": {
+        "type": "stdio", "command": binp, "args": []}}}
+    (repo / ".mcp.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 # Scope-discipline block — BYTE-IDENTICAL in both prompts on purpose. It is
 # about task scope, not retrieval, so both arms must get exactly the same words
@@ -236,13 +279,16 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         # Refresh Claude Code hooks/MCP config (idempotent, gitignored) so copies
         # prepared before a hook/install change pick it up — e.g. the SG-first
         # PreToolUse gate — without a slow re-index.
-        if arm != ARM_NATIVE:
+        if arm in _SG_ARMS:
             try:
                 _sg(repo, "install", "--ide", "claude-code", "--path", str(repo))
             except Exception:
                 pass
-        if _RETRIEVAL_MODE.get(arm) == "fusion":
-            _warm_dense_cache(repo)   # no-op if already warm (cache present)
+            if _RETRIEVAL_MODE.get(arm) == "fusion":
+                _warm_dense_cache(repo)   # no-op if already warm (cache present)
+        elif arm == ARM_CBMEM:
+            _cbmem_slug(repo)             # ensure indexed (persistent; cheap if built)
+            _write_cbmem_mcp(repo)
         reset_repo(repo)
         return repo
 
@@ -281,7 +327,7 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
     # Clean git baseline — the agent's diff is taken against this commit.
     _init_baseline(repo)
 
-    if arm != ARM_NATIVE:
+    if arm in _SG_ARMS:
         # Build the SG index, then install Claude Code integration (.mcp.json +
         # hooks + CLAUDE.md). Both write only gitignored paths. The native arm
         # skips this entirely so it stays a genuine SG-free baseline.
@@ -289,6 +335,12 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         _sg(repo, "install", "--ide", "claude-code", "--path", str(repo))
         if _RETRIEVAL_MODE.get(arm) == "fusion":
             _warm_dense_cache(repo)
+    elif arm == ARM_CBMEM:
+        # Index the FRESH copy into cbmem's graph + point Claude at cbmem's MCP
+        # server. cbmem's index lives in its own store (not the repo), so the only
+        # in-repo file is .mcp.json (already gitignored, like SG's).
+        _cbmem_slug(repo)
+        _write_cbmem_mcp(repo)
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
@@ -427,7 +479,7 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         "--dangerously-skip-permissions",
     ]
     env = dict(os.environ)
-    if arm != ARM_NATIVE:
+    if arm in _SG_ARMS:
         # sg-fusion-v2 bakes in the cost-optimization deltas: inline the rank-1
         # body (no expand round-trip) + block native Grep/Glob + firmer no-reread
         # prompt. Everything else is identical to sg-fusion.
@@ -445,6 +497,14 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         # Payload shape: body_top=0 (default) = lean anchors only; >0 inlines the
         # top-N bodies. Passed to the MCP child the same way as the retrieval mode.
         env["SG_MCP_BODY_TOP"] = str(body_top)
+    elif arm == ARM_CBMEM:
+        # Competitor MCP server. Pin the real project slug into the prompt (every
+        # cbmem tool needs it) + neutral user prompt (tool guidance is in the
+        # append-system prompt, parallel to the SG arm).
+        slug = _cbmem_slug(repo)
+        cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
+                "--append-system-prompt", _CBMEM_APPEND_SYSTEM.format(slug=slug)]
+        prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     else:
         # An explicit EMPTY config + --strict-mcp-config ⇒ exactly zero MCP
         # servers (no project or global leakage). Truly Claude-on-its-own.
