@@ -53,20 +53,21 @@ evaluated separately and reported as it completes._
 
 The table above is model-independent retrieval. This is the product itself —
 SkeletonGraph as an MCP server driving **Claude Code (sonnet)**, against Claude Code on
-its own tools (`native`). 12 paired SWE-bench Verified tasks, Docker-verified pass@1:
+its own tools (`native`). 20 paired SWE-bench Verified tasks, Docker-verified pass@1:
 
 | arm | pass@1 | retrieval hit | turns | input tokens (k) | $/task | $/solved |
 |---|--:|--:|--:|--:|--:|--:|
-| `native` (Claude's own Grep/Read) | 9/12 | 10/12 | 18.4 | 885 | .579 | .772 |
-| **`sg-fusion`** (SkeletonGraph MCP) | **10/12** | **12/12** | **12.4** | **527** | **.454** | **.545** |
+| `native` (Claude's own Grep/Read) | 15/20 | 16/20 | 17.4 | 838 | .545 | .726 |
+| **`sg-fusion`** (SkeletonGraph MCP) | 15/20 | **19/20** | **12.1** | **503** | **.412** | **.549** |
 
-**SG solves more (+1 task) at −22% cost, −33% turns, −40% tokens** (−29% cost per solved
-task). Cost ≈ turns × accumulated context, so the win comes from cutting turns where
-localization is hard — one native run that thrashed 54 turns / \$2.12 became 22 turns /
-\$0.90 with SG, and one native run that gave up in 4 turns (wrong fix) took SG 7 turns to
-actually solve. SG's one weak spot: when the issue text already hands over the exact file
-path, any retrieval tool is pure overhead. _n=12, sonnet; larger-n and multi-model runs in
-progress._
+**Same solve rate at −24% cost, −30% turns, −40% tokens** (−24% cost per solved task) —
+consistent from n=10 through n=20 as the sample grew. Cost ≈ turns × accumulated context,
+so the win comes from cutting turns where localization is hard — one native run that
+thrashed 54 turns / \$2.12 became 22 turns / \$0.90 with SG. SG's retrieval is essentially
+saturated (19/20 hit); the residual gap to a higher solve rate is fix-quality, not
+localization — outside what a retrieval layer can move. SG's one weak spot: when the issue
+text already hands over the exact file path, any retrieval tool is pure overhead. _n=20,
+sonnet; multi-model runs planned._
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
