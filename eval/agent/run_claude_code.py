@@ -744,6 +744,71 @@ def _retrieval_from_transcript(objs: list, gold_files: list) -> dict:
 # additionally records if native ever touched gold through ANY tool (incl. Read),
 # so native's read-driven navigation isn't hidden from the paper.
 
+def _retrieval_from_cbmem_transcript(objs: list, gold_files: list,
+                                     repo_root: str) -> dict:
+    """Same schema as _retrieval_from_transcript, but for the cbmem competitor
+    arm: its search-shaped MCP tools (search_graph, search_code) return raw JSON
+    (not SG's markdown), so reuse cbmem's OWN parser (backends.cbmem._extract_files)
+    on each tool_result instead of _parse_sg_result_text. get_code_snippet is
+    navigation (parallel to SG's sg_expand) — excluded, like Read is for native."""
+    from backends.cbmem import _extract_files
+    repo = Path(repo_root)
+    gold = {g.replace("\\", "/") for g in gold_files}
+    pending: dict = {}
+    order = 0
+    calls = []
+    search_tool_names = {"search_graph", "search_code"}
+    for o in objs:
+        typ = o.get("type")
+        content = (o.get("message", {}) or {}).get("content", []) or []
+        if typ == "assistant":
+            for b in content:
+                if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                    continue
+                name = str(b.get("name", ""))
+                if name.rsplit("__", 1)[-1] in search_tool_names:
+                    inp = b.get("input") or {}
+                    query = inp.get("query") or inp.get("pattern") or ""
+                    pending[b.get("id")] = (query, order)
+                    order += 1
+        elif typ == "user":
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tid = b.get("tool_use_id")
+                    if tid not in pending:
+                        continue
+                    query, od = pending.pop(tid)
+                    text = _tool_result_text(b.get("content"))
+                    files = _extract_files(text, repo)
+                    calls.append((od, query, files))
+    calls.sort(key=lambda c: c[0])
+
+    search_calls, seen_gold = [], set()
+    for od, query, files in calls:
+        gih = sorted(gold & set(files))
+        seen_gold |= set(gih)
+        search_calls.append({
+            "turn": od, "query": query, "hits": files, "n_hits": len(files),
+            "gold_in_hits": gih,
+            "precision": round(len(gih) / len(files), 4) if files else 0.0,
+            "cumulative_recall": (round(len(seen_gold) / len(gold), 4)
+                                  if gold else 0.0),
+            "error": False,
+        })
+    first_files = calls[0][2] if calls else []
+    rank = next((i for i, f in enumerate(first_files, 1) if f in gold), 0)
+    n_gold_first = len([f for f in first_files if f in gold])
+    return {
+        "search_calls": search_calls,
+        "first_search_fqns": first_files,
+        "all_search_fqns": [f for _, _, fs in calls for f in fs],
+        "retrieval_hit": bool(gold & set(first_files)),
+        "retrieval_precision": (round(n_gold_first / len(first_files), 4)
+                                if first_files else 0.0),
+        "retrieval_rank": rank,
+    }
+
+
 def _rel(path: str, repo_root: str) -> str:
     """Normalise a tool path to repo-relative forward-slash form."""
     p = str(path).replace("\\", "/").strip()
@@ -908,6 +973,8 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
     gold_files = task.get("gold_files", [])
     if arm == ARM_NATIVE:
         ret = _retrieval_from_native_transcript(run["transcript"], gold_files, str(repo))
+    elif arm == ARM_CBMEM:
+        ret = _retrieval_from_cbmem_transcript(run["transcript"], gold_files, str(repo))
     else:
         ret = _retrieval_from_transcript(run["transcript"], gold_files)
     wall = round(time.time() - t0, 1)
@@ -1108,6 +1175,10 @@ def reprocess_retrieval(runs_dir: Path) -> None:
             cwd = next((o.get("cwd") for o in objs
                         if o.get("type") == "system" and o.get("cwd")), "")
             ret = _retrieval_from_native_transcript(objs, gold, cwd)
+        elif rec.get("arm") == ARM_CBMEM:
+            cwd = next((o.get("cwd") for o in objs
+                        if o.get("type") == "system" and o.get("cwd")), "")
+            ret = _retrieval_from_cbmem_transcript(objs, gold, cwd)
         else:
             ret = _retrieval_from_transcript(objs, gold)
         rec.update({
