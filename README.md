@@ -46,9 +46,25 @@ the prior run) and deployed-graph (`aider`) baselines, not just the keyword floo
 _File/function recall are from a deterministic retrieval pass (model-independent); pass@1,
 tokens and $ are from the latest agent run (v3, nemotron-120B). Scope: SWE-bench Verified
 (Python). A contamination-controlled multi-language split (SWE-bench Pro, 10 languages —
-file recall ~0.78 across Go/TS/JS/Python; function recall pending gold-FQN scoring) and a
-real-agent deployment study (SkeletonGraph as an MCP server in Claude Code) are evaluated
-separately and reported as they complete._
+file recall ~0.78 across Go/TS/JS/Python; function recall pending gold-FQN scoring) is
+evaluated separately and reported as it completes._
+
+### Deployment: SkeletonGraph vs native Claude Code (MCP, verified)
+
+The table above is model-independent retrieval. This is the product itself —
+SkeletonGraph as an MCP server driving **Claude Code (sonnet)**, against Claude Code on
+its own tools (`native`). 10 paired SWE-bench Verified tasks, Docker-verified pass@1:
+
+| arm | pass@1 | retrieval hit | turns | input tokens (k) | $/task |
+|---|--:|--:|--:|--:|--:|
+| `native` (Claude's own Grep/Read) | 7/10 | 8/10 | 21.1 | 1,031 | .666 |
+| **`sg-fusion`** (SkeletonGraph MCP) | 7/10 | **10/10** | **13.8** | **595** | **.498** |
+
+**Same solve rate at −25% cost, −35% turns, −42% tokens.** Cost ≈ turns × accumulated
+context, so the win comes from cutting turns where localization is hard — one native run
+that thrashed 54 turns / \$2.12 became 22 turns / \$0.90 with SG. SG only loses when the
+issue text already hands over the exact file path, where any retrieval tool is pure
+overhead. _n=10, sonnet; larger-n and multi-model runs in progress._
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)

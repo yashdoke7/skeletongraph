@@ -851,6 +851,12 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         "imputed_cost": round(meta["cost_usd"], 6),
         "wall_s": wall,
         "claude_exit": run["exit"],
+        # Surface WHY a non-submit run failed (e.g. "Invalid API key · Fix
+        # external API key") directly in the record — previously only visible
+        # by opening the raw transcript in _claude_transcripts/.
+        "error": (None if stopped == "submit" else
+                  ("timeout" if run["timed_out"] else
+                   (run["result"] or {}).get("result"))),
         "tool_counts": meta["tool_counts"],
         "n_tool_calls": meta["n_tool_calls"],
         "sg_tool_calls": meta["sg_tool_calls"],
