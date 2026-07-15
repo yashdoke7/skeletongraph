@@ -68,8 +68,9 @@ ARM_FUSION = "sg-fusion"  # MCP server pinned to SG_MCP_RETRIEVAL=fusion (3-way 
 # do NOT re-Read" system prompt. Goal: push the ~-19% cost win toward -30-40%.
 ARM_FUSION_V2 = "sg-fusion-v2"
 ARM_CBMEM = "cbmem"      # competitor: Codebase-Memory MCP server (tree-sitter knowledge graph)
+ARM_SERENA = "serena"    # competitor: Serena MCP server (LSP-based symbol navigation, 25k stars)
 ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
-ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V2, ARM_CBMEM, ARM_NATIVE)
+ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V2, ARM_CBMEM, ARM_SERENA, ARM_NATIVE)
 # SG's own MCP-server family (all launch `sg serve`, differ only in retrieval mode).
 # cbmem is a competitor MCP server; native has no MCP. Used to branch prepare/run.
 _SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_FUSION_V2})
@@ -177,6 +178,55 @@ def _write_cbmem_mcp(repo: Path) -> None:
     binp = _cbmem_mod()._bin().replace("\\", "/")
     cfg = {"mcpServers": {"codebase-memory": {
         "type": "stdio", "command": binp, "args": []}}}
+    (repo / ".mcp.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+# ── Serena competitor arm: LSP-based symbol navigation, 25k stars ────────────
+# Unlike cbmem (persistent global graph store), Serena is per-project and
+# activates the project at MCP-server launch via --project — no separate index
+# step. Requires: pip install serena-agent in its own venv (SERENA_BIN ->
+# .../Scripts/serena.exe) + Node.js on PATH (pyright's LSP backend, launched via
+# uvx, is a Node program under the hood — install Node if `uvx --from pyright
+# pyright-langserver --version` fails).
+_SERENA_APPEND_SYSTEM = (
+    "Serena is wired in as an MCP server for this repo — an LSP-based semantic "
+    "code navigator (real language-server symbol resolution, not text search). "
+    "It is your code-search tool; prefer it over native grep to locate code. "
+    "Tools: get_symbols_overview(relative_path) — top-level symbols in a file "
+    "(call this on a file before diving in); find_symbol(name_path_pattern, "
+    "include_body=true) — locate a function/class BY NAME and read its exact "
+    "source in one call; find_referencing_symbols(name_path, relative_path) — "
+    "find every caller of a symbol; search_for_pattern(substring_pattern) — "
+    "text/regex search when you don't know a symbol name. Locate and read code "
+    "with these tools, then edit directly. Only fall back to native Read for a "
+    "file you must edit."
+)
+
+
+def _serena_bin() -> str:
+    env = os.environ.get("SERENA_BIN")
+    if env:
+        return env
+    found = shutil.which("serena")
+    if found:
+        return found
+    raise RuntimeError(
+        "Serena binary not found. Install with `pip install serena-agent` in "
+        "its own venv and set SERENA_BIN to the full path of serena(.exe), or "
+        "put it on PATH.")
+
+
+def _write_serena_mcp(repo: Path) -> None:
+    """Write .mcp.json pointing Claude Code at the Serena stdio MCP server,
+    pre-activated on this exact repo copy via --project."""
+    binp = _serena_bin().replace("\\", "/")
+    repo_path = str(Path(repo).resolve()).replace("\\", "/")
+    cfg = {"mcpServers": {"serena": {
+        "type": "stdio", "command": binp,
+        "args": ["start-mcp-server", "--transport", "stdio",
+                 "--project", repo_path,
+                 "--enable-web-dashboard", "False",
+                 "--open-web-dashboard", "False"]}}}
     (repo / ".mcp.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 # Scope-discipline block — BYTE-IDENTICAL in both prompts on purpose. It is
@@ -289,6 +339,8 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         elif arm == ARM_CBMEM:
             _cbmem_slug(repo)             # ensure indexed (persistent; cheap if built)
             _write_cbmem_mcp(repo)
+        elif arm == ARM_SERENA:
+            _write_serena_mcp(repo)       # no index step - Serena activates per-project at launch
         reset_repo(repo)
         return repo
 
@@ -341,6 +393,8 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         # in-repo file is .mcp.json (already gitignored, like SG's).
         _cbmem_slug(repo)
         _write_cbmem_mcp(repo)
+    elif arm == ARM_SERENA:
+        _write_serena_mcp(repo)
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
@@ -504,6 +558,12 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         slug = _cbmem_slug(repo)
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
                 "--append-system-prompt", _CBMEM_APPEND_SYSTEM.format(slug=slug)]
+        prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+    elif arm == ARM_SERENA:
+        # Competitor MCP server — project is pre-activated via --project in the
+        # .mcp.json args, so no per-call slug needed (unlike cbmem).
+        cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
+                "--append-system-prompt", _SERENA_APPEND_SYSTEM]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     else:
         # An explicit EMPTY config + --strict-mcp-config ⇒ exactly zero MCP
@@ -809,6 +869,83 @@ def _retrieval_from_cbmem_transcript(objs: list, gold_files: list,
     }
 
 
+def _retrieval_from_serena_transcript(objs: list, gold_files: list,
+                                      repo_root: str) -> dict:
+    """Same schema as _retrieval_from_cbmem_transcript, for Serena. Its
+    search-shaped tools (find_symbol, search_for_pattern, find_referencing_symbols,
+    get_symbols_overview) return a JSON list of dicts with a "relative_path" key
+    (confirmed live: [{"name_path": ..., "relative_path": "pkg\\\\math_ops.py", ...}]).
+    get_symbols_overview and read_file are navigation (parallel to cbmem's
+    get_code_snippet) — excluded from search_calls."""
+    gold = {g.replace("\\", "/") for g in gold_files}
+    pending: dict = {}
+    order = 0
+    calls = []
+    search_tool_names = {"find_symbol", "search_for_pattern", "find_referencing_symbols"}
+    for o in objs:
+        typ = o.get("type")
+        content = (o.get("message", {}) or {}).get("content", []) or []
+        if typ == "assistant":
+            for b in content:
+                if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                    continue
+                name = str(b.get("name", ""))
+                if name.rsplit("__", 1)[-1] in search_tool_names:
+                    inp = b.get("input") or {}
+                    query = (inp.get("name_path_pattern") or inp.get("substring_pattern")
+                             or inp.get("name_path") or "")
+                    pending[b.get("id")] = (query, order)
+                    order += 1
+        elif typ == "user":
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tid = b.get("tool_use_id")
+                    if tid not in pending:
+                        continue
+                    query, od = pending.pop(tid)
+                    text = _tool_result_text(b.get("content"))
+                    files = []
+                    try:
+                        parsed = json.loads(text)
+                        items = parsed if isinstance(parsed, list) else [parsed]
+                        seen = set()
+                        for it in items:
+                            if not isinstance(it, dict):
+                                continue
+                            p = str(it.get("relative_path", "")).replace("\\", "/")
+                            if p and p not in seen:
+                                seen.add(p); files.append(p)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    calls.append((od, query, files))
+    calls.sort(key=lambda c: c[0])
+
+    search_calls, seen_gold = [], set()
+    for od, query, files in calls:
+        gih = sorted(gold & set(files))
+        seen_gold |= set(gih)
+        search_calls.append({
+            "turn": od, "query": query, "hits": files, "n_hits": len(files),
+            "gold_in_hits": gih,
+            "precision": round(len(gih) / len(files), 4) if files else 0.0,
+            "cumulative_recall": (round(len(seen_gold) / len(gold), 4)
+                                  if gold else 0.0),
+            "error": False,
+        })
+    first_files = calls[0][2] if calls else []
+    rank = next((i for i, f in enumerate(first_files, 1) if f in gold), 0)
+    n_gold_first = len([f for f in first_files if f in gold])
+    return {
+        "search_calls": search_calls,
+        "first_search_fqns": first_files,
+        "all_search_fqns": [f for _, _, fs in calls for f in fs],
+        "retrieval_hit": bool(gold & set(first_files)),
+        "retrieval_precision": (round(n_gold_first / len(first_files), 4)
+                                if first_files else 0.0),
+        "retrieval_rank": rank,
+    }
+
+
 def _rel(path: str, repo_root: str) -> str:
     """Normalise a tool path to repo-relative forward-slash form."""
     p = str(path).replace("\\", "/").strip()
@@ -975,6 +1112,8 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         ret = _retrieval_from_native_transcript(run["transcript"], gold_files, str(repo))
     elif arm == ARM_CBMEM:
         ret = _retrieval_from_cbmem_transcript(run["transcript"], gold_files, str(repo))
+    elif arm == ARM_SERENA:
+        ret = _retrieval_from_serena_transcript(run["transcript"], gold_files, str(repo))
     else:
         ret = _retrieval_from_transcript(run["transcript"], gold_files)
     wall = round(time.time() - t0, 1)
@@ -1179,6 +1318,10 @@ def reprocess_retrieval(runs_dir: Path) -> None:
             cwd = next((o.get("cwd") for o in objs
                         if o.get("type") == "system" and o.get("cwd")), "")
             ret = _retrieval_from_cbmem_transcript(objs, gold, cwd)
+        elif rec.get("arm") == ARM_SERENA:
+            cwd = next((o.get("cwd") for o in objs
+                        if o.get("type") == "system" and o.get("cwd")), "")
+            ret = _retrieval_from_serena_transcript(objs, gold, cwd)
         else:
             ret = _retrieval_from_transcript(objs, gold)
         rec.update({
