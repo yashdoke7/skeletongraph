@@ -85,6 +85,18 @@ above is agent-loop cost only; it also pays a one-time LLM graph-extraction cost
 that isn't in this table, so its true total cost is higher still. _n=30 Claude Code,
 n=20 NIM-react; sonnet + nemotron; multi-model runs planned._
 
+**A note on competitors _as MCP servers inside Claude Code_ (vs. the react loop above).**
+We also wired Codebase-Memory (cbmem, official v0.7.0) as a real MCP server driving Claude
+Code head-to-head. It connected cleanly and all 14 of its tools were registered and visible
+to the agent — but across 10 tasks **Claude never once invoked a cbmem tool, defaulting to
+its native `grep` every time** (verified from the session transcripts). So an unsteered
+competitor MCP server, however good its retrieval, provides no benefit if the agent doesn't
+reach for it. SG's edge is not only retrieval quality but the adoption mechanism (a
+PreToolUse gate that routes the agent to structural search first) that makes it actually get
+used. We therefore do not report a cbmem-in-Claude-Code retrieval number — it would measure
+non-adoption, not the tool. _Broader competitor set (Serena, claude-context, CodeGraph) and
+a forced-tool comparison are planned._
+
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
 so the IDE agent or CLI can choose targets.
