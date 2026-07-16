@@ -552,9 +552,13 @@ class SGEngine:
         lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(0, sk.line_start - 1)
         end = min(len(lines), sk.line_end)
-        body = "\n".join(lines[start:end])
+        # Per-line line numbers, same format as _expand_range — without this the
+        # agent has no way to build a precise Edit from this body alone and
+        # re-Reads the file just to get line numbers (measured: 81% of re-reads
+        # in a Claude Code eval were exactly this, ~1.26 redundant Read/task).
+        body = "\n".join(f"{start + i + 1}: {line}" for i, line in enumerate(lines[start:end]))
 
-        parts = [f"# {sk.file_path}:{sk.line_start} — {fqn}\n{body}"]
+        parts = [f"# {sk.file_path}:{sk.line_start}-{end} — {fqn}\n{body}"]
 
         if include_neighbors:
             # 1-hop callers

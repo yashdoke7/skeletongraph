@@ -59,21 +59,26 @@ CLAUDE = shutil.which("claude") or "claude"
 
 ARM_SG = "sg-rerank"     # MCP server pinned to SG_MCP_RETRIEVAL=rerank (BM25+structural, no dense)
 ARM_FUSION = "sg-fusion"  # MCP server pinned to SG_MCP_RETRIEVAL=fusion (3-way RRF incl. dense)
-# sg-fusion-v2: same fusion retrieval as sg-fusion, but with the cost-optimization
-# deterrent baked in — the sg-fusion transcripts showed the remaining cost is Claude
-# re-Reading (1.5/task) and Grepping (1.3/task) AFTER SG already located the code. v2
-# (a) inlines the rank-1 body in sg_search (body_top=1) so there's no expand round-
-# trip and the code is already in context, (b) blocks native Grep/Glob so all
-# localization goes through SG, and (c) uses a firmer "edit from what SG gave you,
-# do NOT re-Read" system prompt. Goal: push the ~-19% cost win toward -30-40%.
-ARM_FUSION_V2 = "sg-fusion-v2"
+# sg-fusion-v3: IDENTICAL config to sg-fusion (same retrieval mode, same prompt,
+# same body_top=0) — the only difference is the underlying product code
+# (engine.py::_expand_function, fixed 2026-07) now renders per-line line numbers
+# in sg_expand's function body, matching _expand_range's existing format. Fixes
+# the measured cause of 81% of fusion's redundant Read calls (the agent had no
+# line numbers to build an Edit from and re-Read the file just to get them).
+# Distinct arm name (not a reused "sg-fusion-v2" — that name already means the
+# DIFFERENT, discarded body_top=1+disallow_grep deterrent variant, see
+# project_sg_unification memory) purely so pre-fix (existing sg-fusion results)
+# and post-fix runs land in separate files under the same tag, not commingled.
+# See project_fusion_cost_diagnosis memory for the full measurement + rationale.
+ARM_FUSION_V3 = "sg-fusion-v3"
 ARM_CBMEM = "cbmem"      # competitor: Codebase-Memory MCP server (tree-sitter knowledge graph)
 ARM_SERENA = "serena"    # competitor: Serena MCP server (LSP-based symbol navigation, 25k stars)
+ARM_GITNEXUS = "gitnexus"  # competitor: GitNexus MCP server (knowledge graph, own SWE-bench claim)
 ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
-ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V2, ARM_CBMEM, ARM_SERENA, ARM_NATIVE)
+ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V3, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE)
 # SG's own MCP-server family (all launch `sg serve`, differ only in retrieval mode).
 # cbmem is a competitor MCP server; native has no MCP. Used to branch prepare/run.
-_SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_FUSION_V2})
+_SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_FUSION_V3})
 
 # Every non-native arm launches the same MCP server binary — what actually
 # differs is which retrieval algorithm it serves. The server defaults to
@@ -83,7 +88,7 @@ _SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_FUSION_V2})
 # once already: every claude-code "sg-rerank" run after the fusion port
 # landed was actually measuring fusion. Pin it here so the arm label is a
 # guarantee, not a hope.
-_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion", ARM_FUSION_V2: "fusion"}
+_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion", ARM_FUSION_V3: "fusion"}
 
 # SG artifacts + standard caches kept OUT of the agent's patch. Written to the
 # copy's .gitignore BEFORE the baseline commit, so `git add -A` never stages
@@ -97,6 +102,7 @@ _GITIGNORE = """\
 CLAUDE.md
 .sg_prepared
 .hybrid_index/
+.gitnexus/
 __pycache__/
 *.pyc
 *.pyo
@@ -120,25 +126,6 @@ _SG_APPEND_SYSTEM = (
     "architecture or cross-cutting work); skip it for a focused bug fix. Use native "
     "Grep/Read only for what SG did not return (e.g. finding where to insert NEW "
     "code)."
-)
-
-# sg-fusion-v2 system prompt: firmer deterrent for the cost-optimization arm.
-# Reflects that v2 runs with body_top=1 (sg_search inlines the #1 match's full
-# body) and native Grep/Glob DISABLED, so the message is "you already have the
-# code — edit it, don't go re-reading."
-_SG_APPEND_SYSTEM_V2 = (
-    "SkeletonGraph (SG) is wired in as an MCP server for this repo, and it is your "
-    "ONLY search tool (native Grep/Glob are disabled — do not attempt them). To "
-    "locate code, call sg_search once with the whole task: it returns the #1 edit "
-    "target's FULL SOURCE inline (with its file:line range) plus exact anchors "
-    "(file::symbol + line range) for the other matches. The inline body IS the "
-    "current source — edit DIRECTLY from it; do NOT Read that file again. For any "
-    "other match you need to see, call sg_expand(target=\"<fqn>\") (batch several "
-    "comma-separated) and edit from what it returns — again without re-Reading. "
-    "Only ever Read a file you are about to EDIT and cannot already see, and only "
-    "the specific lines you need. Do NOT re-Read or re-fetch a symbol whose body "
-    "sg_search or sg_expand already gave you — that is the single biggest source "
-    "of wasted turns. sg_overview is OPTIONAL (skip it for a focused bug fix)."
 )
 
 # ── cbmem competitor arm: Codebase-Memory as a real Claude Code MCP server ────
@@ -201,6 +188,79 @@ _SERENA_APPEND_SYSTEM = (
     "with these tools, then edit directly. Only fall back to native Read for a "
     "file you must edit."
 )
+
+# ── GitNexus competitor arm: knowledge-graph MCP, own SWE-bench claim ────────
+# Unlike cbmem (global store queried by explicit `project` slug) and Serena
+# (per-project via --project flag), GitNexus's MCP server has no project flag —
+# it resolves the active repo from the launch cwd (confirmed live: `gitnexus mcp`
+# started with cwd=<repo> auto-selects that repo without a `repo` arg). We ALSO
+# register the repo under a deterministic --name alias at analyze time and tell
+# Claude to pass repo="<alias>" explicitly, as a belt-and-braces fallback in case
+# cwd auto-detection is ever ambiguous (e.g. a stale global registry entry).
+_GITNEXUS_APPEND_SYSTEM = (
+    "GitNexus is wired in as an MCP server for this repo — a knowledge-graph "
+    "code navigator. It is your code-search tool; prefer it over native grep to "
+    "locate code. Tools (pass repo=\"{name}\" on every call): "
+    "query(search_query=\"<what you're looking for>\", repo=\"{name}\") — hybrid "
+    "BM25+semantic search, returns matching symbols with file paths; "
+    "context(name=\"<symbol>\", repo=\"{name}\") — 360-degree view of a symbol "
+    "(callers/callees); trace(from=\"<symbol>\", to=\"<symbol>\", repo=\"{name}\") "
+    "— shortest path between two symbols; impact(target=\"<symbol>\", "
+    "repo=\"{name}\") — blast-radius of changing a symbol. Locate code with "
+    "these tools, then edit directly. Only fall back to native Read for a file "
+    "you must edit."
+)
+
+
+def _gitnexus_cmd() -> list:
+    """Argv prefix to invoke GitNexus. On Windows, npm's global `gitnexus.cmd`
+    wrapper can't be spawned directly by CreateProcess without a shell (neither
+    Claude Code's MCP client nor Python's subprocess resolves .cmd association
+    without shell=True) — resolve straight to `node <package>/dist/cli/index.js`
+    instead, same "point at the real executable" fix used for Serena/cbmem's
+    .exe. GITNEXUS_CMD overrides with a space-separated argv prefix if the
+    default resolution doesn't fit a given machine."""
+    env = os.environ.get("GITNEXUS_CMD")
+    if env:
+        return env.split()
+    node = shutil.which("node")
+    if not node:
+        raise RuntimeError(
+            "node not found on PATH — GitNexus needs Node.js. Install it, or "
+            "set GITNEXUS_CMD to a full 'node /path/to/index.js'-style prefix.")
+    cmd_wrapper = shutil.which("gitnexus.cmd") or shutil.which("gitnexus")
+    if not cmd_wrapper:
+        raise RuntimeError(
+            "GitNexus not found. Install with `npm install -g gitnexus@latest` "
+            "and ensure npm's global bin dir is on PATH, or set GITNEXUS_CMD.")
+    entry = Path(cmd_wrapper).with_name("node_modules") / "gitnexus" / "dist" / "cli" / "index.js"
+    if not entry.is_file():
+        raise RuntimeError(f"GitNexus JS entrypoint not found at {entry} — "
+                           f"install layout may differ; set GITNEXUS_CMD directly.")
+    return [node, str(entry)]
+
+
+def _gitnexus_analyze(repo: Path) -> None:
+    """Index the repo (idempotent — incremental if the git tree is unchanged).
+    --index-only skips AGENTS.md/CLAUDE.md/skills injection into the tracked
+    tree (would otherwise pollute the patch, same care as SG's gitignored
+    install). --name registers a deterministic alias for the system-prompt
+    repo= fallback."""
+    cmd = _gitnexus_cmd() + ["analyze", str(repo), "--index-only",
+                             "--name", repo.name]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", cwd=str(repo))
+    if r.returncode != 0:
+        raise RuntimeError(f"`gitnexus analyze` failed ({r.returncode}): "
+                           f"{(r.stderr or r.stdout).strip()[:300]}")
+
+
+def _write_gitnexus_mcp(repo: Path) -> None:
+    cmd = _gitnexus_cmd()
+    cfg = {"mcpServers": {"gitnexus": {
+        "type": "stdio", "command": cmd[0].replace("\\", "/"),
+        "args": [*(a.replace("\\", "/") for a in cmd[1:]), "mcp"]}}}
+    (repo / ".mcp.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 def _serena_bin() -> str:
@@ -341,6 +401,9 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
             _write_cbmem_mcp(repo)
         elif arm == ARM_SERENA:
             _write_serena_mcp(repo)       # no index step - Serena activates per-project at launch
+        elif arm == ARM_GITNEXUS:
+            _gitnexus_analyze(repo)       # cheap/incremental if already indexed
+            _write_gitnexus_mcp(repo)
         reset_repo(repo)
         return repo
 
@@ -395,6 +458,11 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         _write_cbmem_mcp(repo)
     elif arm == ARM_SERENA:
         _write_serena_mcp(repo)
+    elif arm == ARM_GITNEXUS:
+        # Index the FRESH copy — .gitnexus/ is gitignored (added to _GITIGNORE
+        # above) so, like cbmem/SG, the only tracked-tree file is .mcp.json.
+        _gitnexus_analyze(repo)
+        _write_gitnexus_mcp(repo)
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
@@ -534,20 +602,12 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
     ]
     env = dict(os.environ)
     if arm in _SG_ARMS:
-        # sg-fusion-v2 bakes in the cost-optimization deltas: inline the rank-1
-        # body (no expand round-trip) + block native Grep/Glob + firmer no-reread
-        # prompt. Everything else is identical to sg-fusion.
-        is_v2 = (arm == ARM_FUSION_V2)
-        append_sys = _SG_APPEND_SYSTEM_V2 if is_v2 else _SG_APPEND_SYSTEM
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
-                "--append-system-prompt", append_sys]
+                "--append-system-prompt", _SG_APPEND_SYSTEM]
         prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
         # Claude Code spawns the MCP server (`sg serve`) as a child process
         # inheriting this env, which is where `sg serve` reads it from.
         env["SG_MCP_RETRIEVAL"] = _RETRIEVAL_MODE[arm]
-        if is_v2:
-            body_top = max(body_top, 1)   # inline rank-1 body
-            disallow_grep = True          # force all localization through SG
         # Payload shape: body_top=0 (default) = lean anchors only; >0 inlines the
         # top-N bodies. Passed to the MCP child the same way as the retrieval mode.
         env["SG_MCP_BODY_TOP"] = str(body_top)
@@ -564,6 +624,14 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         # .mcp.json args, so no per-call slug needed (unlike cbmem).
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
                 "--append-system-prompt", _SERENA_APPEND_SYSTEM]
+        prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+    elif arm == ARM_GITNEXUS:
+        # Competitor MCP server — repo auto-selected from launch cwd (this
+        # subprocess.run call below sets cwd=str(repo)); repo={name} in the
+        # prompt is the explicit fallback (see _GITNEXUS_APPEND_SYSTEM comment).
+        cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
+                "--append-system-prompt",
+                _GITNEXUS_APPEND_SYSTEM.format(name=repo.name)]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     else:
         # An explicit EMPTY config + --strict-mcp-config ⇒ exactly zero MCP
@@ -946,6 +1014,103 @@ def _retrieval_from_serena_transcript(objs: list, gold_files: list,
     }
 
 
+def _gitnexus_extract_files(text: str) -> list:
+    """GitNexus tool results are a JSON object (with trailing '\\n\\n---\\n**Next:**
+    ...' guidance text appended after it — raw_decode grabs just the leading
+    JSON, ignoring that suffix) whose shape varies by tool (query returns
+    `definitions[].filePath`; context/trace/impact nest paths at different
+    depths). Rather than hand-code every tool's schema, recursively walk the
+    whole parsed object and collect any 'filePath'/'file_path' value — robust
+    to the exact nesting confirmed live for `query`, cheap insurance for the
+    others."""
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text.strip())
+    except (json.JSONDecodeError, ValueError):
+        return []
+    files, seen = [], set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k in ("filePath", "file_path"):
+                v = node.get(k)
+                if isinstance(v, str) and v:
+                    p = v.replace("\\", "/")
+                    if p not in seen:
+                        seen.add(p); files.append(p)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for it in node:
+                walk(it)
+
+    walk(obj)
+    return files
+
+
+def _retrieval_from_gitnexus_transcript(objs: list, gold_files: list,
+                                        repo_root: str) -> dict:
+    """Same schema as _retrieval_from_cbmem_transcript, for GitNexus. Search-
+    shaped tools are query/context/trace/impact; rename/cypher/check/
+    detect_changes/route_map/tool_map/shape_check/api_impact/group_* are
+    mutation or structural-audit tools, not localization — excluded, same
+    reasoning as cbmem's get_code_snippet / Serena's get_symbols_overview."""
+    gold = {g.replace("\\", "/") for g in gold_files}
+    pending: dict = {}
+    order = 0
+    calls = []
+    search_tool_names = {"query", "context", "trace", "impact"}
+    for o in objs:
+        typ = o.get("type")
+        content = (o.get("message", {}) or {}).get("content", []) or []
+        if typ == "assistant":
+            for b in content:
+                if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                    continue
+                name = str(b.get("name", ""))
+                if name.rsplit("__", 1)[-1] in search_tool_names:
+                    inp = b.get("input") or {}
+                    query = (inp.get("search_query") or inp.get("name")
+                             or inp.get("target") or inp.get("from") or "")
+                    pending[b.get("id")] = (query, order)
+                    order += 1
+        elif typ == "user":
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tid = b.get("tool_use_id")
+                    if tid not in pending:
+                        continue
+                    query, od = pending.pop(tid)
+                    text = _tool_result_text(b.get("content"))
+                    files = _gitnexus_extract_files(text)
+                    calls.append((od, query, files))
+    calls.sort(key=lambda c: c[0])
+
+    search_calls, seen_gold = [], set()
+    for od, query, files in calls:
+        gih = sorted(gold & set(files))
+        seen_gold |= set(gih)
+        search_calls.append({
+            "turn": od, "query": query, "hits": files, "n_hits": len(files),
+            "gold_in_hits": gih,
+            "precision": round(len(gih) / len(files), 4) if files else 0.0,
+            "cumulative_recall": (round(len(seen_gold) / len(gold), 4)
+                                  if gold else 0.0),
+            "error": False,
+        })
+    first_files = calls[0][2] if calls else []
+    rank = next((i for i, f in enumerate(first_files, 1) if f in gold), 0)
+    n_gold_first = len([f for f in first_files if f in gold])
+    return {
+        "search_calls": search_calls,
+        "first_search_fqns": first_files,
+        "all_search_fqns": [f for _, _, fs in calls for f in fs],
+        "retrieval_hit": bool(gold & set(first_files)),
+        "retrieval_precision": (round(n_gold_first / len(first_files), 4)
+                                if first_files else 0.0),
+        "retrieval_rank": rank,
+    }
+
+
 def _rel(path: str, repo_root: str) -> str:
     """Normalise a tool path to repo-relative forward-slash form."""
     p = str(path).replace("\\", "/").strip()
@@ -1114,6 +1279,8 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         ret = _retrieval_from_cbmem_transcript(run["transcript"], gold_files, str(repo))
     elif arm == ARM_SERENA:
         ret = _retrieval_from_serena_transcript(run["transcript"], gold_files, str(repo))
+    elif arm == ARM_GITNEXUS:
+        ret = _retrieval_from_gitnexus_transcript(run["transcript"], gold_files, str(repo))
     else:
         ret = _retrieval_from_transcript(run["transcript"], gold_files)
     wall = round(time.time() - t0, 1)
@@ -1322,6 +1489,10 @@ def reprocess_retrieval(runs_dir: Path) -> None:
             cwd = next((o.get("cwd") for o in objs
                         if o.get("type") == "system" and o.get("cwd")), "")
             ret = _retrieval_from_serena_transcript(objs, gold, cwd)
+        elif rec.get("arm") == ARM_GITNEXUS:
+            cwd = next((o.get("cwd") for o in objs
+                        if o.get("type") == "system" and o.get("cwd")), "")
+            ret = _retrieval_from_gitnexus_transcript(objs, gold, cwd)
         else:
             ret = _retrieval_from_transcript(objs, gold)
         rec.update({
