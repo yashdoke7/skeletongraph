@@ -82,7 +82,8 @@ def _encode(texts: List[str]):
     m.max_seq_length = min(orig_max, 512)
     try:
         embs = m.encode(
-            texts, batch_size=8, show_progress_bar=False,
+            texts, batch_size=int(os.environ.get("SG_DENSE_BATCH_SIZE", "8")),
+            show_progress_bar=False,
             convert_to_numpy=True, normalize_embeddings=True,
         )
     finally:

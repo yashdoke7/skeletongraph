@@ -94,8 +94,26 @@ competitor MCP server, however good its retrieval, provides no benefit if the ag
 reach for it. SG's edge is not only retrieval quality but the adoption mechanism (a
 PreToolUse gate that routes the agent to structural search first) that makes it actually get
 used. We therefore do not report a cbmem-in-Claude-Code retrieval number — it would measure
-non-adoption, not the tool. _Broader competitor set (Serena, claude-context, CodeGraph) and
-a forced-tool comparison are planned._
+non-adoption, not the tool.
+
+We also wired Serena (oraios/serena, 25k stars, LSP-based) and GitNexus (28k stars,
+knowledge-graph, its own SWE-bench claim) the same way. Both surfaced a different, more
+fundamental problem: **Claude Code's headless (`-p`) mode locks its MCP tool list within
+~2 seconds of launch and never updates it.** Both servers need real bootstrap time — Serena
+spins up a pyright language server, GitNexus loads a Node CLI + its own index — and both
+finished their handshake in ~2.0-2.1s, just past whatever grace window Claude Code allows.
+The result: 0 of either tool was ever called, across 11 Serena tasks and a GitNexus smoke
+test, confirmed via session-init transcripts showing `status: "pending"` and the tool never
+appearing in the model's tool list for the entire run (cross-checked against each server's
+own logs, which show it was fully ready seconds into the session). Serena's pass@1/turns/cost
+on the matched task set came out statistically identical to plain native Claude Code (7/10
+both, ~21 turns both, ~$0.61-0.67/task both) — exactly what you'd expect if it silently had
+zero extra tools the whole time. This isn't a retrieval-quality result for either competitor;
+it's a deployment-mode one: **in real headless/single-shot agent use, fast-connecting servers
+(SG, cbmem) get a chance to be used at all, and LSP- or CLI-bootstrap-heavy ones structurally
+don't**, independent of how good their retrieval is. Their real retrieval quality is measured
+instead on the NIM/nemotron react loop above, where the tool surface is offered directly and
+this startup race doesn't apply.
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
