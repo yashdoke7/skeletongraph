@@ -187,12 +187,72 @@ def stratified_sample(instances: list, n: int, seed: int) -> list:
     return picked[:n]
 
 
+def qualify_fqns(repo_path, gold_files: List[str], gold_fqns: List[str]) -> List[str]:
+    """Rewrite BARE gold FQNs (file.py::method) to QUALIFIED (file.py::Class.method).
+
+    git's hunk header reports the nearest enclosing `def`, so a method inside a
+    class comes out BARE — while SG indexes it QUALIFIED (Class.method). That
+    mismatch makes any exact-match function-level retrieval metric score every
+    class method as a miss (the long-standing bare-vs-qualified gold FQN issue).
+    We already have the checkout here, so resolve the real enclosing class with
+    `ast` rather than guessing from the diff.
+
+    Python only — other languages fall through unchanged (rebench/Verified are
+    Python; Pro's non-Python rows keep their existing behaviour).
+    """
+    import ast as _ast
+    out: List[str] = []
+    cache: dict = {}
+    for fq in gold_fqns:
+        if "::" not in fq:
+            out.append(fq)
+            continue
+        fpath, sym = fq.split("::", 1)
+        # already qualified, or not a language we can parse -> leave alone
+        if "." in sym or not fpath.endswith(".py"):
+            out.append(fq)
+            continue
+        if fpath not in cache:
+            try:
+                cache[fpath] = _ast.parse(
+                    (Path(repo_path) / fpath).read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                cache[fpath] = None
+        tree = cache[fpath]
+        if tree is None:
+            out.append(fq)
+            continue
+        qualified = None
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.ClassDef):
+                continue
+            for child in node.body:
+                if (isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                        and child.name == sym):
+                    qualified = f"{fpath}::{node.name}.{sym}"
+                    break
+            if qualified:
+                break
+        out.append(qualified or fq)   # module-level function -> bare is correct
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Stage 0 dataset builder")
     ap.add_argument("--n", type=int, default=30, help="Number of tasks")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--smoke", action="store_true", help="2-task sanity dataset")
     ap.add_argument("--split", default="princeton-nlp/SWE-bench_Verified")
+    ap.add_argument("--hf-split", default="test",
+                    help="HF split name(s), comma-separated. SWE-bench uses "
+                         "'test'; SWE-rebench-leaderboard ships MONTHLY splits "
+                         "(e.g. '2026_02,2026_03') — pass the months that "
+                         "postdate your model's cutoff to get a genuinely "
+                         "decontaminated set.")
+    ap.add_argument("--since", default="",
+                    help="keep only instances with created_at >= this date "
+                         "(YYYY-MM-DD). Second decontamination guard, independent "
+                         "of which splits you pulled.")
     ap.add_argument("--out", type=Path, default=OUT_PATH)
     args = ap.parse_args()
 
@@ -204,9 +264,27 @@ def main() -> None:
         print("ERROR: pip install datasets")
         sys.exit(1)
 
-    print(f"Loading {args.split} ...")
-    ds = load_dataset(args.split, split="test")
-    instances = [dict(x) for x in ds]
+    hf_splits = [s.strip() for s in args.hf_split.split(",") if s.strip()]
+    print(f"Loading {args.split} (splits: {', '.join(hf_splits)}) ...")
+    instances = []
+    for sp in hf_splits:
+        try:
+            ds = load_dataset(args.split, split=sp)
+        except Exception as e:
+            print(f"  !! split '{sp}' failed: {e}")
+            continue
+        got = [dict(x) for x in ds]
+        print(f"  {sp}: {len(got)} instances")
+        instances.extend(got)
+    if not instances:
+        sys.exit(f"ERROR: no instances loaded from {args.split} "
+                 f"(splits tried: {hf_splits})")
+
+    if args.since:
+        before = len(instances)
+        instances = [i for i in instances
+                     if str(i.get("created_at", ""))[:10] >= args.since]
+        print(f"  --since {args.since}: {len(instances)}/{before} kept")
     print(f"  {len(instances)} instances available")
 
     picked = stratified_sample(instances, n, args.seed)
@@ -229,7 +307,10 @@ def main() -> None:
         if not gold_files:
             print("  skipped (no gold files in patch)")
             continue
-        rows.append({
+        # Resolve bare method names to Class.method against the real checkout,
+        # so gold FQNs match how SG (and the retrieval metrics) name symbols.
+        gold_fqns = qualify_fqns(repo_path, gold_files, gold_fqns)
+        row = {
             "task_id": tid,
             "repo": inst["repo"],
             "base_commit": inst["base_commit"],
@@ -241,7 +322,16 @@ def main() -> None:
             # is Python-only. Captured for the per-language breakdown; "python"
             # default keeps Verified rows uniform.
             "language": (inst.get("repo_language") or "python"),
-        })
+        }
+        # SWE-rebench extras, carried through when present so the row is
+        # self-describing: `created_at` lets a reader confirm the task postdates
+        # a model cutoff without re-querying HF, and `docker_image` names the
+        # prebuilt image the verifier needs (SWE-rebench publishes these under
+        # the `swerebench/` Docker Hub namespace, not `swebench/`).
+        for extra in ("created_at", "docker_image"):
+            if inst.get(extra):
+                row[extra] = str(inst[extra])
+        rows.append(row)
 
     with args.out.open("w", encoding="utf-8") as f:
         for r in rows:

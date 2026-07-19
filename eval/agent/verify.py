@@ -84,8 +84,14 @@ def write_predictions(records: list, out: Path) -> Path:
 
 
 def run_harness(predictions: Path, run_tag: str, dataset: str,
-                cache_level: str = "env", max_workers: int = 4) -> Path:
+                cache_level: str = "env", max_workers: int = 4,
+                namespace: str = "", split: str = "") -> Path:
     """Invoke the official SWE-bench harness. Returns its results JSON path.
+
+    namespace/split are for non-SWE-bench task sets (SWE-rebench): its images
+    live under the `swerebench/` Docker Hub namespace and its instances are in
+    MONTHLY splits (2026_02, ...) rather than a single `test`. Both default to
+    empty = unchanged SWE-bench behaviour.
 
     cache_level controls Docker image RETENTION (disk vs rebuild trade-off):
       instance — keep per-task instance images (max reuse, max disk; best for
@@ -102,6 +108,15 @@ def run_harness(predictions: Path, run_tag: str, dataset: str,
         "--max_workers", str(max_workers),
         "--cache_level", cache_level,
     ]
+    # SWE-rebench publishes its prebuilt images under the `swerebench/` Docker
+    # Hub namespace instead of SWE-bench's default `swebench/`. Without this the
+    # harness derives the default namespace, finds nothing, and tries to BUILD
+    # every image locally (slow, and fails where the env spec assumes the
+    # prebuilt image). Only passed when set, so SWE-bench runs are unchanged.
+    if namespace:
+        cmd += ["--namespace", namespace]
+    if split:
+        cmd += ["--split", split]
     print("  " + " ".join(cmd))
     subprocess.run(cmd, check=True)
     # the harness writes <model_name>.<run_id>.json in CWD.
@@ -155,6 +170,12 @@ def main() -> None:
     ap.add_argument("--run-tag", default=config._RUN_TAG or "sg_eval")
     ap.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
                     help="HF dataset the harness scores against")
+    ap.add_argument("--namespace", default="",
+                    help="Docker Hub namespace for prebuilt images. Leave empty "
+                         "for SWE-bench; use 'swerebench' for SWE-rebench.")
+    ap.add_argument("--hf-split", default="",
+                    help="HF split the harness reads (SWE-rebench uses monthly "
+                         "splits, e.g. '2026_03'). Empty = harness default.")
     ap.add_argument("--cache-level", default="env",
                     choices=["none", "base", "env", "instance"],
                     help="Docker image retention. Use 'instance' to KEEP per-task "
@@ -205,7 +226,7 @@ def main() -> None:
         tag = f"{args.run_tag}_{arm}"
         print(f"[{arm}] {len(nonempty)} non-empty predictions -> {preds}")
         results = run_harness(preds, tag, args.dataset, args.cache_level,
-                              args.max_workers)
+                              args.max_workers, args.namespace, args.hf_split)
         resolved = _resolved_task_ids(results)
         apply_results(nonempty, resolved)
         n_ok = sum(1 for r in nonempty if r.get("resolved"))

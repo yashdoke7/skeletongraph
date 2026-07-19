@@ -59,26 +59,38 @@ CLAUDE = shutil.which("claude") or "claude"
 
 ARM_SG = "sg-rerank"     # MCP server pinned to SG_MCP_RETRIEVAL=rerank (BM25+structural, no dense)
 ARM_FUSION = "sg-fusion"  # MCP server pinned to SG_MCP_RETRIEVAL=fusion (3-way RRF incl. dense)
-# sg-fusion-v3: IDENTICAL config to sg-fusion (same retrieval mode, same prompt,
-# same body_top=0) — the only difference is the underlying product code
-# (engine.py::_expand_function, fixed 2026-07) now renders per-line line numbers
-# in sg_expand's function body, matching _expand_range's existing format. Fixes
-# the measured cause of 81% of fusion's redundant Read calls (the agent had no
-# line numbers to build an Edit from and re-Read the file just to get them).
-# Distinct arm name (not a reused "sg-fusion-v2" — that name already means the
-# DIFFERENT, discarded body_top=1+disallow_grep deterrent variant, see
-# project_sg_unification memory) purely so pre-fix (existing sg-fusion results)
-# and post-fix runs land in separate files under the same tag, not commingled.
-# See project_fusion_cost_diagnosis memory for the full measurement + rationale.
-ARM_FUSION_V3 = "sg-fusion-v3"
+# sg-fusion-v3 and sg-fusion-v4 (line-numbered expand; +context-envelope/verify-
+# prompt) were tried and REJECTED — v3 cost 5 solves at n=44 (agent skipped its
+# own verify loop once line numbers removed the need to re-Read), v4 made it
+# worse (0/4, +90% tokens — a forced verify prompt drove test-thrash and edit
+# scope creep). Net finding: v1's behavior is a local optimum; every lever we
+# tried (restrict exploration in fusion-v2, remove re-read need in v3, force
+# verification in v4) regressed pass@1. Arms removed from ARMS/_SG_ARMS so they
+# can't be accidentally re-run; their result JSONs stay on disk as the
+# experimental record (eval/results/agent/claude_v7/*__sg-fusion-v3/v4__*.json).
+# Full mechanism + transcripts in the project_fusion_cost_diagnosis memory.
+# sg-locator: the final planned ablation, run as a genuine product-mode test,
+# not a hopeful product bet (0-for-3 so far: fusion-v2/v3/v4 all regressed —
+# see project_fusion_cost_diagnosis memory). ONE variable vs sg-fusion: the MCP
+# handshake exposes ONLY sg_search (SG_MCP_LOCATOR_ONLY=1 on the server, see
+# mcp.py) — sg_expand/sg_get/sg_overview/etc. are absent, not just discouraged.
+# sg_search still always returns file:line-range for every match (unchanged),
+# so the agent has exact coordinates for its OWN native Read; bodies are never
+# inlined regardless of body_top. Deliberately does NOT forbid re-Read/grep and
+# does NOT force verification — v3/v4 already proved that rigidity costs solves.
+# Answers project_headline_finding's open question either way: cheaper median
+# = found a real product lever; not cheaper = proves body delivery earns its
+# keep (kills the "just return pointers" competitor argument) — and possibly
+# cuts the ToolSearch deferred-tool tax as a side effect of the smaller surface.
+ARM_LOCATOR = "sg-locator"
 ARM_CBMEM = "cbmem"      # competitor: Codebase-Memory MCP server (tree-sitter knowledge graph)
 ARM_SERENA = "serena"    # competitor: Serena MCP server (LSP-based symbol navigation, 25k stars)
 ARM_GITNEXUS = "gitnexus"  # competitor: GitNexus MCP server (knowledge graph, own SWE-bench claim)
 ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
-ARMS = (ARM_SG, ARM_FUSION, ARM_FUSION_V3, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE)
+ARMS = (ARM_SG, ARM_FUSION, ARM_LOCATOR, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE)
 # SG's own MCP-server family (all launch `sg serve`, differ only in retrieval mode).
 # cbmem is a competitor MCP server; native has no MCP. Used to branch prepare/run.
-_SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_FUSION_V3})
+_SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_LOCATOR})
 
 # Every non-native arm launches the same MCP server binary — what actually
 # differs is which retrieval algorithm it serves. The server defaults to
@@ -88,7 +100,9 @@ _SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_FUSION_V3})
 # once already: every claude-code "sg-rerank" run after the fusion port
 # landed was actually measuring fusion. Pin it here so the arm label is a
 # guarantee, not a hope.
-_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion", ARM_FUSION_V3: "fusion"}
+# sg-locator uses the SAME retrieval algorithm as sg-fusion — the ablation's
+# only variable is body delivery (tool surface), not the ranking algorithm.
+_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion", ARM_LOCATOR: "fusion"}
 
 # SG artifacts + standard caches kept OUT of the agent's patch. Written to the
 # copy's .gitignore BEFORE the baseline commit, so `git add -A` never stages
@@ -126,6 +140,22 @@ _SG_APPEND_SYSTEM = (
     "architecture or cross-cutting work); skip it for a focused bug fix. Use native "
     "Grep/Read only for what SG did not return (e.g. finding where to insert NEW "
     "code)."
+)
+
+# sg-locator: deliberately short, and deliberately does NOT forbid re-Read/grep
+# or mandate any verification step — v3/v4 already showed that constraining the
+# agent's own judgment costs solves (see project_fusion_cost_diagnosis memory).
+# This mode's only lever is what the TOOL SURFACE offers (sg_expand/sg_get are
+# literally absent from the MCP handshake — see SG_MCP_LOCATOR_ONLY in mcp.py),
+# so the prompt just needs to explain the one tool that exists, like it would
+# for a smarter grep.
+_SG_APPEND_SYSTEM_LOCATOR = (
+    "SkeletonGraph (SG) is wired in as an MCP server for this repo, in LOCATOR "
+    "mode — sg_search is the only SG tool available. Call it to locate the edit "
+    "target; it returns file:line-range anchors (never full bodies). Use your "
+    "native Read tool at that exact range to view and edit the code, exactly as "
+    "you would after a grep hit. Use native Grep/Read/Bash freely for anything "
+    "sg_search does not cover."
 )
 
 # ── cbmem competitor arm: Codebase-Memory as a real Claude Code MCP server ────
@@ -602,8 +632,9 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
     ]
     env = dict(os.environ)
     if arm in _SG_ARMS:
+        append_sys = _SG_APPEND_SYSTEM_LOCATOR if arm == ARM_LOCATOR else _SG_APPEND_SYSTEM
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
-                "--append-system-prompt", _SG_APPEND_SYSTEM]
+                "--append-system-prompt", append_sys]
         prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
         # Claude Code spawns the MCP server (`sg serve`) as a child process
         # inheriting this env, which is where `sg serve` reads it from.
@@ -611,6 +642,10 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         # Payload shape: body_top=0 (default) = lean anchors only; >0 inlines the
         # top-N bodies. Passed to the MCP child the same way as the retrieval mode.
         env["SG_MCP_BODY_TOP"] = str(body_top)
+        # sg-locator only: shrinks the MCP tool surface to sg_search alone (see
+        # mcp.py's tools/list handler) — this is the ablation's actual variable.
+        if arm == ARM_LOCATOR:
+            env["SG_MCP_LOCATOR_ONLY"] = "1"
     elif arm == ARM_CBMEM:
         # Competitor MCP server. Pin the real project slug into the prompt (every
         # cbmem tool needs it) + neutral user prompt (tool guidance is in the
