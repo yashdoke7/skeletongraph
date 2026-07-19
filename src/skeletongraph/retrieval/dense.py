@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from pathlib import Path
 from typing import List, Tuple
 
@@ -32,17 +33,58 @@ def _model_name() -> str:
 
 
 _MODELS: dict = {}   # name -> lazily-loaded SentenceTransformer
+_MODEL_LOCK = threading.Lock()   # guards _MODELS against a double-load race
+                                 # between prewarm()'s thread and a real query
 
 
 def _model():
     name = _model_name()
-    if name not in _MODELS:
-        from sentence_transformers import SentenceTransformer
-        try:
-            _MODELS[name] = SentenceTransformer(name, trust_remote_code=True)
-        except TypeError:
-            _MODELS[name] = SentenceTransformer(name)
+    # Double-checked locking: the fast path (already loaded) stays lock-free,
+    # but two threads racing on a cold cache must not both build the model —
+    # loading jina-v2-base twice costs ~25s AND doubles resident memory.
+    if name in _MODELS:
+        return _MODELS[name]
+    with _MODEL_LOCK:
+        if name not in _MODELS:
+            from sentence_transformers import SentenceTransformer
+            try:
+                _MODELS[name] = SentenceTransformer(name, trust_remote_code=True)
+            except TypeError:
+                _MODELS[name] = SentenceTransformer(name)
     return _MODELS[name]
+
+
+def prewarm(background: bool = True):
+    """Start loading the embedding model NOW instead of on the first query.
+
+    Measured: the first dense query costs ~24.7s (model load) vs ~0.4s warm.
+    An MCP server that loads lazily pays that 24.7s inside the agent's first
+    sg_search, where the user feels it. But an agent typically spends 5-15s
+    reading the prompt and planning before it ever searches — so loading in a
+    background thread at server startup hides most or all of the cost.
+
+    Safe to call more than once (the lock + dict make it idempotent) and safe
+    to call when dense is never used — it just wastes a background thread.
+    Returns the Thread when background=True (mostly for tests), else None.
+    """
+    if _model_name() in _MODELS:
+        return None
+    if not background:
+        _model()
+        return None
+
+    def _warm():
+        try:
+            _model()
+        except Exception:
+            # Never let a prewarm failure surface: the real query path will hit
+            # the same error and report it in context, and a server must not die
+            # in a daemon thread over an optional optimization.
+            pass
+
+    t = threading.Thread(target=_warm, name="sg-dense-prewarm", daemon=True)
+    t.start()
+    return t
 
 
 # Truncate BEFORE the tokenizer to avoid attention-matrix OOM on huge functions.

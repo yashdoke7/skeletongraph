@@ -404,7 +404,32 @@ class MCPServer:
             if method == "initialize":
                 result = self._handle_initialize(params)
             elif method == "tools/list":
-                result = {"tools": _TOOL_SCHEMAS}
+                # LOCATOR-ONLY mode (SG_MCP_LOCATOR_ONLY=1): expose ONLY sg_search.
+                # This is a real tool-SURFACE reduction, not a prompt nudge — the
+                # other 6 tools are not just discouraged, they are absent from the
+                # MCP handshake, so the agent cannot call sg_expand even if it
+                # wants to and must fetch bodies with its own native Read at the
+                # file:line-range sg_search already always includes. Ablation
+                # question: does removing the body-delivery path change cost, or
+                # does the agent just relocate the same tokens into more Read
+                # calls (see project_headline_finding memory)? Bonus: fewer
+                # registered MCP tools may also reduce the ToolSearch
+                # deferred-tool tax observed with the full 7-tool surface.
+                if os.environ.get("SG_MCP_LOCATOR_ONLY", "0") == "1":
+                    tool = dict(next(t for t in _TOOL_SCHEMAS if t["name"] == "sg_search"))
+                    # The static description still says "call sg_expand" — that
+                    # tool does not exist in this handshake, so override the
+                    # advertised text rather than ship a misleading affordance.
+                    tool["description"] = (
+                        tool["description"].split("Only call sg_expand")[0].rstrip()
+                        + "\n\nLOCATOR MODE: this is the only SG tool available. "
+                          "Results never include function bodies — every match "
+                          "gives file:line-range; use your native Read tool at "
+                          "that exact range to view and edit the code."
+                    )
+                    result = {"tools": [tool]}
+                else:
+                    result = {"tools": _TOOL_SCHEMAS}
             elif method == "tools/call":
                 result = self._handle_tool_call(params)
             elif method == "notifications/initialized":
@@ -430,6 +455,18 @@ class MCPServer:
     def _handle_tool_call(self, params: Dict) -> Dict:
         name = params.get("name", "")
         args = params.get("arguments", {})
+
+        # LOCATOR-ONLY: tools/list already hides everything but sg_search, but
+        # hiding a tool from the handshake does not stop a DISPATCH to it — any
+        # client that caches an older tool list, or calls tools/call directly,
+        # would otherwise still get a real body back out of sg_expand/sg_get and
+        # silently invalidate the ablation (its entire premise is "no body-
+        # delivery path exists"). Enforce it here too, not just in the listing.
+        if (os.environ.get("SG_MCP_LOCATOR_ONLY", "0") == "1" and name != "sg_search"):
+            return {"content": [{"type": "text", "text":
+                f"{name} is not available in SG locator mode. Use sg_search for "
+                "the file:line-range, then your native Read tool to view it."}],
+                "isError": True}
 
         handlers = {
             "sg_overview": self._tool_overview,
@@ -636,6 +673,14 @@ class MCPServer:
         except (TypeError, ValueError):
             body_top = 0
         body_top = min(max(body_top, 0), 3)
+        # LOCATOR-ONLY: body_top is forced to 0 regardless of the arg/env value —
+        # this mode's whole contract is "anchors only, no bodies, ever." Since
+        # sg_expand/sg_get are also absent from tools/list in this mode (see
+        # handle()), this is belt-and-braces: even a caller that still passes
+        # body_top>0 (e.g. a stale client cache) cannot get a body out of it.
+        locator_only = os.environ.get("SG_MCP_LOCATOR_ONLY", "0") == "1"
+        if locator_only:
+            body_top = 0
 
         if not query:
             return "Error: query is required"
@@ -726,8 +771,12 @@ class MCPServer:
 
         # ── Graph matches ────────────────────────────────────────────────
         if candidates:
-            body_note = (f"Bodies inline for top {body_top}" if body_top
-                         else "Anchors only — sg_expand or Read the target to edit")
+            if locator_only:
+                body_note = "Anchors only (locator mode) — Read the target file at the given line range to edit"
+            elif body_top:
+                body_note = f"Bodies inline for top {body_top}"
+            else:
+                body_note = "Anchors only — sg_expand or Read the target to edit"
             lines.append(
                 f"Confidence: {confidence}  |  Graph: {graph_arg or 'auto'}  "
                 f"|  Matches: {len(candidates)}  |  {body_note}")
@@ -908,11 +957,17 @@ class MCPServer:
                          "Proceed to edit. Do NOT call sg_search again unless this "
                          "result is missing a specific file you need.\n")
 
-        lines.append("_Each match above gives the exact file:line range. To read a "
-                     "body, call sg_expand(target=\"<fqn>\") — batch several comma-"
-                     "separated in one call. Do NOT grep/read_file for anything "
-                     "already listed here; when you edit, Read only the one file you "
-                     "change (ignore any content.txt spill — it duplicates this)._")
+        if os.environ.get("SG_MCP_LOCATOR_ONLY", "0") == "1":
+            lines.append("_Each match above gives the exact file:line range. Use your "
+                         "native Read tool at that range to view the body — sg_expand "
+                         "is not available in locator mode. Do NOT grep/read_file for "
+                         "anything already listed here._")
+        else:
+            lines.append("_Each match above gives the exact file:line range. To read a "
+                         "body, call sg_expand(target=\"<fqn>\") — batch several comma-"
+                         "separated in one call. Do NOT grep/read_file for anything "
+                         "already listed here; when you edit, Read only the one file you "
+                         "change (ignore any content.txt spill — it duplicates this)._")
         return "\n".join(lines)
 
     def _module_constants(self, candidates: List, store, max_chars: int = 700) -> str:
@@ -964,10 +1019,12 @@ class MCPServer:
             if self._should_include_body(query, c.skeleton, i)
         ] or candidates[:1]
 
+        locator_hint = ("Read the target at its line range for the body."
+                        if os.environ.get("SG_MCP_LOCATOR_ONLY", "0") == "1"
+                        else "sg_expand a target for its body.")
         lines = [
             "## SG quick map",
-            "Exact anchors — use these instead of native grep/read; sg_expand a "
-            "target for its body.",
+            f"Exact anchors — use these instead of native grep/read; {locator_hint}",
         ]
         for c in edit_candidates[:3]:
             sk = c.skeleton
@@ -2118,6 +2175,21 @@ def serve(project_root: Path, config: Optional[SGConfig] = None) -> None:
         # Must match _tool_search's default exactly, or the wrong cache warms.
         mode = os.environ.get("SG_MCP_RETRIEVAL", "fusion").strip().lower()
         if mode in ("fusion", "rerank"):
+            if mode == "fusion":
+                # Load the embedding MODEL first, with NO timeout. We are already
+                # inside a daemon thread, so a slow load cannot wedge startup or
+                # the stdio handshake. This must NOT go through warm()'s bounded
+                # path: _DENSE_TIMEOUT_S defaults to 20s but a cold
+                # jina-v2-base-code load measured ~24.7s, so the bounded attempt
+                # ALWAYS timed out and left the model cold for the agent's first
+                # sg_search — which then paid the full ~25s mid-task (measured as
+                # ~+40s/task wall-clock vs native in the Claude Code eval).
+                try:
+                    from ..retrieval.dense import prewarm as dense_prewarm
+                    dense_prewarm(background=False)
+                except Exception:
+                    logger.warning("dense model prewarm failed — falling back to lazy load",
+                                   exc_info=True)
             try:
                 from ..retrieval import warm as warm_retrieval
                 # full_dense=False: this background thread must never spend minutes
