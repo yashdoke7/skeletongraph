@@ -83,6 +83,35 @@ def write_predictions(records: list, out: Path) -> Path:
     return out
 
 
+def _materialize_multi_split_dataset(dataset: str, split: str, run_tag: str) -> str:
+    """Pre-fetch every comma-separated HF split and merge into one local jsonl.
+
+    The harness's own `load_swebench_dataset` calls `datasets.load_dataset(name,
+    split=split)` with a SINGLE split string — it has no concept of "this task
+    set spans several monthly splits." SWE-rebench tasks sampled across months
+    (make_dataset.py DOES support comma-joined --hf-split at build time, so a
+    100-task pull routinely spans 3-5 months) will silently miss any instance
+    whose month isn't the one split passed to verify, and the harness raises
+    "Some instance IDs not found in dataset!" for those — the exact error this
+    replaces. Fix: when more than one split is given, resolve them ourselves via
+    the `datasets` library and hand the harness a local .jsonl instead (its
+    loader special-cases local .jsonl paths and skips split logic entirely).
+    """
+    from datasets import load_dataset
+    splits = [s.strip() for s in split.split(",") if s.strip()]
+    out_path = config.RUNS_DIR / f"_hf_dataset_{run_tag}.jsonl"
+    with open(out_path, "w", encoding="utf-8") as f:
+        total = 0
+        for sp in splits:
+            ds = load_dataset(dataset, split=sp)
+            for row in ds:
+                f.write(json.dumps(dict(row)) + "\n")
+                total += 1
+    print(f"  merged {len(splits)} splits ({', '.join(splits)}) -> "
+          f"{total} instances -> {out_path}")
+    return str(out_path)
+
+
 def run_harness(predictions: Path, run_tag: str, dataset: str,
                 cache_level: str = "env", max_workers: int = 4,
                 namespace: str = "", split: str = "") -> Path:
@@ -100,9 +129,16 @@ def run_harness(predictions: Path, run_tag: str, dataset: str,
                  (bounded disk; rebuilds instance on demand — may re-clone)
       base/none— minimal disk, rebuilds more (online only).
     """
+    dataset_arg = dataset
+    # A comma means the task set spans multiple monthly HF splits (SWE-rebench)
+    # — resolve to a local merged file so the harness sees every instance.
+    if split and "," in split:
+        dataset_arg = _materialize_multi_split_dataset(dataset, split, run_tag)
+        split = ""  # local .jsonl path: the harness's --split arg is ignored/unused
+
     cmd = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
-        "--dataset_name", dataset,
+        "--dataset_name", dataset_arg,
         "--predictions_path", str(predictions),
         "--run_id", run_tag,
         "--max_workers", str(max_workers),
@@ -175,7 +211,11 @@ def main() -> None:
                          "for SWE-bench; use 'swerebench' for SWE-rebench.")
     ap.add_argument("--hf-split", default="",
                     help="HF split the harness reads (SWE-rebench uses monthly "
-                         "splits, e.g. '2026_03'). Empty = harness default.")
+                         "splits, e.g. '2026_03'). Comma-separate several "
+                         "months (e.g. '2026_02,2026_03,2026_04,2026_05') if "
+                         "your sampled task set spans them — verify.py merges "
+                         "them into a local dataset so no instance is missed. "
+                         "Empty = harness default.")
     ap.add_argument("--cache-level", default="env",
                     choices=["none", "base", "env", "instance"],
                     help="Docker image retention. Use 'instance' to KEEP per-task "

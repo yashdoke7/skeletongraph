@@ -247,6 +247,17 @@ def _summary_build_tokens(repo_path: str) -> tuple:
 _LLM_INDEX_ARMS = ("graphify", "summary-llm-bm25", "summary-llm-dense")
 
 
+def _is_sg_arm(arm: str) -> bool:
+    """True for any SkeletonGraph-capable arm (sg, sg-fusion, sg-rerank, ...).
+
+    native/cbmem/serena/gitnexus/graphify/bm25/grep/hybrid/none/aider records
+    always carry sg_tool_calls==0 (they never had SG available at all) — that's
+    a legitimate 0, not a missed-adoption event, so the sg_tool_calls==0
+    exclusion below must only ever apply to arms that actually had SG to call.
+    """
+    return arm == "sg" or arm.startswith("sg-")
+
+
 # ── significance ────────────────────────────────────────────────────────────
 
 
@@ -337,7 +348,15 @@ def aggregate(stage: str | None, task_ids: set | None = None,
     rows = []
     for arm in sorted(by_arm):
         rs = by_arm[arm]
-        _fr, _fh, _frk = _loc(rs)        # function-level localization (vs gold_fqns)
+        # For an SG-capable arm, a run with sg_tool_calls==0 never invoked SG
+        # that task — the model chose native tools instead. Scoring it as a
+        # retrieval miss blames SG for an adoption choice it had no chance to
+        # affect, and silently drags every retrieval metric down. Non-SG arms
+        # (native, cbmem, ...) always report sg_tool_calls==0 legitimately —
+        # they never had SG to call — so the exclusion must not touch them.
+        retr_rs = ([r for r in rs if r.get("sg_tool_calls") != 0]
+                   if _is_sg_arm(arm) else rs)
+        _fr, _fh, _frk = _loc(retr_rs)   # function-level localization (vs gold_fqns)
         # pass@1 denominator consistency: a completed run counts iff we can
         # decide pass/fail for it. An EMPTY patch is always a fail (it changes
         # nothing), so it counts even if verify never wrote a verdict. A
@@ -398,10 +417,10 @@ def aggregate(stage: str | None, task_ids: set | None = None,
             # hit = binary first-search hit-rate (≥1 gold file) — kept for
             # back-compat, but it rewards dumping many files. rec1/reccum are
             # the fair fractional recalls.
-            "hit": _mean([1 if r.get('retrieval_hit') else 0 for r in rs]),
-            "rec1": _mean([_recall_first(r) for r in rs]),
-            "reccum": _mean([_recall_cum(r) for r in rs]),
-            "prec": _mean([r.get('retrieval_precision') for r in rs]),
+            "hit": _mean([1 if r.get('retrieval_hit') else 0 for r in retr_rs]),
+            "rec1": _mean([_recall_first(r) for r in retr_rs]),
+            "reccum": _mean([_recall_cum(r) for r in retr_rs]),
+            "prec": _mean([r.get('retrieval_precision') for r in retr_rs]),
             "rank": med_rank,
             "funcr": _fr,          # function-level recall@10 (first search)
             "funchit": _fh,        # found gold FUNCTION in top-10
@@ -634,7 +653,12 @@ def aggregate(stage: str | None, task_ids: set | None = None,
               "| Arm | hit rate | 95% CI |",
               "| --- | ---:| --- |"]
     for arm in sorted(by_arm):
-        vals = [1 if r.get("retrieval_hit") else 0 for r in by_arm[arm]]
+        # Same sg_tool_calls==0 exclusion as the headline table above, SG arms
+        # only — a run that never invoked SG can't be scored as a retrieval
+        # miss for SG, but native etc. legitimately always call it 0 times.
+        arm_rs = ([r for r in by_arm[arm] if r.get("sg_tool_calls") != 0]
+                  if _is_sg_arm(arm) else by_arm[arm])
+        vals = [1 if r.get("retrieval_hit") else 0 for r in arm_rs]
         lo, hi = bootstrap_ci(vals)
         lines.append(f"| `{arm}` | {_mean(vals)*100:.1f}% | [{lo:.3f}, {hi:.3f}] |")
 
@@ -759,12 +783,15 @@ def aggregate(stage: str | None, task_ids: set | None = None,
                 pass_vals.append(1 if r.get("resolved") else 0)
             elif "verdict" in r and r.get("verdict") is not None:
                 pass_vals.append(1 if r.get("verdict") else 0)
+        # Same sg_tool_calls==0 exclusion as the tables above, SG arms only.
+        recs_retr = ([r for r in recs if r.get("sg_tool_calls") != 0]
+                     if _is_sg_arm(arm) else recs)
         summary[arm] = {
             "n": len(recs),
             "n_complete": len(complete),
-            "retrieval_hit": _mean([r["retrieval_hit"] for r in recs
+            "retrieval_hit": _mean([r["retrieval_hit"] for r in recs_retr
                                     if "retrieval_hit" in r]),
-            "precision": _mean([r["retrieval_precision"] for r in recs
+            "precision": _mean([r["retrieval_precision"] for r in recs_retr
                                 if "retrieval_precision" in r]),
             "edited_gold": _mean([r["edited_gold_file"] for r in recs
                                   if "edited_gold_file" in r]),

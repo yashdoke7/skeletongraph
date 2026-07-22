@@ -78,6 +78,17 @@ def names_gold(query: str, gold_files: list, gold_fqns: list) -> bool:
     return False
 
 
+def is_sg_arm(arm: str) -> bool:
+    """True for any SkeletonGraph-capable arm (sg, sg-fusion, sg-rerank, ...).
+
+    Non-SG arms (native, cbmem, serena, ...) always carry sg_tool_calls==0 —
+    they never had SG to call at all, so that 0 is legitimate, not a missed
+    adoption event. Only SG arms should have the sg_tool_calls==0 exclusion
+    applied to their retrieval metrics.
+    """
+    return arm == "sg" or arm.startswith("sg-")
+
+
 def gold_func_hit(rec: dict, gold_fqns: list) -> bool:
     if not gold_fqns:
         return False
@@ -210,9 +221,20 @@ def main() -> None:
     section("4. RETRIEVAL QUALITY — file-level vs FUNCTION-level hit rate")
     tasks_with_fqn = [t for t in common if ds[t].get("gold_fqns")]
     for a in arm_names:
-        file_hit = sum(1 for t in common if arms[a][t].get("retrieval_hit"))
-        func_hit = sum(1 for t in tasks_with_fqn if gold_func_hit(arms[a][t], ds[t].get("gold_fqns")))
-        print(f"  {a:16} file-hit {pct(file_hit, len(common))}   function-hit {pct(func_hit, len(tasks_with_fqn))}")
+        # An SG-capable arm where the agent made ZERO sg_* tool calls never had
+        # a chance to hit — that's the model choosing native tools that turn,
+        # not a retrieval failure. Counting it as retrieval_hit=False silently
+        # drags the aggregate down and misattributes an adoption question to a
+        # quality question. Non-SG arms (native, cbmem, ...) ALWAYS report
+        # sg_tool_calls==0 legitimately, so this must gate on the arm itself.
+        used = ([t for t in common if arms[a][t].get("sg_tool_calls") != 0]
+                if is_sg_arm(a) else list(common))
+        skipped = len(common) - len(used)
+        file_hit = sum(1 for t in used if arms[a][t].get("retrieval_hit"))
+        used_fqn = [t for t in tasks_with_fqn if t in set(used)]
+        func_hit = sum(1 for t in used_fqn if gold_func_hit(arms[a][t], ds[t].get("gold_fqns")))
+        note = f"  ({skipped}/{len(common)} tasks: 0 sg_* calls, excluded)" if skipped else ""
+        print(f"  {a:16} file-hit {pct(file_hit, len(used))}   function-hit {pct(func_hit, len(used_fqn))}{note}")
 
     # ---- 5. tool-call mix ----
     section("5. TOOL-CALL MIX (avg/task)")

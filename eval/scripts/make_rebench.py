@@ -123,7 +123,11 @@ def main() -> None:
     print(f'  python -m eval.agent.run_stage --stage v --only-arms fusion bm25 grep none hybrid --dataset {args.out} --limit {args.n}')
     print("\nVerify (WSL+Docker) — namespace matters, images are not under swebench/:")
     print(f'  python -m eval.agent.verify --all --run-tag <tag> \\\n'
-          f'      --dataset {DATASET} --namespace swerebench --hf-split {args.splits.split(",")[-1]}')
+          f'      --dataset {DATASET} --namespace swerebench --hf-split {args.splits}')
+    print("  (pass ALL the splits you built with, comma-separated — sampled "
+          "tasks can span more months than --splits alone if --since widened "
+          "the pool; verify.py merges every listed split so no instance is "
+          "reported missing)")
 
 
 if __name__ == "__main__":

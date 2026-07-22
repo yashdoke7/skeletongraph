@@ -1595,8 +1595,8 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=1,
                     help="concurrent claude processes IN THIS terminal (default 1; "
                          "raise only if you want one terminal to drive several)")
-    ap.add_argument("--timeout", type=int, default=1200,
-                    help="seconds per task before killing claude (default 1200)")
+    ap.add_argument("--timeout", type=int, default=2400,
+                    help="seconds per task before killing claude (default 2400)")
     ap.add_argument("--force", action="store_true", help="re-run completed tasks")
     ap.add_argument("--rebuild", action="store_true",
                     help="wipe + rebuild each editable copy (re-copy, re-index)")
