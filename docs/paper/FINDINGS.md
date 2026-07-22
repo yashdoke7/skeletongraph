@@ -1,0 +1,259 @@
+# SkeletonGraph — Verified Findings Ledger
+
+Every number here was recomputed from the run JSONs on 2026-07-22. This is the
+backup-of-record: if the paper and this file disagree, **this file is right**.
+
+Conventions:
+- "cost" = `imputed_cost` (uncached, uniform pricing across arms — the fair unit).
+- "rec@1" = fractional FILE recall after the FIRST search (`search_calls[0].cumulative_recall`),
+  averaged over tasks. NOT hit-rate. On multi-file tasks recall is stricter.
+- All arm-vs-arm deltas are PAIRED on the arms' common `task_id` set.
+- pass@1 counts a run only when it carries a real (non-null) `resolved` verdict;
+  an empty patch counts as a fail.
+
+---
+
+## 0. The headline, in one paragraph
+
+Structural retrieval's advantage is **entity-anchored**: it depends on the issue
+text naming a symbol that exists in the repo. Strip those cues and SkeletonGraph's
+retrieval edge collapses to zero — yet its **cost advantage persists**. In the
+prose-stripped SWE-Verified condition SG's first-search recall is statistically
+indistinguishable from lexical grep (−0.006) while still costing **21% less**.
+Retrieval quality is therefore *not* the mechanism behind the cost saving; bounding
+the agent's exploration is. Combining all three non-LLM retrieval paradigms at once
+(lexical BM25 + semantic dense + topological graph = `sg-fusion`) does not escape
+this ceiling.
+
+---
+
+## 1. THE 2×2 GRID — memorization × location-cues (Claude Sonnet, Claude Code harness)
+
+All four cells are **paired** (same tasks, both arms). The SWE rows are restricted
+to the **same 15 task_ids** as the prose run so raw-vs-prose is a fair comparison.
+
+| Condition | n | cost Δ | turns Δ | rec@1 native→SG | pass@1 native / SG |
+|---|---|---|---|---|---|
+| SWE-Verified raw (**all 100**) | 100 | **−14.6%** | −21.4% | 0.663 → 0.836 (**+0.173**) | 74/100 / 75/100 |
+| SWE-Verified raw (the 15 prose tasks) | 15 | −32.2% | −38.5% | 0.661 → 0.861 (+0.200) | 11/15 / 12/15 |
+| SWE-Verified **PROSE** (same 15) | 15 | **−21.1%** | −22.6% | 0.717 → 0.711 (**−0.006**) | 11/15 / 11/15 |
+| SWE-rebench raw (unseen repos) | 15 | **−26.4%** | −35.6% | 0.500 → 0.639 (+0.139) | 10/15 / 9/15 |
+| SWE-rebench **PROSE** (same 15) | 15 | **−31.3%** | −29.3% | 0.394 → 0.439 (+0.044) | 6/14 / 7/15 |
+
+### 1a. SAMPLING CAVEAT — do not skip this
+The 15-task prose subset is **not representative** of the full 100: SG saves
+**−32.2%** on those 15 but only **−14.6%** across all 100. Any raw-vs-prose claim
+MUST use the matched 15-task rows. Comparing the n=100 figure against an n=15
+figure produces a spurious "the effect grows" conclusion. (This error was made and
+corrected during analysis; it is the single easiest mistake to re-make here.)
+
+### 1b. What the grid actually shows
+- **Retrieval edge collapses under prose, in both benchmarks.**
+  Memorized: +0.200 → −0.006. Unseen: +0.139 → +0.044.
+- **Cost advantage persists in every cell** (−21% to −31%), including the cell where
+  retrieval is *identical* to the baseline. → the decoupling.
+- **Direction of the prose effect on cost differs by benchmark**: on memorized SWE it
+  *shrinks* the advantage (−32.2% → −21.1%); on unseen rebench it *grows* it
+  (−26.4% → −31.3%). Do NOT claim a monotone trend.
+- **pass@1 is a tie or ±1 in every cell.** Never significant. Do not lead with it.
+
+### 1c. The L3 ceiling — the proof
+`sg-fusion` is all three non-LLM paradigms simultaneously (BM25 lexical + jina
+dense semantic + graph topological). Its first-search recall as cues are removed
+and repos become unfamiliar:
+
+```
+sg-fusion rec@1:   0.861  →  0.711  →  0.639  →  0.439      (−49%)
+native    rec@1:   0.661  →  0.717  →  0.500  →  0.394      (−40%)
+          (SWE raw) (SWE prose) (reb raw) (reb prose)
+```
+If **any** of the three paradigms could reason from symptom to root cause, recall
+would hold when the symbols disappear. It does not — and the lexical baseline falls
+with it, so this is a property of the whole non-LLM category, not an SG defect.
+
+---
+
+## 2. NEMOTRON REACT-LOOP (nemotron_v4, n=100, verified) — the controlled ablation
+
+Identical action space across arms; only the retrieval backend varies.
+
+| arm | n | pass@1 | rec@1 | funcHit | tokens | turns | cost |
+|---|---|---|---|---|---|---|---|
+| **fusion (SG)** | 100 | **42.0%** | 0.737 | **57%** | 180,070 | 21.9 | **$0.0523** |
+| bm25 | 100 | 41.0% | 0.642 | 43% | 263,922 | 24.6 | $0.0744 |
+| graphify (competitor) | 100 | 41.0% | 0.223 | 9% | 274,764 | 25.6 | $0.0776 |
+| grep | 100 | 39.0% | 0.647 | 0% | 281,793 | 22.4 | $0.0793 |
+| aider (competitor) | 98 | 36.7% | — | — | 1,125,908 | 18.1 | $0.1603 |
+| **none (closed-book)** | 100 | **35.0%** | 0.000 | 0% | 344,642 | 23.6 | $0.0661 |
+| sg-rerank | 99 | 32.3% | **0.747** | 57% | 274,138 | 23.2 | $0.0553 |
+| sg-chain *(incomplete)* | 13 | 23.1% | 0.769 | 69% | 226,719 | 23.9 | $0.0478 |
+| sg *(incomplete)* | 15 | 20.0% | 0.489 | 33% | 332,553 | 28.5 | $0.0633 |
+
+**Why this table matters:** on a model that memorizes *less* than Sonnet, the
+closed-book floor is **35.0%** and `fusion` reaches **42.0%** — a real +7pp
+retrieval effect, and it is simultaneously the **cheapest** arm ($0.0523 vs grep
+$0.0793) with the **best function-level localization** (57% vs grep's 0%). This is
+the cleanest "retrieval helps" evidence in the project, and it complements (does not
+duplicate) the Claude deployment study.
+
+**Inversion worth reporting:** `sg-rerank` has the *highest* rec@1 (0.747) and the
+*lowest* pass@1 among SG arms (32.3%). High recall does not imply solve rate.
+
+**Incomplete arms:** `sg-chain` (n=13) and `sg` (n=15) are partial — report as
+partial or omit; do NOT compare them against the n=100 arms.
+
+**cbmem:** not present in nemotron_v4 at all. The Claude-side wiring is known-broken
+(index built empty). Report cbmem from nemotron_v2 only, explicitly labelled, or omit.
+
+---
+
+## 3. WITHDRAWN / DO-NOT-USE
+
+- **Serena** — verified `serena_calls=0` on **all 11 tasks**; the MCP server never
+  entered the tool manifest (headless startup race). The 7/11 "result" is native
+  Claude Code with a dead server. **Do not publish as a Serena comparison.** The
+  publishable finding is the *structural exclusion* itself: a slow-starting MCP
+  server never gets used by a headless agent.
+- **"188 successful runs"** — wrong. Actual solved runs (native+sg, claude_v7) = **149 of 200**.
+- **"p10 = $0.142"** — wrong; actual p10 of solved runs = **$0.134**. (Minimum solved cost
+  **$0.097** is correct.)
+- **"rebench-prose 0% pass@1"** — was fabricated when written; rebench-prose is now
+  genuinely verified at native 6/14, SG 7/15.
+- **Amdahl-style "cost ceiling" arithmetic** (avg − p10 floor) — unsound: p10 tasks are
+  cheap because the *edit* is trivial, not because retrieval was free, so a single global
+  floor cannot bound savings on the average task. The tail decomposition (§4) is the
+  rigorous version of the same intuition; use that instead.
+
+---
+
+## 4. TAIL DECOMPOSITION (claude_v7, n=100) — the original headline, still valid
+
+| percentile | native | +SG | Δ |
+|---|---|---|---|
+| 50th (median task) | $0.255 | $0.260 | **+1.9%** |
+| 75th | $0.581 | $0.489 | −15.8% |
+| 90th | $1.010 | $0.752 | −25.6% |
+| 95th (worst tasks) | $1.559 | $0.896 | **−42.5%** |
+| mean | $0.434 | $0.371 | −14.6% |
+
+Paired bootstrap 95% CI on the mean change: **[−25.3%, −1.2%]**. McNemar on pass@1:
+**p = 1.0** (no difference). Retrieval removes the expensive tail; it does nothing for
+the typical task.
+
+Stability check (incremental n, claude_v7): the median stays near zero and p90/p95 stay
+strongly negative at **every** checkpoint from n=20 to n=100. The shape is stable; p75 is
+the noisy column and should not be leaned on.
+
+---
+
+## 5. MECHANISM — why the entity anchor is load-bearing (traced to code)
+
+1. `intent.py::analyze_intent` emits a function/class entity **only** when a query token
+   literally equals a known FQN suffix (`short == name or short.endswith("."+name)`).
+   Pure symptom prose names no symbol → **zero entities**.
+2. `resolver.py` seeds graph expansion, PageRank hub scores, and the same-file bonus
+   **entirely** from `target_fqns` (lines ~331, ~350). No entities → the graph contributes
+   nothing.
+3. With entities empty the structural leg falls back to BM25 (`enable_bm25_fallback=True`)
+   while `enable_dense_fallback=False` — so on entity-less prose, **two of fusion's three
+   legs collapse into the same lexical signal**, and the semantic leg is the only one left.
+
+Empirically corroborated: on rebench the agent issues prose token-bags
+(`"asdict() call on field info fetch_stac_items_updates queryables"`) rather than symbol
+names, because it cannot guess symbols in an unfamiliar repo.
+
+**Redundancy measurement (claude_v7, sg-fusion):** 121 of 141 native `Read` calls (86%)
+target a file SG had already returned. This is *not* wasted work — at `body_top=0`
+`sg_search` returns only a signature line, so the agent must still fetch the code to
+construct an exact `Edit`. The doc-claimed "one-line prompt fix" for this is invalid.
+
+---
+
+## 6. TOOL-CALL DISPLACEMENT (claude_v7, avg/task)
+
+| | native | sg-fusion |
+|---|---|---|
+| Bash | 4.05 | 0.59 |
+| Read | 3.86 | 1.55 |
+| Grep | 3.00 | 1.43 |
+| Edit | 2.69 | 2.50 |
+| sg_search / sg_expand | — | 1.52 / 1.77 |
+| ToolSearch (MCP deferral tax) | 0 | 1.05 |
+| **total** | ~13.9 | ~10.4 |
+
+SG collapses native's exploration (Bash 4.05→0.59, Read 3.86→1.55, Grep 3.00→1.43).
+Note SG pays a ~1.05/task `ToolSearch` deferral tax that native does not — its true
+efficiency is slightly *understated*.
+
+---
+
+## 7. FAILED INTERVENTIONS (all real, all reported)
+
+| attempt | change | outcome |
+|---|---|---|
+| fusion-v2 | rank-1 body inline + grep blocked | −19% cost, **−2 solves** (same 2 tasks, 2 independent runs) |
+| fusion-v3 | line-numbered expand (remove re-read need) | −6% cost, **−5 solves @ n=44** (0 v3-only wins vs 5 v1-only) |
+| fusion-v4 | context envelope + forced verification | **0/4 pass@1**, +45% cost, +90% tokens |
+
+**Mechanism (v3):** the "redundant" re-reads were the on-ramp to a verify-and-iterate
+loop. Removing the *need* to re-read short-circuited the agent into premature unverified
+submit. **Mechanism (v4):** forcing verification caused defensive scope creep (15 edits vs
+v1's 6) and test-churn.
+
+**The durable finding:** less exploration hurts AND more verification hurts ⇒ v1 sits at a
+local optimum; every knob available is worse. Reported as a subsection, not hidden.
+
+---
+
+## 7b. ITERATING `sg_search` SATURATES — the design constraint for any localizer
+
+rec@1 (first search) vs rec@cum (after ALL searches), with searches issued per task:
+
+| condition | arm | rec@1 | rec@cum | lift | searches |
+|---|---|---|---|---|---|
+| SWE raw | native | 0.663 | 0.834 | +0.171 | 3.14 |
+| SWE raw | sg-fusion | 0.836 | 0.908 | +0.072 | 1.53 |
+| SWE PROSE | native | 0.717 | **0.967** | +0.250 | 4.13 |
+| SWE PROSE | sg-fusion | 0.711 | 0.883 | +0.172 | 1.87 |
+| rebench raw | native | 0.500 | 0.611 | +0.111 | 5.60 |
+| rebench raw | sg-fusion | 0.639 | 0.639 | **+0.000** | 2.33 |
+| rebench PROSE | native | 0.394 | 0.572 | +0.178 | 5.13 |
+| rebench PROSE | sg-fusion | 0.439 | 0.506 | +0.067 | 1.47 |
+
+**On rebench raw, SG issues 2.33 searches and recovers +0.000 recall.** Re-querying
+returns the same files: reformulations on an unfamiliar repo all draw from the same
+impoverished vocabulary (the issue text), so different phrasings produce the same
+ranking. No new information enters the loop.
+
+Native's iteration works *better* (+0.111 to +0.250) because it has a genuine feedback
+loop: grep → read a file → learn the repo's real vocabulary → grep better. SG breaks
+that loop precisely because it looks confident — the agent trusts the ranked list and
+stops exploring (Read 3.86 → 1.55/task). On SWE-prose this backfires: **native's
+cumulative recall (0.967) exceeds SG's (0.883)**. SG gets there cheaper, not further.
+
+**Design consequence:** a localization loop built on repeated `sg_search` calls is a
+dead end — proven, not assumed. Any iterative localizer must inject *new* information
+each round, which means structural navigation (`outline` for repo vocabulary/structure,
+`neighbors` for graph traversal to code that is causally related but lexically
+dissimilar). `sg_search` is the probe, not the engine. Both primitives already exist:
+`graph/dependency.py::blast_radius` (callers) and `::dependency_chain` (callees).
+
+---
+
+## 8. RETRIEVAL LATENCY (product-relevant)
+
+Warm: fusion ~250ms–1s, rerank ~125ms, native `rg` ~60–120ms. Cold dense encode
+~11 min/repo on CPU → prewarm required. `SG_DENSE_TIMEOUT_S` default 20s vs a ~24.7s
+cold model load is a **reproducibility hazard** — pin to 120 for eval runs.
+
+---
+
+## 9. OPEN / NOT CLAIMED
+
+- rebench-prose n=15, and native is missing one task (`pycqa__isort-2491`, `stopped=error`,
+  76 turns, $3.24) → native scores 14, SG 15. Either rerun that task or drop it from both
+  arms when reporting.
+- `sg-chain` / `sg` nemotron arms incomplete (n=13 / n=15).
+- The prose-stripped condition is a **synthetic ablation**, not a naturally occurring
+  distribution. Label it as such.
+- No claim is made that SG improves pass@1. It does not, anywhere, significantly.

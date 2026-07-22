@@ -16,104 +16,100 @@ The thesis: code-context tools have been validated as a **token-optimization** g
 function — of which lower token cost is a *consequence*, visible only end-to-end
 inside the agent loop.
 
-## Results (SWE-bench Verified, nemotron-120B, 100 tasks)
+## Results
 
-![Solve rate vs. token cost](docs/paper/figures/fig1_pareto.png)
+All numbers below are regenerated from the released run artifacts
+(`python -m eval.scripts.make_paper_figures`). The full verified ledger, including
+withdrawn claims, is in [`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
 
-| arm | pass@1 | file recall | function recall@10 | tokens (k) | $ |
-|---|--:|--:|--:|--:|--:|
-| **`sg-rerank`** (method) | **42.0** | **.924** | **.404** | 175 | .051 |
-| **`sg`** (lean core) | 35.0 | .854 | .319 | 172 | .050 |
-| `sg-chain` (graph-path) | 36.0 | .902 | .312 | **159** | **.046** |
-| `cbmem` (zero-LLM graph) | 38.0 | .746 | .228 | 286 | .080 |
-| `graphify` (knowledge graph) | 38.0 | — | — | 282 | .080 |
-| `grep` | 39.0 | .883 | — | 286 | .081 |
-| `bm25` | 38.0 | .846 | .342 | 265 | .075 |
-| `none` (no retrieval) | 37.0 | — | — | 279 | .079 |
-| `aider` (repo-map) | 42.0 | — | — | 1,218 | .333 |
+### 1. Controlled retrieval ablation (react loop, open-weight model, 100 tasks)
 
-**Findings:** (1) on this contaminated benchmark **solve rate is retrieval-insensitive** —
-pass@1 spans just 35–42%, `none` (no retrieval) scores 37%, and McNemar finds **no arm
-significantly better than no-retrieval** (`sg-rerank` vs `none`, p = 0.27). The same 100
-tasks re-scored ~7 points lower on *every* arm — including `none` — between runs, so
-pass@1 is run-noise; **tokens and function recall are the honest axes**. (2) **file recall
-≠ function recall** — most arms find the file, not the function. (3) the **`sg` family is
-cheapest** (159–175k tokens vs 265–286k for baselines and 1,218k for aider) while
-**`sg-rerank` has the best retrieval quality of any arm** (file recall .924, function
-recall .404), with **no LLM** in its index — ahead of the strong-RAG (`hybrid`, 44% in
-the prior run) and deployed-graph (`aider`) baselines, not just the keyword floor.
+Identical action space for every arm; **only the retrieval backend changes**. The
+`none` arm gets no code access at all and establishes the memorization floor.
 
-_File/function recall are from a deterministic retrieval pass (model-independent); pass@1,
-tokens and $ are from the latest agent run (v3, nemotron-120B). Scope: SWE-bench Verified
-(Python). A contamination-controlled multi-language split (SWE-bench Pro, 10 languages —
-file recall ~0.78 across Go/TS/JS/Python; function recall pending gold-FQN scoring) is
-evaluated separately and reported as it completes._
-
-### Deployment: SkeletonGraph vs native Claude Code (MCP, verified)
-
-The table above is model-independent retrieval. This is the product itself —
-SkeletonGraph as an MCP server driving **Claude Code (sonnet)**, against Claude Code on
-its own tools (`native`). 30 paired SWE-bench Verified tasks, Docker-verified pass@1:
-
-| arm | pass@1 | retrieval hit | turns | input tokens (k) | $/task | $/solved |
+| arm | pass@1 | file recall@1 | function hit | tokens (k) | turns | $/task |
 |---|--:|--:|--:|--:|--:|--:|
-| `native` (Claude's own Grep/Read) | 23/30 | 24/30 | 15.6 | 731 | .486 | .634 |
-| **`sg-fusion`** (SkeletonGraph MCP) | 23/30 | **29/30** | **11.8** | **506** | **.394** | **.514** |
+| **`sg-fusion`** | **42.0%** | .737 | **57%** | **180** | 21.9 | **.052** |
+| `bm25` | 41.0% | .642 | 43% | 264 | 24.6 | .074 |
+| `graphify` (knowledge graph) | 41.0% | .223 | 9% | 275 | 25.6 | .078 |
+| `grep` | 39.0% | .647 | 0% | 282 | 22.4 | .079 |
+| `aider` (repo-map) | 36.7% | — | — | 1,126 | 18.1 | .160 |
+| `none` (no retrieval) | 35.0% | — | — | 345 | 23.6 | .066 |
+| `sg-rerank` | 32.3% | **.747** | 57% | 274 | 23.2 | .055 |
 
-**Same solve rate at −19% cost, −24% turns, −31% tokens** (−19% cost per solved task) —
-the cost edge held steady as the sample grew (−25% at n=10, −22% at n=12, −24% at n=20,
-−19% at n=30), settling in the high-teens/low-20s range rather than drifting to zero. Cost
-≈ turns × accumulated context, so the win comes from cutting turns where localization is
-hard — one native run that thrashed 54 turns / \$2.12 became 22 turns / \$0.90 with SG.
-SG's retrieval is essentially saturated (29/30 hit); the residual gap to a higher solve
-rate is fix-quality, not localization — outside what a retrieval layer can move. SG's one
-weak spot: when the issue text already hands over the exact file path, any retrieval tool
-is pure overhead.
+**`sg-fusion` is the top arm, the cheapest arm, and the only one that localizes to
+the function** (57% vs grep's 0% — lexical search is file-granular by construction).
+Against the closed-book floor of 35.0%, retrieval is worth **+7 points** here.
 
-**Against published competitors, on the identical 20 of these 30 tasks, run through the
-NIM/nemotron react loop** (agent-loop cost only, same tool surface for every arm):
+Note the inversion at the bottom: `sg-rerank` has the **highest** first-search recall
+of any arm and the **lowest** solve rate among SG configurations. High recall does not
+imply task success — one of the more useful negative results in this project.
 
-| arm | task-completion rate | retrieval hit | turns | $/task | total $ |
-|---|--:|--:|--:|--:|--:|
-| `cbmem` (Codebase-Memory) | 8/20 (40%) | 3/20 | 26.2 | .061 | 1.21 |
-| `graphify` (knowledge-graph) | 11/20 (55%) | 8/20 | 21.7 | .071 | 1.41 |
-| **`sg-fusion`** | **19/20 (95%)** | **15/20** | **18.0** | **.050** | **1.00** |
+### 2. Deployment: SkeletonGraph vs native Claude Code (MCP, Docker-verified)
 
-SG wins every column — highest completion rate, best retrieval, fewest turns, *and*
-lowest cost (not a quality/cost tradeoff — strictly better and cheaper). graphify's figure
-above is agent-loop cost only; it also pays a one-time LLM graph-extraction cost per repo
-that isn't in this table, so its true total cost is higher still. _n=30 Claude Code,
-n=20 NIM-react; sonnet + nemotron; multi-model runs planned._
+The product itself — SG as an MCP server driving **Claude Code (sonnet)** against
+Claude Code on its own tools. 100 paired SWE-bench Verified tasks:
 
-**A note on competitors _as MCP servers inside Claude Code_ (vs. the react loop above).**
-We also wired Codebase-Memory (cbmem, official v0.7.0) as a real MCP server driving Claude
-Code head-to-head. It connected cleanly and all 14 of its tools were registered and visible
-to the agent — but across 10 tasks **Claude never once invoked a cbmem tool, defaulting to
-its native `grep` every time** (verified from the session transcripts). So an unsteered
-competitor MCP server, however good its retrieval, provides no benefit if the agent doesn't
-reach for it. SG's edge is not only retrieval quality but the adoption mechanism (a
-PreToolUse gate that routes the agent to structural search first) that makes it actually get
-used. We therefore do not report a cbmem-in-Claude-Code retrieval number — it would measure
-non-adoption, not the tool.
+| arm | pass@1 | file recall@1 | turns | $/task |
+|---|--:|--:|--:|--:|
+| `native` (Claude's own Grep/Read) | 74/100 | .663 | 14.5 | .434 |
+| **`sg-fusion`** (SkeletonGraph MCP) | 75/100 | **.836** | **11.4** | **.371** |
 
-We also wired Serena (oraios/serena, 25k stars, LSP-based) and GitNexus (28k stars,
-knowledge-graph, its own SWE-bench claim) the same way. Both surfaced a different, more
-fundamental problem: **Claude Code's headless (`-p`) mode locks its MCP tool list within
-~2 seconds of launch and never updates it.** Both servers need real bootstrap time — Serena
-spins up a pyright language server, GitNexus loads a Node CLI + its own index — and both
-finished their handshake in ~2.0-2.1s, just past whatever grace window Claude Code allows.
-The result: 0 of either tool was ever called, across 11 Serena tasks and a GitNexus smoke
-test, confirmed via session-init transcripts showing `status: "pending"` and the tool never
-appearing in the model's tool list for the entire run (cross-checked against each server's
-own logs, which show it was fully ready seconds into the session). Serena's pass@1/turns/cost
-on the matched task set came out statistically identical to plain native Claude Code (7/10
-both, ~21 turns both, ~$0.61-0.67/task both) — exactly what you'd expect if it silently had
-zero extra tools the whole time. This isn't a retrieval-quality result for either competitor;
-it's a deployment-mode one: **in real headless/single-shot agent use, fast-connecting servers
-(SG, cbmem) get a chance to be used at all, and LSP- or CLI-bootstrap-heavy ones structurally
-don't**, independent of how good their retrieval is. Their real retrieval quality is measured
-instead on the NIM/nemotron react loop above, where the tool surface is offered directly and
-this startup race doesn't apply.
+**Equivalent solve rate at −14.6% cost and −21.4% turns.** The saving is not spread
+evenly — it lives almost entirely in the tail:
+
+| cost percentile | native | +SG | change |
+|---|--:|--:|--:|
+| 50th (median task) | $0.255 | $0.260 | **+1.9%** |
+| 90th | $1.010 | $0.752 | −25.6% |
+| 95th (worst tasks) | $1.559 | $0.896 | **−42.5%** |
+
+Retrieval does nothing for the typical task and removes over 40% of the cost of the
+worst ones. Paired bootstrap 95% CI on the mean: [−25.3%, −1.2%]; McNemar on pass@1:
+p = 1.0 (no difference).
+
+### 3. The ceiling: what structural retrieval cannot do
+
+![Retrieval collapses as location cues are removed](docs/paper/figures/fig_ceiling.png)
+
+`sg-fusion` runs all three non-LLM retrieval paradigms at once — lexical (BM25),
+semantic (code embeddings), and topological (call graph). Crossing *memorization*
+(standard vs. decontaminated benchmark) against *location cues* (original vs.
+prose-stripped issue text) shows the limit:
+
+| condition | cost | file recall native → SG |
+|---|--:|--:|
+| SWE-Verified, raw | −32.2% | .661 → .861 |
+| SWE-Verified, **prose-only** | −21.1% | .717 → .711 (**no edge**) |
+| SWE-rebench (unseen repos), raw | −26.4% | .500 → .639 |
+| SWE-rebench, **prose-only** | −31.3% | .394 → .439 |
+
+Two things happen at once. **The retrieval advantage collapses** — on prose-only
+issues it disappears entirely — and the lexical baseline falls in parallel, so this
+is a property of the whole category, not of one implementation. **Yet the cost saving
+persists in every condition**, including the one where retrieval quality is identical
+to the baseline. Retrieval quality is therefore *not* the mechanism producing the
+saving; bounding how far the agent wanders before it commits is.
+
+> SWE-Verified rows are restricted to the same 15 tasks as the prose run so raw and
+> prose are paired. That subset is *not* representative of the full 100 (SG saves
+> −32.2% on it vs −14.6% overall) — do not compare it against the n=100 figure.
+
+### 4. Deployment finding: slow MCP servers are structurally excluded
+
+Two graph/LSP-based competitors wired as MCP servers **never participated at all**.
+Claude Code's headless (`-p`) mode finalizes its tool manifest within ~2 seconds of
+launch and never updates it; servers needing real bootstrap time (a language server,
+a Node CLI + index) finish their handshake just past that window and are silently
+absent for the entire run — confirmed via session-init transcripts and each server's
+own logs showing it was ready seconds later.
+
+This is a **deployment-mode result, not a retrieval-quality one**, and we report no
+performance comparison for those systems: with zero tool calls, any such number would
+measure their absence rather than their retrieval. A separately wired zero-LLM graph
+competitor connected cleanly with all 14 tools visible, yet the agent never invoked
+one across 10 tasks, defaulting to native `grep` every time. Fast connection and
+actual adoption are prerequisites that retrieval quality cannot substitute for.
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)

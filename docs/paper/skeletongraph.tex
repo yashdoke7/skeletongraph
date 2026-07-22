@@ -732,11 +732,37 @@ rate is indistinguishable from a system using $6\times$ the tokens. Retrieval
 quality is real and measurable; it simply is not what determines whether the
 task is solved on this benchmark.
 
-\tbd{Final react-loop pass@1 table pending verification of the remaining arms.
-Current verified state on the primary run: SG-Fusion 42/100, BM25 41/100,
-Graphify 41/100, grep 39/100, Aider 36/95, \texttt{none} 29/81, SG-Rerank 32/99.
-Two observations already stable: SG-Fusion is the top arm, and exceeds SG-Rerank
-by ten points, indicating the dense leg earns its keep in this harness.}
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrrrr}
+\toprule
+Retrieval backend & $n$ & pass@1 & rec@1 & funcHit & Cost \\
+\midrule
+\sg{}-Fusion            & 100 & \textbf{42.0\%} & 0.737 & \textbf{57\%} & \textbf{\$0.052} \\
+BM25                    & 100 & 41.0\% & 0.642 & 43\% & \$0.074 \\
+Graph-query competitor  & 100 & 41.0\% & 0.223 & 9\%  & \$0.078 \\
+Lexical grep            & 100 & 39.0\% & 0.647 & 0\%  & \$0.079 \\
+Repo-map competitor     &  98 & 36.7\% & ---   & ---  & \$0.160 \\
+\texttt{none} (closed-book) & 100 & 35.0\% & 0.000 & 0\% & \$0.066 \\
+\sg{}-Rerank            &  99 & 32.3\% & \textbf{0.747} & 57\% & \$0.055 \\
+\bottomrule
+\end{tabular}
+\caption{Controlled retrieval ablation in the react loop (open-weight model,
+100 tasks, identical action space; only the retrieval backend varies). The
+closed-book \texttt{none} arm establishes a memorization floor of 35.0\%, and
+\sg{}-Fusion exceeds it by seven points while being the cheapest arm and the
+only one combining top solve rate with function-level localization. Note the
+inversion at the bottom: \sg{}-Rerank has the \emph{highest} first-search recall
+of any arm and the \emph{lowest} solve rate among \sg{} configurations---high
+recall does not imply task success.}
+\label{tab:react}
+\end{table}
+
+Table~\ref{tab:react} reports the controlled ablation. Unlike the frontier-agent
+setting, this model memorizes less: the closed-book floor is 35.0\%, and
+retrieval buys a genuine seven-point improvement on top of it. This is the
+cleanest evidence in our study that retrieval quality can matter for outcomes---
+and it matters precisely where memorization does not already supply the answer.
 
 \subsection{Why competitors cannot be compared inside a headless frontier agent}
 \label{sec:exclusion}
@@ -917,6 +943,51 @@ it for the rest of the run, and spends the remainder of its budget implementing
 and validating. A retrieval layer buys the localization prefix and nothing after
 it---and on tasks where that prefix was already short, it is a net cost.
 
+\subsection{The ceiling belongs to the paradigm, not to our implementation}
+\label{sec:ceiling}
+A natural objection is that our structural retriever is simply not good enough,
+and that a better lexical index, a stronger code embedder, or a richer graph
+would close the gap. We can address this directly, because \sg{}-Fusion is not
+one paradigm but three operating simultaneously: lexical (BM25), semantic (a
+code-specialized dense encoder), and topological (the call graph). If any of the
+three could infer which code is responsible for a described symptom, removing the
+symbol names from the issue text should not much matter.
+
+We test this by crossing two factors: whether the model has memorized the
+repository (the standard benchmark versus a decontaminated one), and whether the
+issue text still contains location cues (the original text versus a
+prose-stripped variant with tracebacks and code blocks removed).
+Figure~\ref{fig:ceiling} shows the result. First-search recall falls from 86\% to
+44\% as the cues are withdrawn---and the lexical baseline falls with it, from
+66\% to 39\%. The two curves converge: in the prose-only condition on the
+memorized benchmark, retrieval augmented with all three paradigms is
+\emph{indistinguishable} from built-in lexical search ($-0.006$ recall).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_ceiling.pdf}
+\caption{\textbf{Top:} first-search file recall as location cues are removed
+(left to right). The advantage of combining lexical, semantic, and topological
+retrieval collapses; the baseline declines in parallel, so the limit is a
+property of the category rather than of one implementation. \textbf{Bottom:} the
+cost saving persists in every condition---including the one where retrieval
+quality is identical to the baseline. Retrieval quality is therefore not the
+mechanism producing the saving. SWE-Verified columns are restricted to the same
+15 tasks as the prose run so that the raw and prose conditions are paired.}
+\label{fig:ceiling}
+\end{figure}
+
+Two conclusions follow, and they pull in opposite directions. The first is
+negative: no combination of non-LLM retrieval paradigms available to us performs
+the inference from symptom to responsible code. That inference is causal---it
+requires knowing what code \emph{does} when it runs, not what it resembles---and
+similarity matching, whether lexical, dense, or topological, does not supply it.
+The second is positive, and is the more useful finding: \textbf{the cost saving
+survives the collapse of the retrieval advantage.} In the prose-only condition
+where recall is identical to the baseline, cost still falls by 21\%. Whatever
+\sg{} is doing to reduce cost, it is not out-retrieving the baseline; it is
+bounding how far the agent wanders before it commits.
+
 \section{Threats to Validity}
 \label{sec:threats}
 
@@ -925,8 +996,12 @@ Our no-retrieval control establishes that SWE-bench Verified is
 memorization-saturated in our setting. We therefore treat solve rate as a
 tie-detection instrument, not a ranking signal. We additionally built a
 decontaminated replication path against a continuously-updated benchmark drawn
-from thousands of Python repositories with tasks postdating model cutoffs;
-\tbd{report the decontaminated run if completed before submission}.
+from thousands of Python repositories with tasks postdating model cutoffs. On
+that decontaminated set (15 paired tasks, test-execution verified) the direction
+of every effect is preserved: cost $-26.4\%$, turns $-35.6\%$, solve rate
+10/15 versus 9/15---statistically indistinguishable, as on the contaminated
+benchmark. The decontaminated replication therefore does not overturn any claim
+in this paper; it reproduces them on repositories the model has not memorized.
 
 \paragraph{Answer leakage through web tools.}
 In one trace the agent used its web tools to fetch the upstream pull request

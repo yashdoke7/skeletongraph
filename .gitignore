@@ -53,6 +53,10 @@ benchmarks/repos/
 eval/datasets/repos/
 eval/datasets/_repo_cache/
 eval/datasets/_agent_work/
+# Per-task editable checkouts made for the Claude Code arms — one full repo copy
+# PER TASK PER ARM (gigabytes). Never committable; `git add -A` would otherwise
+# try to stage every cloned repository in the benchmark.
+eval/datasets/_claude_repos/
 eval/datasets/*.jsonl
 eval/results/
 eval/figures/

@@ -410,6 +410,106 @@ def fig_tools(nat, sg):
     _save(fig, "fig_tool_displacement")
 
 
+# ── FIG 6 — the ceiling: retrieval collapses as location cues are removed ─
+# The paper's central proof. `sg-fusion` IS all three non-LLM paradigms at once
+# (BM25 lexical + dense semantic + graph topological). If any of them could
+# reason from symptom to cause, first-search recall would hold when the symbols
+# disappear. It does not — and the lexical baseline falls with it, so the
+# ceiling belongs to the whole category, not to SG.
+_GRID_CONDS = [
+    ("claude_v7",               "SWE-Verified\nraw"),
+    ("claude_v7_prose",         "SWE-Verified\nprose-only"),
+    ("claude_rebench_v1",       "SWE-rebench\nraw"),
+    ("claude_rebench_prose_v1", "SWE-rebench\nprose-only"),
+]
+
+
+def _rec1(r):
+    scs = r.get("search_calls") or []
+    return scs[0].get("cumulative_recall", 0.0) if scs else 0.0
+
+
+def _cond_stats(tag, restrict=None):
+    """(rec1_native, rec1_sg, cost_delta_pct) paired on common task_ids.
+
+    `restrict` limits to a task_id set — required for the SWE rows, whose prose
+    run covers only 15 of the 100 tasks. Comparing the n=100 aggregate against
+    an n=15 subset manufactures a trend that isn't there (the 15 happen to be
+    tasks where SG does ~2x better than its average), so raw-vs-prose must be
+    read on the matched subset only.
+    """
+    nat, sg = load_arm(tag, "native"), load_arm(tag, "sg-fusion")
+    common = sorted(set(nat) & set(sg))
+    if restrict:
+        common = [t for t in common if t in restrict]
+    if not common:
+        return None
+    rn = sum(_rec1(nat[t]) for t in common) / len(common)
+    rs = sum(_rec1(sg[t]) for t in common) / len(common)
+    cn = sum(nat[t]["imputed_cost"] for t in common)
+    cs = sum(sg[t]["imputed_cost"] for t in common)
+    return rn, rs, (cs - cn) / cn * 100.0, len(common)
+
+
+def fig_ceiling():
+    # The SWE prose run defines the matched subset for BOTH SWE columns.
+    prose_ids = set(load_arm("claude_v7_prose", "native"))
+    stats = []
+    for tag, label in _GRID_CONDS:
+        restrict = prose_ids if tag.startswith("claude_v7") else None
+        s = _cond_stats(tag, restrict)
+        if s:
+            stats.append((label, *s))
+    if not stats:
+        print("  fig_ceiling: no data"); return
+
+    labels = [s[0] for s in stats]
+    natr = [s[1] * 100 for s in stats]
+    sgr = [s[2] * 100 for s in stats]
+    cost = [s[3] for s in stats]
+    x = range(len(stats))
+
+    fig, (ax, ax2) = plt.subplots(
+        2, 1, figsize=(6.4, 5.0), sharex=True,
+        gridspec_kw={"height_ratios": [1.35, 1.0], "hspace": 0.18})
+
+    # top: retrieval collapses
+    ax.plot(x, natr, marker="o", color=INK_2, linewidth=1.6, markersize=5,
+            label="Built-in lexical search")
+    ax.plot(x, sgr, marker="o", color=BLUE, linewidth=2.0, markersize=6,
+            label="+ SkeletonGraph (all 3 paradigms)")
+    for xi, (a, b) in enumerate(zip(natr, sgr)):
+        ax.annotate(f"{b:.0f}", (xi, b), textcoords="offset points",
+                    xytext=(0, 8), ha="center", fontsize=8, color=BLUE)
+    ax.set_ylabel("First-search file recall (%)")
+    ax.set_ylim(0, 100)
+    ax.legend(frameon=False, fontsize=8, loc="lower left")
+    ax.set_title("Retrieval quality collapses when location cues are removed",
+                 fontsize=9.5, color=INK, loc="left", pad=8)
+    _clean(ax)
+
+    # bottom: cost saving persists anyway
+    ax2.bar(x, cost, color=BLUE, width=0.5)
+    # Bars run downward (all savings are negative), so the value coordinate is
+    # the BAR'S END. Offsetting further in that direction pushes the label off
+    # the axis and it gets clipped — offset back toward zero so it sits inside.
+    for xi, c in enumerate(cost):
+        ax2.annotate(f"{c:+.0f}%", (xi, c), textcoords="offset points",
+                     xytext=(0, 8 if c < 0 else -14), ha="center", va="bottom",
+                     fontsize=8.5, fontweight="medium",
+                     color="white" if c < -8 else INK_2)
+    ax2.margins(y=0.18)
+    ax2.axhline(0, color=BASELINE_AXIS, linewidth=0.9)
+    ax2.set_ylabel("Cost change")
+    ax2.set_title("…yet the cost saving persists — retrieval quality is not the mechanism",
+                  fontsize=9.5, color=INK, loc="left", pad=8)
+    ax2.set_xticks(list(x)); ax2.set_xticklabels(labels, fontsize=8.5)
+    ax2.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    _clean(ax2)
+
+    _save(fig, "fig_ceiling")
+
+
 def main():
     _style()
     ds = "C:/Users/ASUS/Desktop/CS/Projects/swebench-data/swebench_100.jsonl"
@@ -420,6 +520,7 @@ def main():
     fig_retrieval(nat, sg, ds)
     fig_tools(nat, sg)
     fig_pareto()
+    fig_ceiling()
 
 
 if __name__ == "__main__":
