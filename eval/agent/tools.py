@@ -167,6 +167,15 @@ class ToolExecutor:
         self._failed_edits: Dict[str, int] = {}  # path -> consecutive failed edits
         self._total_failed_edits = 0             # whole-run failed-edit count (hard cap)
         self._edit_budget_ignores = 0            # times the exhausted-budget msg was ignored
+        # ── sg-understand: localizer cost, kept SEPARATE from the main model's
+        # cost/tokens (which everything else in this class accumulates for).
+        # These stay at 0 for every other backend, so the field is harmless to
+        # add to every run record unconditionally.
+        self.localizer_calls = 0        # how many searches ran the small model (vs gated/skipped)
+        self.localizer_turns = 0        # sum of tool-call turns across those calls
+        self.localizer_tokens_in = 0
+        self.localizer_tokens_out = 0
+        self.localizer_cost_usd = 0.0
 
     # ── dispatch ───────────────────────────────────────────────────────────
 
@@ -322,6 +331,20 @@ class ToolExecutor:
             summaries = [s for _, s in pairs]
         else:
             hits = _retrieve(self.backend, query, self.repo, k)
+            if self.backend == "sg-understand":
+                # Side-channel: localizer.retrieve() can't return its own cost
+                # through the shared List[str] contract every backend uses, so
+                # pull it from the module immediately after the call. Accumulate
+                # rather than overwrite — a task issues several searches, and
+                # each one that actually ran the small model spends separately.
+                from backends import localizer as _loc
+                s = _loc.last_call_stats()
+                if s.get("ran"):
+                    self.localizer_calls += 1
+                    self.localizer_turns += s.get("turns", 0)
+                    self.localizer_tokens_in += s.get("tokens_in", 0)
+                    self.localizer_tokens_out += s.get("tokens_out", 0)
+                    self.localizer_cost_usd += s.get("cost_usd", 0.0)
         if self._search_calls == 0:
             # record first (successful) call's file ranking for recall (Axis 2)
             seen: List[str] = []
@@ -1313,6 +1336,13 @@ def _retrieve(backend: str, query: str, repo: Path, k: int) -> List[str]:
 
     if backend in _SG_BACKENDS:
         return [fqn for fqn, _ in _retrieve_sg(backend, query, repo, k)]
+
+    if backend == "sg-understand":
+        # Iterative small-model localizer over SG's structure (outline +
+        # graph traversal + fusion as a probe). Falls back to plain fusion on
+        # any failure, so it can tie `fusion` but never score below it.
+        from backends.localizer import retrieve
+        return retrieve(query, repo, k)
 
     if backend == "bm25":
         from backends.bm25_flat import retrieve

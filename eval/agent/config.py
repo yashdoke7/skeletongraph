@@ -286,6 +286,18 @@ ARMS: Dict[str, Arm] = {
                             "SG-keyword-dense (Extracted keywords -> Dense)", strong=True),
     "sg-seed":  Arm("sg-seed",  "sg-seed",
                     "SG-seed (SG seeded on issue tracebacks/symbols)"),
+    # sg-understand: the L3 arm. `fusion` (all three non-LLM paradigms) is
+    # entity-anchored — strip the symbols out of an issue and its retrieval edge
+    # vanishes, because none of lexical/semantic/topological matching can infer
+    # WHICH code causes an observed symptom. This arm adds the missing step: a
+    # cheap model iterates over SG's structure (sg_outline for repo vocabulary,
+    # sg_neighbors for call-graph traversal, fusion as a probe) and hands back a
+    # ranked list. Crucially it is NOT repeated re-querying — measured, that
+    # saturates at +0.000 recall. Falls back to plain fusion on any failure, so
+    # it can tie `fusion` but never score below it.
+    "sg-understand": Arm("sg-understand", "sg-understand",
+                         "SG-understand (small-model localizer over structure)",
+                         strong=True),
 
     # ── Summary-search: rank by function SUMMARIES (purpose), not raw code ───
     # The "a developer recalls what a function DOES, then fetches it" idea. Same
@@ -703,6 +715,19 @@ STAGES["0-assess"]       = STAGES["baseline"]
 STAGES["0-ablation"]     = STAGES["ablation"]
 STAGES["1a-workshop"]    = STAGES["baseline"]
 STAGES["1b-conference"]  = STAGES["ablation"]
+# ── L3 localizer stage ─────────────────────────────────────────────────────
+# Paired head-to-head: `fusion` is the incumbent (all three non-LLM paradigms);
+# `sg-understand` adds the cheap-model reasoning step on top of it. Both run the
+# same tasks so the delta is attributable to the localizer alone. Deliberately a
+# SEPARATE stage rather than an addition to "v" so existing results are untouched
+# and this can be run against any dataset (raw / prose / rebench) unchanged.
+STAGES["l3"] = Stage(
+    "l3", ["fusion", "sg-understand"], 100, "swebench",
+    "L3 localizer head-to-head — does an iterative small model over SG's "
+    "structure recover the localization that lexical+semantic+structural "
+    "retrieval cannot do on prose-only issues?",
+)
+
 STAGES["0-cbmem"] = Stage(
     "0-cbmem", ["cbmem"], 30, "swebench",
     "cbmem-only — useful when the cbmem binary changes and you want to "

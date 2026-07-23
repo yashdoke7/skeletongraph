@@ -110,6 +110,19 @@ def run_one(task: dict, arm: str, repeat: int = 0, model: str = "main",
         # False = the run silently degraded to BM25-only — NOT real SG.
         "embeddings_used": executor.embeddings_used,
 
+        # sg-understand only: the SMALL model's own cost, kept separate from
+        # this record's main "cost"/"tokens" fields (which price SG_EVAL_MODEL,
+        # e.g. nemotron/Sonnet — the model doing the actual fix). This is what
+        # lets a report say "the cheap model spent $X finding the code; the
+        # expensive model spent $Y fixing it" instead of one number that hides
+        # the substitution the arm exists to demonstrate. Zero for every other
+        # backend.
+        "localizer_calls": executor.localizer_calls,
+        "localizer_turns": executor.localizer_turns,
+        "localizer_tokens_in": executor.localizer_tokens_in,
+        "localizer_tokens_out": executor.localizer_tokens_out,
+        "localizer_cost_usd": executor.localizer_cost_usd,
+
         # ── Per-call retrieval (for Pareto + cumulative-recall figures) ──
         # Every search_code call with query, hits, gold intersection,
         # precision, and cumulative recall up to that point.

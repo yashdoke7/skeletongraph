@@ -172,6 +172,32 @@ def backend_sg_rerank(query: str, repo_path: Path, top_n: int) -> List[str]:
     return _retrieve_rerank(query, Path(repo_path), top_n)
 
 
+def backend_sg_understand(query: str, repo_path: Path, top_n: int) -> List[str]:
+    """sg-understand: iterative small-model localizer over SG's structure.
+
+    Identical code path to the agent arm (both call backends.localizer.retrieve),
+    so this deterministic number is directly comparable to the agent run. Needs a
+    reachable model endpoint (SG_EVAL_API_BASE/SG_EVAL_API_KEYS); without one it
+    degrades to plain fusion, which is exactly the arm's never-worse floor.
+    """
+    from eval.backends.localizer import retrieve
+    return retrieve(query, Path(repo_path), top_n)
+
+
+def backend_product_fusion(query: str, repo_path: Path, top_n: int) -> List[str]:
+    """The ACTUAL product engine (skeletongraph.retrieval.fusion.retrieve_fusion),
+    the same function backends.localizer._fusion() calls for its never-worse
+    floor. NOT the same code as bm25-dense-sg above: that's an eval-only
+    reimplementation with a different rerank path (_retrieve_rerank vs the
+    product's retrieve_rerank/_lean_engine) and no dense timeout, while the
+    product wraps its dense leg in a 20s timeout (SG_DENSE_TIMEOUT_S) that
+    silently drops to 2-signal fusion if the dense model isn't warm. Comparing
+    sg-understand against bm25-dense-sg as if they were the same floor produced
+    numbers that could never match — this is the real apples-to-apples floor."""
+    from skeletongraph.retrieval.fusion import retrieve_fusion
+    return retrieve_fusion(query, Path(repo_path), top_n)
+
+
 def backend_bm25_dense(query: str, repo_path: Path, top_n: int) -> List[str]:
     """RRF fusion of lexical (BM25) + semantic (dense, code-search model via
     SG_DENSE_MODEL). Tests whether COMBINING beats either alone: BM25 supplies the
@@ -268,10 +294,12 @@ BACKENDS: Dict[str, RetrieverFn] = {
     "grep": backend_grep,
     "sg-rerank": backend_sg_rerank,          # the paper's method (Table 1)
     "bm25-dense": backend_bm25_dense,        # RRF fusion: lexical + semantic
-    "bm25-dense-sg": backend_bm25_dense_sg,  # 3-way RRF: lexical + semantic + structural
+    "bm25-dense-sg": backend_bm25_dense_sg,  # 3-way RRF: lexical + semantic + structural (eval-only reimpl)
+    "product-fusion": backend_product_fusion,  # the REAL floor: same retrieve_fusion() the localizer/MCP use
     "bm25-dense-sg-w": backend_bm25_dense_sg_w,  # weighted 3-way RRF (SG 2×)
     "sg-chain": backend_sg_chain,            # the recall bar to beat
     "sg-chain-nopath": backend_sg_chain_nopath,
+    "sg-understand": backend_sg_understand,  # L3: small model iterating over structure
     # ── the probe: summaries × {source, matcher} ──────────────────────────────
     "summary-bm25-local": _summary_backend("local", "bm25"),
     "summary-dense-local": _summary_backend("local", "dense"),
