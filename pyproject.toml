@@ -9,7 +9,9 @@ description = "Token-minimal, constraint-preserving context assembly for AI codi
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-authors = []
+authors = [
+    {name = "Yash Doke", email = "yashdoke215@gmail.com"},
+]
 keywords = [
     "llm", "context", "coding-agent", "ast", "tree-sitter",
     "token-optimization", "mcp", "claude-code", "skeleton", "graph"

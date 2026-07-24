@@ -21,7 +21,9 @@ from skeletongraph.graph.dependency import (
 def test_sg_chain_is_registered_as_trial_arm():
     assert "sg-chain" in ARMS
     assert "sg-chain" in _SG_BACKENDS
-    assert "sg-chain" in STAGES["trial"].arms
+    # "trial" was a stage name from an earlier eval-plan iteration and no
+    # longer exists; "final" is the current stage sg-chain is exercised in.
+    assert "sg-chain" in STAGES["final"].arms
 
 
 def test_path_bridge_counts_short_graph_connectors():

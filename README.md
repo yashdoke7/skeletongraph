@@ -3,6 +3,14 @@
 **A zero-LLM, tree-sitter structural index that reranks cheap lexical retrieval
 and fetches one function at a time — for AI coding agents.**
 
+<p align="center">
+  <img src="docs/paper/figures/skeletongraph_hero.gif"
+       alt="How SkeletonGraph works: index a repo with tree-sitter (no LLM), fuse lexical + semantic + structural retrieval, and return the one function to edit over MCP"
+       width="100%">
+</p>
+
+<p align="center"><em>Index once (no LLM) → fuse lexical + semantic + structural signals → return the exact function, served to your agent over MCP.</em></p>
+
 SkeletonGraph (SG) indexes a codebase into function-level structure, a cross-file
 call graph, and PageRank centrality — **with no LLM**. At query time it resolves the
 symbols an issue names, expands the call graph, and reranks a BM25 recall pool so the
@@ -148,13 +156,9 @@ The goal is not only lower token cost. The useful product outcomes are:
 ## Install
 
 ```bash
-pip install skeletongraph
-```
-
-For provider-backed CLI execution:
-
-```bash
-pip install "skeletongraph[llm]"
+pip install skeletongraph           # core: indexing, MCP server, CLI (no API key needed)
+pip install "skeletongraph[llm]"    # + litellm for sg run --execute / sg summarize --tier cloud
+pip install "skeletongraph[all]"    # everything
 ```
 
 ## Quick Start: SG IDE
@@ -398,14 +402,6 @@ SkeletonGraph should be evaluated on both quality and cost:
 - IDE compliance with SG-first context usage
 
 Cost savings are only meaningful when reported with pass rate.
-
-## Install
-
-```bash
-pip install skeletongraph           # core: indexing, MCP server, CLI (no API key needed)
-pip install "skeletongraph[llm]"    # + litellm for sg run --execute / sg summarize --tier cloud
-pip install "skeletongraph[all]"    # everything
-```
 
 ## License
 

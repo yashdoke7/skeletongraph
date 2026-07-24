@@ -12,7 +12,6 @@ from skeletongraph.storage.local import load_index, save_index
 from skeletongraph.retrieval.intent import Entity, Intent, analyze_intent, TaskType
 from skeletongraph.retrieval.resolver import _resolve_entities, resolve_context, Tier
 from skeletongraph.retrieval.budget import TokenBudget, Zone3Mode
-from skeletongraph.assembly.zone_assembler import assemble_context
 
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "python_small"
@@ -251,38 +250,10 @@ class TestTokenBudget:
         assert alloc.zone3_mode == Zone3Mode.NONE
         assert alloc.warning != ""
 
-
-class TestZoneAssembly:
-    """Test end-to-end context assembly."""
-
-    @pytest.fixture(scope="class")
-    def assembled(self, tmp_path_factory):
-        import shutil
-        tmp = tmp_path_factory.mktemp("assemble_project")
-        if FIXTURES_DIR.exists():
-            shutil.copytree(FIXTURES_DIR, tmp, dirs_exist_ok=True)
-
-        store = build_index(tmp)
-        result = resolve_context("fix validate_token in middleware.py", store)
-        return assemble_context(result, store, tmp, constraints="# Use strict typing")
-
-    def test_has_constraints(self, assembled):
-        assert "CONSTRAINTS" in assembled.text or "strict typing" in assembled.text
-
-    def test_has_task(self, assembled):
-        assert "TASK" in assembled.text
-        assert "validate_token" in assembled.text
-
-    def test_has_target_code(self, assembled):
-        assert "TARGET CODE" in assembled.text or "validate_token" in assembled.text
-
-    def test_token_count(self, assembled):
-        assert assembled.token_count > 0
-        assert assembled.token_count < 128000
-
-    def test_confidence(self, assembled):
-        assert assembled.confidence in ("HIGH", "MEDIUM", "LOW")
-
-    def test_zone_breakdown(self, assembled):
-        assert "zone1_constraints" in assembled.zone_breakdown
-        assert "zone4_prompt" in assembled.zone_breakdown
+# NOTE: a TestZoneAssembly class previously lived here, covering
+# skeletongraph.assembly.zone_assembler.assemble_context. That module was
+# deliberately removed as dead code (commit 507d077) when the pipeline moved
+# to the resolver/rerank/fusion architecture tested above; assemble_context
+# has no current replacement to test against. If prompt assembly gets a
+# dedicated end-to-end test again, it should target whatever the CLI/MCP
+# path actually builds the final prompt with today, not this removed module.
