@@ -276,14 +276,21 @@ def fig_retrieval(nat, sg, dataset_path):
     ax.annotate("0%", (xs[1] - gap / 2, 0), textcoords="offset points",
                 xytext=(0, 4), ha="center", fontsize=8.5, color=INK_2,
                 fontweight="bold")
-    # right-aligned so the text runs away from the neighbouring bar, not over it
-    ax.annotate("text search returns\nwhole files — it cannot\nname a function",
-                (xs[1] - gap / 2, 0), textcoords="offset points", xytext=(-14, 20),
-                ha="right", fontsize=7.5, color=MUTED, linespacing=1.5)
+    # Every bar is <=86% tall, so the band above ~100% is clear across the whole
+    # width. Put the note there and point down to the 0% bar with a curved arrow.
+    # This cannot collide with the tall SG bar beside it or the file-group bars,
+    # which was the failure of the previous base-anchored placement.
+    ax.annotate("text search returns whole files —\nit cannot name a function",
+                xy=(xs[1] - gap / 2, 3), xytext=(0.42, 108),
+                textcoords="data", ha="center", va="center",
+                fontsize=7.5, color=MUTED, linespacing=1.4,
+                arrowprops=dict(arrowstyle="->", color=MUTED, lw=0.8,
+                                connectionstyle="arc3,rad=-0.25",
+                                shrinkA=3, shrinkB=3))
 
     ax.set_xticks(xs); ax.set_xticklabels(groups, fontsize=8.5)
     ax.set_ylabel("Tasks where retrieval returned the target (%)")
-    ax.set_ylim(0, 112)
+    ax.set_ylim(0, 122)
     ax.set_title("Both approaches find the right file.\nOnly one can point at the right function.",
                  color=INK, loc="left", pad=8)
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.24), ncol=1)
@@ -470,8 +477,8 @@ def fig_ceiling():
     x = range(len(stats))
 
     fig, (ax, ax2) = plt.subplots(
-        2, 1, figsize=(6.4, 5.0), sharex=True,
-        gridspec_kw={"height_ratios": [1.35, 1.0], "hspace": 0.18})
+        2, 1, figsize=(6.0, 3.9), sharex=True,
+        gridspec_kw={"height_ratios": [1.3, 1.0], "hspace": 0.20})
 
     # top: retrieval collapses
     ax.plot(x, natr, marker="o", color=INK_2, linewidth=1.6, markersize=5,
