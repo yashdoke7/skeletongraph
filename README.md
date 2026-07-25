@@ -12,6 +12,7 @@
   <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/pyversions/skeletongraph.svg" alt="Python versions"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-server-orange.svg" alt="MCP server"></a>
+  <a href="https://registry.modelcontextprotocol.io/v0/servers?search=skeletongraph"><img src="https://img.shields.io/badge/MCP%20Registry-listed-blueviolet.svg" alt="MCP Registry"></a>
   <img src="https://img.shields.io/badge/index-zero--LLM-16a34a" alt="Zero-LLM index">
 </p>
 
@@ -350,18 +351,28 @@ After `sg init` and `sg build`, register SG as an MCP server and write IDE hooks
 ```bash
 sg install --ide claude-code   # Claude Code: hooks + MCP server + CLAUDE.md rules
 sg install --ide cursor        # Cursor: MCP + .cursor/rules/skeletongraph.mdc + hooks
-sg install --ide cline         # Cline / Roo: MCP config + rules block
+sg install --ide cline         # Cline: MCP config + rules block
+sg install --ide roo           # Roo: MCP config + rules block
 sg install --ide copilot       # GitHub Copilot: MCP + copilot-instructions.md
 sg install --ide windsurf      # Windsurf: MCP + .windsurfrules
+sg install --ide zed           # Zed: MCP config + rules block
+sg install --ide continue      # Continue: MCP config + rules block
 sg install                     # auto-detect all installed IDEs
 ```
+
+`codex` and `antigravity` are accepted as aliases and currently route through the
+Copilot-style MCP installer.
+
+For any other MCP-capable client, or to configure it by hand, see
+[`mcp.example.json`](mcp.example.json) for the raw server config
+(`sg serve --path /path/to/your/project`).
 
 After install, restart your editor. SkeletonGraph runs as a background MCP server
 (`sg serve --path .`) that the IDE connects to automatically.
 
 ## MCP Tools
 
-Six tools are exposed to the IDE agent. Use these **instead of** grep/glob/file reads:
+Seven tools are exposed to the IDE agent. Use these **instead of** grep/glob/file reads:
 
 | Tool | When to call | Returns |
 | --- | --- | --- |
@@ -371,6 +382,7 @@ Six tools are exposed to the IDE agent. Use these **instead of** grep/glob/file 
 | `sg_expand "target"` | When more body is needed than `sg_search` returned | Full function body / file / line range (token-capped) |
 | `sg_constraint list` / `propose` | Before proposing changes | Confirmed + proposed project rules |
 | `sg_log` | Reviewing recent session turns | Last-N turn summaries with files touched |
+| `sg_decision` | A design/implementation choice is made (picked or rejected, and why) | Recorded so it survives context compaction — recall later with `sg_log(kind="decision")` |
 
 **Smart context routing.** On each `UserPromptSubmit`, SG classifies the prompt
 (architecture / explain / decision / debug / test / review / general) and
@@ -441,7 +453,8 @@ SG auto-builds on first invocation (see `auto_build_on_query` in config).
 | `sg watch` | Daemon: auto-reindex files on save |
 
 Provider output from `sg run --execute` is written to `.skeletongraph/runs/`.
-Evaluation is currently done externally via SWE-bench harness — see `docs/swe_bench_runbook.md`.
+Evaluation is currently done externally via a SWE-bench harness (see the
+[Evaluation](#evaluation) section below).
 
 ## Python API
 
@@ -469,6 +482,8 @@ src/skeletongraph/
   assembly/     context packet construction
   session/      memory and dedup
   server/       MCP server
+  install/      per-IDE hook + MCP config writers (`sg install`)
+  hooks/        IDE hook handlers (prompt-submit routing, etc.)
   llm/          LiteLLM wrapper for optional CLI execution
   cli/          Click commands
   engine.py     unified query pipeline
@@ -476,12 +491,9 @@ src/skeletongraph/
 
 ## Evaluation
 
-The architecture/pipeline blueprint and evaluation plan are in:
-
-```text
-docs/blueprint.md
-docs/evaluation.md
-```
+The full methodology, verified results, and every withdrawn/superseded claim are in
+[`docs/paper/skeletongraph.tex`](docs/paper/skeletongraph.tex) and
+[`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
 
 SkeletonGraph should be evaluated on both quality and cost:
 

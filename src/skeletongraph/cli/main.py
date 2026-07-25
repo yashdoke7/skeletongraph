@@ -1108,7 +1108,7 @@ def serve(path: str, port: int):
 
     stderr_console.print(f"[bold]> SkeletonGraph MCP server[/bold]  (stdio)")
     stderr_console.print(f"  Project: {project_root}")
-    stderr_console.print(f"  Tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log")
+    stderr_console.print(f"  Tools: sg_overview, sg_search, sg_get, sg_expand, sg_constraint, sg_log, sg_decision")
 
     from ..server.mcp import serve as mcp_serve
     from ..config import load_config
