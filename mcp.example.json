@@ -1,10 +1,9 @@
 {
   "mcpServers": {
     "skeletongraph": {
-      "command": "/path/to/python",
+      "command": "sg",
       "args": [
-        "-m",
-        "skeletongraph.server.mcp",
+        "serve",
         "--path",
         "/path/to/your/project"
       ]

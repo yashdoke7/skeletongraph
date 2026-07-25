@@ -94,6 +94,16 @@ Repository = "https://github.com/yashdoke7/skeletongraph"
 [tool.hatch.build.targets.wheel]
 packages = ["src/skeletongraph"]
 
+# The sdist otherwise pulls in the whole monorepo (research eval harness,
+# paper PDFs/GIFs) — none of it is needed to build or run the installed
+# package, so exclude it to keep `pip install skeletongraph` lean.
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/eval",
+    "/docs/paper",
+    "/docs/AMD_RUN_PLAN.md",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
