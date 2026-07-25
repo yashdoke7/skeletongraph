@@ -1,7 +1,15 @@
 # SkeletonGraph
 
-**A zero-LLM, tree-sitter structural index that reranks cheap lexical retrieval
-and fetches one function at a time — for AI coding agents.**
+<p align="center">
+  <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/v/skeletongraph.svg?color=blue" alt="PyPI"></a>
+  <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/pyversions/skeletongraph.svg" alt="Python versions"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-server-orange.svg" alt="MCP server"></a>
+</p>
+
+**Coding agents burn tokens reading whole files to find one function. SkeletonGraph
+indexes your repo with tree-sitter — no LLM — and hands the agent the exact function
+to edit, over MCP.**
 
 <p align="center">
   <img src="docs/paper/figures/skeletongraph_hero.gif"
