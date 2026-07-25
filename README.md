@@ -43,15 +43,14 @@ Identical action space for every arm; **only the retrieval backend changes**. Th
 | `grep` | 39.0% | .647 | 0% | 282 | 22.4 | .079 |
 | `aider` (repo-map) | 36.7% | — | — | 1,126 | 18.1 | .160 |
 | `none` (no retrieval) | 35.0% | — | — | 345 | 23.6 | .066 |
-| `sg-rerank` | 32.3% | **.747** | 57% | 274 | 23.2 | .055 |
 
 **`sg-fusion` is the top arm, the cheapest arm, and the only one that localizes to
 the function** (57% vs grep's 0% — lexical search is file-granular by construction).
 Against the closed-book floor of 35.0%, retrieval is worth **+7 points** here.
 
-Note the inversion at the bottom: `sg-rerank` has the **highest** first-search recall
-of any arm and the **lowest** solve rate among SG configurations. High recall does not
-imply task success — one of the more useful negative results in this project.
+`sg-rerank`'s recall/cost profile is reported separately in the agent-free intrinsic
+retrieval ablation in [`docs/paper/skeletongraph.tex`](docs/paper/skeletongraph.tex)
+(Table 2, §5.1) — best MRR/recall@10 short of full fusion, at the lowest index cost.
 
 ### 2. Deployment: SkeletonGraph vs native Claude Code (MCP, Docker-verified)
 
@@ -223,6 +222,53 @@ sg run "fix the auth token validation bug" --execute
 
 Local execution is intended for cheap pipeline testing. Use provider models for
 quality benchmarks unless the benchmark is specifically for local models.
+
+## Model Dependency, Prewarming, and Keeping the Index Fresh
+
+SG downloads **two** small embedding models on first use, both via
+`sentence-transformers` (a hard dependency, not optional):
+
+- **`jinaai/jina-embeddings-v2-base-code`** (`SG_DENSE_MODEL`) — the semantic
+  leg of `fusion`/`sg_search`. Loaded on `sg warm` or on an agent's first
+  dense-retrieval query. Loads with `trust_remote_code=True` (Jina ships custom
+  modeling code on the HF Hub) — this executes code from that model repo, same
+  as any `trust_remote_code` model.
+- **`all-MiniLM-L6-v2`** (`SG_EMBED_MODEL`) — a smaller, separate model used
+  only as a confidence-score tiebreaker at index time. Downloads automatically
+  on the **first `sg build`**, not on `sg warm`.
+
+Both need internet access the very first time each is used on a machine — after
+that, both are cached locally (Hugging Face's model cache, plus SG's own
+content-hash caches: `.skeletongraph/dense_cache` for the dense leg,
+`.skeletongraph/embeddings.npz` for the confidence tiebreaker) — so later builds
+are incremental: only functions whose text actually changed get re-embedded.
+
+**Prewarm before launching an agent**, so that cost lands during setup instead
+of on the agent's first real search:
+
+```bash
+sg build                 # parse + structural index (no LLM, fast)
+sg warm --path .          # prebuild BM25 + dense caches (one-time; minutes on CPU)
+sg warm --path . --mode rerank   # skip the dense leg entirely (no embedding cost)
+```
+
+Without this, the first `sg_search` call an agent makes pays the cold-encode
+cost inline — on a large repo this can exceed the dense retrieval leg's
+internal timeout (`SG_DENSE_TIMEOUT_S`, 20s by default), in which case it
+silently degrades to a 2-signal (lexical + structural) result rather than
+failing outright. Prewarming avoids relying on that fallback altogether.
+
+**Keeping the index current as files change** — two options, pick based on
+how you work:
+
+```bash
+sg update --path .        # one-shot: re-index only files that changed since last build
+sg watch --path .         # background daemon: auto-reindexes on save (needs `pip install "skeletongraph[daemon]"`)
+```
+
+`sg watch` is the hands-off option for active development — it debounces
+rapid saves and calls the same incremental update path as `sg update`, so
+editing a file is reflected in the index without a manual rebuild.
 
 ## Model Routing
 
