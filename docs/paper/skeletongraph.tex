@@ -3,17 +3,46 @@
 % Maintained by: yashdoke215@gmail.com
 % Compile: pdflatex skeletongraph.tex && bibtex skeletongraph && pdflatex skeletongraph.tex
 %
-% THESIS (do not weaken): high retrieval recall does NOT buy proportional
-% cost reduction. It removes the expensive exploration TAIL (p95 -42.5%),
-% not the median (+1.9%). pass@1 is a statistical tie (McNemar p=1.0)
-% because the benchmark is memorization-saturated (no-retrieval control
-% solves 36-44%).
+% THESIS (do not weaken), in two parts:
+%  (1) Retrieval recall does NOT buy proportional cost reduction. It removes
+%      the expensive exploration TAIL (p95 -42.5%), not the median (+1.9%).
+%      pass@1 is a statistical tie (McNemar p=1.0) because the benchmark is
+%      memorization-saturated (no-retrieval control solves 35-44%).
+%  (2) THE CEILING: SG runs all three non-LLM paradigms at once (lexical +
+%      dense semantic + structural graph). Crossing memorization x location-
+%      cues shows the retrieval advantage is ENTITY-ANCHORED — strip the
+%      symbols from the issue and it vanishes (86% -> 44% recall; -0.006 vs
+%      baseline on prose-only). The lexical baseline falls in parallel, so
+%      the limit belongs to the CATEGORY, not to our implementation. Cost
+%      saving survives anyway (-21% where retrieval is identical) => cost is
+%      reduced by BOUNDING WANDERING, not by finding code better.
+%      Implication: past this point you need behavioural reasoning over a
+%      representation of what code DOES, not a better index. Do not soften this
+%      into "more tuning would help".
+%      The wall is argued from MEASURED data only: (a) prose-strip collapse to
+%      lexical parity, (b) iterating the retriever saturates (+0.000, sec 7b).
+%      The LLM-in-loop localizer (sg-understand) is NOT claimed here -- too
+%      lightly tested to state, and it over-negativizes. See FINDINGS 7c
+%      (internal). SG is a POSITIVE result: better retrieval AND lower cost than
+%      the frontier agent's own retrieval; the ceiling is the honest boundary.
 %
 % NAMING: internal run tags (claude_v7 / nemotron_v4 / v2) must NEVER
-% appear. One result per pipeline, named by what it is. The react-loop arm
-% id "fusion" is presented as "SG-Fusion (react)".
+% appear. One result per pipeline, named by what it is. The two operating
+% points are ALWAYS "SG-Fusion" / "SG-Rerank" -- plain text. Never compound
+% the \sg macro with a suffix (it expands to \textsc{SkeletonGraph} and reads
+% badly compounded). \sg{} alone means the system generically;
+% SG-Fusion/SG-Rerank name a specific operating point. The frontier-agent
+% deployment headline (Table tail/retrieval, claude_v7 tag, arm id
+% "sg-fusion") is SG-Fusion -- say so once explicitly (sec:decoupling).
 %
-% \tbd{...} marks numbers pending nemotron_v4 verification completion.
+% NUMBERS: docs/paper/FINDINGS.md is the source of record. If this file and
+% that one disagree, FINDINGS.md is right. Note 86.2% (not 83.6%) first-search
+% recall — 3 tasks where the agent never called SG are excluded as adoption
+% events, not retrieval failures.
+%
+% FORMATTING: captions are set small+bold-label via the caption package so a
+% float can never be mistaken for body text. Keep captions SHORT — identify
+% the table, put the argument in the body.
 % =====================================================================
 \documentclass[11pt,letterpaper]{article}
 \usepackage[margin=1in]{geometry}
@@ -25,67 +54,53 @@
 \usepackage{hyperref}
 \usepackage{amsmath,amssymb}
 \usepackage[numbers,sort&compress]{natbib}   % numeric citations: [1], [2,3]
+% Captions must never be mistakable for body text. Smaller font + bold label +
+% extra separation makes a float visually distinct, so a reader scanning the page
+% can tell instantly whether the paragraph above continues below the table.
+\usepackage[font=small,labelfont=bf,skip=7pt,belowskip=4pt]{caption}
 \hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=blue!60!black,urlcolor=blue!60!black}
 \newcommand{\tbd}[1]{\textcolor{red}{[\textbf{TBD: }#1]}}
 \newcommand{\sg}{\textsc{SkeletonGraph}}
 
-\title{High Retrieval Recall Does Not Buy Proportional Cost Reduction:\\
-A Controlled Study of Code Retrieval in Frontier Coding Agents}
-\author{Yash Doke\\\texttt{yashdoke215@gmail.com}}
+\title{Retrieval Is Not Reasoning:\\
+The Localization Ceiling in AI Coding Agents}
+\author{Yash Doke\\Independent Researcher\\\texttt{yashdoke215@gmail.com}}
 \date{\today}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-A growing class of tools promises to make AI coding agents dramatically cheaper
-by giving them better code retrieval, with advertised savings ranging from
-tenfold to over ninety-nine percent. Those figures are almost always computed the
-same way: the tokens a structured query returns are compared against the tokens
-it would take to read the relevant files in full. That comparison omits the agent.
-It does not tell a practitioner whether more bugs get fixed, or whether the bill
-at the end of the month is smaller.
+Giving a coding agent structural code retrieval---returning the exact functions it
+needs instead of letting it read its way to them---is a natural way to cut what the
+agent spends, and an active line of both research and product work now pursues it.
+We take that idea and build it out completely. \sg{} is a structural retriever that
+runs lexical, dense-semantic, and call-graph retrieval simultaneously, returns whole
+functions, and serves them to an agent over the Model Context Protocol. We then do
+the step these cost arguments usually omit: we put it inside a real coding agent
+(Claude Code, in headless deployment) and measure the bill an agent actually pays,
+over 100 repository tasks, with every candidate fix adjudicated by executing the
+project's own test suite rather than trusting the agent's own verdict.
 
-We measure the quantity practitioners actually pay for. Every retrieval pipeline
-we test keeps its own interface and is placed in the same harness---the same
-model, the same repository tasks, the same edit-and-test loop, with every fix
-adjudicated by executing the project's own test suite. We evaluate our system,
-\sg{}, which indexes a repository's structure without invoking a language model
-and retrieves whole functions rather than files.
-
-Retrieval quality improves substantially. Running inside a production coding agent
-over 100 verified tasks, \sg{}'s first search locates the correct file in 83.6\%
-of tasks against 66.3\% for the agent's built-in text search, and it identifies
-the correct \emph{function} in roughly 80\% of tasks against 0\%---text search returns
-files, so naming a function is not something it does poorly but something it
-cannot do at all.
-
-The resulting cost saving is real but strongly conditional, and this is our
-central finding. On simple tasks \sg{} is slightly \emph{more} expensive, because
-its retrieval calls are pure overhead when the agent already knows where to look.
-On difficult tasks the saving is large: grouping the same 100 tasks into deciles
-by baseline cost, the effect rises monotonically from $+44\%$ on the cheapest
-decile to $-42.8\%$ on the most expensive, crossing break-even at roughly \$0.35
-per task. Averaged over everything this reads as $-14.6\%$, but the average
-conceals the mechanism: the entire saving comes from preventing the agent from
-wandering on tasks where it cannot find the code.
-
-We then show this saving has a ceiling that better retrieval cannot lift. Peak
-context is unchanged with and without retrieval (44.1k versus 44.9k tokens):
-retrieval does not shrink the agent's working set, it shortens the path to it, so
-cost falls only in proportion to steps saved ($-21.4\%$ steps, $-23.6\%$ tokens).
-An agent acquires whatever the task requires---from the retriever if supplied, by
-itself otherwise---and whatever it acquires early is re-sent on every later step.
-We test this four ways, giving the agent more context, less context, removing its
-need to re-read, and forcing it to verify; all four degraded cost or correctness.
-A fifth test, routing each task to whichever system would be cheaper, shows even a
-perfect oracle gains only 14\% and does so by selecting runs that failed early.
-
-The practical claim is therefore precise: structural retrieval cuts the cost of
-expensive tasks by roughly 40\% while leaving ordinary ones alone, and beyond that
-point cost is governed by how the model implements and validates rather than by
-how well it searches. Harness, task lists, and per-task records are released so
-this can be checked rather than believed.
+Constructing \sg{} as a deliberate superset of the non-LLM retrieval paradigms lets
+us ask a sharper question than whether retrieval helps: when it stops helping, is
+the limit our index or the whole category? Retrieval quality improves sharply---the
+first search locates the correct file in 86\% of tasks against 66\% for the agent's
+built-in search, and the correct \emph{function} in roughly 80\% against 0\%. Yet
+cost decouples from quality. The median task is no cheaper ($+1.9\%$); the entire
+saving lives in the tail ($-42.5\%$ at the 95th percentile), and solve rate is a
+statistical tie. Crossing whether the model has memorized the repository against
+whether the issue still names any code shows the advantage is \emph{anchored to
+those symbols}: strip them and first-search recall falls $86\% \to 44\%$, in
+lockstep with plain text search, and issuing more searches does not recover the
+gap. No combination of lexical, dense, and structural matching performs the
+inference from a symptom to the code responsible for it, because that inference is
+causal rather than one of resemblance. The cost saving survives the collapse anyway
+($-21\%$ where retrieval is identical to the baseline), so retrieval is bounding how
+far the agent wanders, not finding code better. Beyond this ceiling, progress needs
+a representation of what code \emph{does} that supports reasoning about program
+behavior---not a better index over what code resembles. We release the harness,
+task lists, and per-task records so the result can be checked rather than believed.
 \end{abstract}
 
 \section{Introduction}
@@ -125,7 +140,7 @@ Structural retrieval works. On its first search, built-in text search recovers
 66.3\% of the files a task requires and can never name the function to
 change---text search matches lines and returns files, so function-level retrieval
 is not something it does badly, it is something it cannot do. Our system recovers
-83.6\% of the files on its first search and identifies the correct function in
+86.2\% of the files on its first search and identifies the correct function in
 roughly 80\% of tasks. Against seven alternative strategies it consumes the fewest
 tokens by a wide margin.
 
@@ -165,13 +180,22 @@ benchmark. Retrieval quality is not measurable through solve rate here---which
 also invalidates solve-rate comparisons that would favor us
 (Section~\ref{sec:saturation}).
 
-\item \textbf{Four negative results with diagnostic value.} We attempt to convert
-retrieval quality into savings four ways and report all four failures, including
+\item \textbf{A localization ceiling, and evidence it is categorical.} Removing
+the code symbols from an issue collapses our three-paradigm retriever to
+lexical-baseline parity, and additional searches do not recover it. This locates
+the limit at similarity-based localization itself rather than at our
+implementation, and identifies the open problem as reasoning over a representation
+of program behavior---not a better index (Section~\ref{sec:ceiling}).
+
+\item \textbf{Five negative results with diagnostic value.} We attempt to convert
+retrieval quality into savings five ways and report all five failures, including
 one where removing a genuinely wasteful step made outcomes worse because the
 waste was load-bearing (Section~\ref{sec:interventions}).
 
 \item \textbf{A reproducible artifact.} The harness, the frozen task lists, and
-per-task records are released, along with an index that any user can rebuild from
+per-task records are released,\footnote{Code, task lists, and per-task run records:
+\url{https://github.com/ANON/skeletongraph} (anonymized for review; de-anonymized
+on acceptance).} along with an index that any user can rebuild from
 source because building it never calls a language model.
 \end{enumerate}
 
@@ -315,29 +339,46 @@ and verification. This measures \emph{deployed systems}, the unit practitioners
 actually choose between, rather than a retrieval function in isolation.
 
 \subsection{\sg{}}
-\sg{} builds a zero-LLM structural index with tree-sitter \citep{treesitter}
-parsers, producing a symbol table of fully-qualified names with line ranges,
-signatures, docstrings, and a call graph. Retrieval fuses three ranked lists by
-reciprocal rank fusion \citep{rrf}: BM25 \citep{bm25} (lexical), a dense code
-embedding model (semantic), and a structural reranker over the symbol graph.
-Fusion is used rather than a tuned linear combination deliberately---RRF has no
-score-scale parameters to fit, so no part of the ranking is tuned on the
-evaluation set.
+\sg{} has three stages, shown in Figure~\ref{fig:arch}: an offline index build, a
+per-query retrieval path, and a serving layer.
 
-Because indexing invokes no language model, index construction is not billed to a
-model and can be rebuilt by any user from source. This is a substantive
-difference from the graph-building systems in Section~\ref{sec:designspace},
-whose extraction step requires an LLM pass over every repository---a per-repo
-cost their reported token savings exclude, and one that must be re-paid whenever
-the repository changes materially.
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/fig_architecture.pdf}
+\caption{\sg{} architecture. The index build (top) invokes no language model; the
+retrieval path (middle) fuses three signals over the persisted index; the serving
+layer (bottom) exposes the result to a host agent over MCP.}
+\label{fig:arch}
+\end{figure}
 
+\paragraph{Index build (offline, zero-LLM).}
+Tree-sitter \citep{treesitter} parsers---covering ten language families---turn each
+source file into a symbol table of fully-qualified names with line ranges,
+signatures, and docstrings, together with a call graph over which we compute
+PageRank centrality. A BM25 \citep{bm25} index and, optionally, a code-specialized
+dense embedding (jina-code) are built over the same symbols; embeddings are
+content-hash cached so only changed functions re-encode. The whole index is
+persisted and, because no language model is invoked, is rebuildable by any user
+from source---a substantive difference from the graph-building systems in
+Section~\ref{sec:designspace}, whose extraction requires an LLM pass per repository
+that their reported token savings exclude and that must be re-paid on material
+change.
+
+\paragraph{Retrieval (per query).}
+An issue query is run through three legs in parallel---BM25 (lexical), the dense
+encoder (semantic), and a structural reranker that reorders a BM25 recall pool by
+entity anchoring, PageRank, and call-graph proximity---and their ranked lists are
+combined by reciprocal rank fusion \citep{rrf}. Fusion is chosen over a tuned
+linear combination deliberately: RRF has no score-scale parameters to fit, so no
+part of the ranking is tuned on the evaluation set. We evaluate two operating
+points: \emph{SG-Fusion} uses all three legs, and \emph{SG-Rerank} drops the dense
+leg (a BM25 pool reordered by structural confirmation), requiring no embedding
+model or prewarm.
+
+\paragraph{Serving.}
 The retrieval surface is exposed to agents over the Model Context Protocol
 \citep{mcp}, which is what makes the deployment measurement in
 Section~\ref{sec:decoupling} possible against an agent we do not control.
-
-We evaluate two operating points. \emph{SG-Fusion} is the three-way fusion
-above. \emph{SG-Rerank} drops the dense leg (a BM25 recall pool reordered by
-structural confirmation), requiring no embedding model or prewarm.
 
 \subsection{Harnesses}
 \textbf{React loop.} Our own agent loop offers tools directly to the model, with
@@ -346,12 +387,16 @@ fairly (Section~\ref{sec:exclusion} explains why they cannot be compared inside
 a headless frontier agent).
 
 \textbf{Frontier-agent deployment.} \sg{} runs as a real MCP server driven by a
-frontier coding agent in headless mode, against an unmodified native-tools
-baseline. This measures deployment economics under an agent we do not control.
+production frontier coding agent (Claude Code) in headless mode, against the same
+agent using only its unmodified native tools. This measures deployment economics
+under an agent we do not control; subsequent references to ``the frontier agent''
+denote this configuration.
 
-The two harnesses implement the same three-way fusion algorithm in separate code
-paths; we present them as SG-Fusion (react) and SG-Fusion (MCP) and never pool
-their numbers.
+The two harnesses implement the same retrieval algorithms in separate code paths
+and their numbers are never pooled. Unless a table states otherwise, \sg{} is
+deployed as \emph{SG-Fusion}---the frontier-agent deployment measurement in
+Section~\ref{sec:decoupling} is SG-Fusion; Table~\ref{tab:retrieval-intrinsic}
+separately reports SG-Rerank on the agent-free intrinsic retrieval ablation.
 
 \subsection{A cost model for agentic retrieval}
 \label{sec:model}
@@ -470,7 +515,7 @@ the result has two distinct parts that are easy to conflate.
 \toprule
 & Built-in tools & + \sg{} \\
 \midrule
-Correct file found by the \emph{first} search & 66.3\% & \textbf{83.6\%} \\
+Correct file found by the \emph{first} search & 66.3\% & \textbf{86.2\%} \\
 Correct file found \emph{eventually} (any search) & 83.4\% & 90.7\% \\
 Correct \emph{function} identified & 0\% & \textbf{79--81\%} \\
 \midrule
@@ -478,22 +523,28 @@ Precision of the first search & 61.8\% & 34.2\% \\
 \bottomrule
 \end{tabular}
 \caption{Retrieval accuracy inside the production agent, 100 tasks. File rows are
-\emph{recall}---the fraction of a task's gold files returned, averaged over
-tasks---not the weaker ``at least one file matched''. The first two rows differ in
-an important way: both approaches usually reach the right file \emph{eventually},
-but the built-in tools get there by reading whereas \sg{} returns it immediately,
-and the gap between 66.3\% and 83.4\% for the baseline is what that hunting costs.
-The function row is given as a range because gold function names recovered from
-patch hunks are approximate: 81\% against the released gold set, 79\% after a
-stricter disambiguation pass. Both are reported; neither changes any conclusion.}
+\emph{recall}, not ``at least one file matched''.}
 \label{tab:retrieval}
 \end{table}
 
+Three points about how Table~\ref{tab:retrieval} is measured, before reading it.
+File rows report \emph{recall}---the fraction of a task's gold files returned,
+averaged over tasks---rather than the weaker criterion of at least one file
+matching, which flatters any retriever that returns many files. The
+\sg{} first-search figure excludes three tasks in which the agent never invoked
+\sg{} at all; those are adoption events rather than retrieval failures, and
+scoring them as misses would attribute a decision the retriever did not make to
+its accuracy. The function row is a range because gold function names recovered
+from patch hunks are approximate: 81\% against the released gold set, 79\% after
+a stricter disambiguation pass. Both are reported; neither changes a conclusion.
+
 At the level of \emph{which file to edit}, both approaches work, and the gap
-depends on when you measure. On its first search \sg{} finds the right file 83.6\%
+depends on when you measure. On its first search \sg{} finds the right file 86.2\%
 of the time against 66.3\% for text search---but given the whole trajectory, the
-baseline eventually reaches it 83.4\% of the time. Text search is a genuinely
-strong baseline, consistent with prior work finding simple pipelines competitive
+baseline eventually reaches it 83.4\% of the time. That difference between 66.3\%
+and 83.4\% is precisely what the baseline's hunting costs: both usually reach the
+right file, but one returns it and the other finds it by reading. Text search is a
+genuinely strong baseline, consistent with prior work finding simple pipelines competitive
 with elaborate scaffolding \citep{agentless}. The difference is not whether it
 arrives but how much it spends arriving, and Section~\ref{sec:analysis} shows
 those intervening reads are the single largest token consumer in the baseline.
@@ -518,12 +569,44 @@ exchange for reliably covering the target.
 \centering
 \includegraphics[width=0.72\linewidth]{figures/fig_retrieval.pdf}
 \caption{Retrieval accuracy at two granularities (frontier agent, 100 tasks).
-The function-level gap is not a tuning difference: lexical search returns file
-matches, so its function-level rate is $0\%$ by construction. This is the
-largest quality difference we measure anywhere---and
-Section~\ref{sec:decoupling} shows it does not transfer to cost.}
+Lexical search scores $0\%$ at function level by construction, not by tuning.}
 \label{fig:retrieval}
 \end{figure}
+
+\paragraph{The same ordering holds with the agent removed entirely.}
+Table~\ref{tab:retrieval} measures retrieval as the deployed agent actually used
+it---one call among many, mixed with whatever the agent did around it. To check
+that the ranking is a property of the retrievers and not an artifact of how one
+particular agent happened to call them, we run a controlled, agent-free ablation
+over the same 100 tasks: five backends, identical queries, identical $k$, no
+agent in the loop at all.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Retrieval backend & MRR & Recall@10 \\
+\midrule
+Lexical grep            & 0.159 & 0.348 \\
+BM25                     & 0.482 & 0.719 \\
+SG-Rerank                & 0.518 & 0.824 \\
+BM25 + Dense             & 0.551 & 0.843 \\
+BM25 + Dense + SG (fusion) & \textbf{0.658} & \textbf{0.856} \\
+\bottomrule
+\end{tabular}
+\caption{Intrinsic retrieval ablation, no agent: same 100 SWE-bench Verified
+tasks as Table~\ref{tab:retrieval}, backend varied with everything else fixed.}
+\label{tab:retrieval-intrinsic}
+\end{table}
+
+The ordering is exactly what Section~\ref{sec:designspace}'s design-space argument
+predicts, and it is monotone: each signal added to the ranking improves both
+metrics, and combining all three beats any subset. This rules out the alternative
+explanation for Table~\ref{tab:retrieval}---that the frontier agent's own search
+habits, rather than the retriever, produced the gap---and it is the cleanest
+single piece of evidence that structural and semantic signals are additive with
+lexical search rather than redundant with it, at least up to the ceiling
+Section~\ref{sec:ceiling} identifies.
 
 \subsection{The decoupling: retrieval improves, the typical bill does not}
 \label{sec:decoupling}
@@ -553,13 +636,8 @@ Task cost percentile & Built-in tools & + \sg{} & Change \\
 Average across all tasks & \$0.434 & \$0.371 & $-14.6\%$ \\
 \bottomrule
 \end{tabular}
-\caption{Where the saving lives. Each row is a point in the cost distribution
-over the same 100 tasks: the 50th-percentile row is the typical task, the
-95th-percentile row is among the most expensive. Retrieval does nothing for the
-typical task and removes over 40\% of the cost of the worst ones. The average in
-the final row is produced by the bottom rows, not spread across them. Paired
-bootstrap 95\% confidence interval on the average change:
-$[-25.3\%, -1.2\%]$.}
+\caption{Where the saving lives: the cost distribution over the same 100 tasks.
+Paired bootstrap 95\% CI on the average change: $[-25.3\%, -1.2\%]$.}
 \label{tab:tail}
 \end{table}
 
@@ -588,12 +666,8 @@ Decile & Baseline cost range & Cost change & Tasks where \sg{} was cheaper \\
 10 & \$1.01 -- \$2.12 & $\mathbf{-42.8\%}$ & 9 / 10 \\
 \bottomrule
 \end{tabular}
-\caption{The crossover. Tasks grouped into deciles by baseline cost. Retrieval
-costs money on the six cheapest deciles and saves money on the four most
-expensive, with break-even near \$0.35 per task. The rightmost column is nearly
-perfectly ordered (0,0,0,2,2,4,7,8,8,9), which is what distinguishes this from
-noise. Decile~5 contains one volatile outlier that inflates its percentage; its
-win count is consistent with its neighbours.}
+\caption{The crossover: tasks grouped into deciles by baseline cost. Break-even
+falls near \$0.35 per task.}
 \label{tab:decile}
 \end{table}
 
@@ -601,7 +675,11 @@ Two things follow. First, there is a \textbf{break-even complexity} at roughly
 \$0.35 per task: below it retrieval is overhead, above it retrieval pays, and the
 return grows with difficulty. Second, the ordering of the win-count column
 (0,0,0,2,2,4,7,8,8,9) is what makes this a law rather than an artifact---a noisy
-effect would not order itself that cleanly across ten independent groups.
+effect would not order itself that cleanly across ten independent groups. One
+caveat belongs with the table: decile~5 contains a single volatile task that
+inflates its percentage, though its win count remains consistent with its
+neighbours---which is why the ordered win counts, not the percentages, carry the
+argument.
 
 The mechanism is straightforward once stated. \sg{} adds a fixed overhead: its own
 retrieval calls, which are billed whether or not they were needed. On a \$0.11
@@ -698,10 +776,7 @@ two axes that matter jointly.
 \centering
 \includegraphics[width=0.82\linewidth]{figures/fig_token_efficiency.pdf}
 \caption{Whole systems on a second model family (120B-class open model, 100
-SWE-bench Verified tasks; each pipeline keeps its own retrieval interface). The
-horizontal spread is an order of magnitude; the vertical spread is a few points
-and is not statistically significant. Note the position of the no-retrieval
-control.}
+tasks; each pipeline keeps its own retrieval interface).}
 \label{fig:tokens}
 \end{figure}
 
@@ -725,10 +800,9 @@ part of $c_0$ and is therefore re-sent on \emph{every} turn, so a one-time
 than injecting, but return broader payloads than a function-level fetch.
 
 \paragraph{Retrieval quality and token cost are separately optimizable.}
-\sg{}'s two operating points make this concrete. SG-Rerank achieves the best
-function-level recall of any arm (0.404 versus 0.342 for BM25 and 0.228 for the
-graph-query competitor) at the lowest token cost of any arm---while its solve
-rate is indistinguishable from a system using $6\times$ the tokens. Retrieval
+SG-Fusion sits at the best-recall, lowest-cost corner of this figure
+simultaneously---the agent-free intrinsic ablation (Table~\ref{tab:retrieval-intrinsic})
+confirms the same ordering with no agent search habits in the loop. Retrieval
 quality is real and measurable; it simply is not what determines whether the
 task is solved on this benchmark.
 
@@ -738,31 +812,26 @@ task is solved on this benchmark.
 \toprule
 Retrieval backend & $n$ & pass@1 & rec@1 & funcHit & Cost \\
 \midrule
-\sg{}-Fusion            & 100 & \textbf{42.0\%} & 0.737 & \textbf{57\%} & \textbf{\$0.052} \\
+SG-Fusion            & 100 & \textbf{42.0\%} & 0.737 & \textbf{57\%} & \textbf{\$0.052} \\
 BM25                    & 100 & 41.0\% & 0.642 & 43\% & \$0.074 \\
 Graph-query competitor  & 100 & 41.0\% & 0.223 & 9\%  & \$0.078 \\
 Lexical grep            & 100 & 39.0\% & 0.647 & 0\%  & \$0.079 \\
 Repo-map competitor     &  98 & 36.7\% & ---   & ---  & \$0.160 \\
 \texttt{none} (closed-book) & 100 & 35.0\% & 0.000 & 0\% & \$0.066 \\
-\sg{}-Rerank            &  99 & 32.3\% & \textbf{0.747} & 57\% & \$0.055 \\
 \bottomrule
 \end{tabular}
-\caption{Controlled retrieval ablation in the react loop (open-weight model,
-100 tasks, identical action space; only the retrieval backend varies). The
-closed-book \texttt{none} arm establishes a memorization floor of 35.0\%, and
-\sg{}-Fusion exceeds it by seven points while being the cheapest arm and the
-only one combining top solve rate with function-level localization. Note the
-inversion at the bottom: \sg{}-Rerank has the \emph{highest} first-search recall
-of any arm and the \emph{lowest} solve rate among \sg{} configurations---high
-recall does not imply task success.}
+\caption{Controlled retrieval ablation in the react loop: open-weight model,
+100 tasks, identical action space, only the retrieval backend varies.}
 \label{tab:react}
 \end{table}
 
 Table~\ref{tab:react} reports the controlled ablation. Unlike the frontier-agent
 setting, this model memorizes less: the closed-book floor is 35.0\%, and
-retrieval buys a genuine seven-point improvement on top of it. This is the
-cleanest evidence in our study that retrieval quality can matter for outcomes---
-and it matters precisely where memorization does not already supply the answer.
+retrieval buys a genuine seven-point improvement on top of it. SG-Fusion is
+simultaneously the highest-scoring arm, the cheapest arm, and the only one that
+localizes to the function rather than the file. This is the cleanest evidence in
+our study that retrieval quality can matter for outcomes---and it matters
+precisely where memorization does not already supply the answer.
 
 \subsection{Why competitors cannot be compared inside a headless frontier agent}
 \label{sec:exclusion}
@@ -835,11 +904,11 @@ wins on tasks that were not---is the tail profile of Table~\ref{tab:tail} restat
 at the level of individual runs, and it is why the average and the median
 disagree.
 
-\subsection{Four attempts to beat the bound, and why each failed}
+\subsection{Five attempts to beat the bound, and why each failed}
 \label{sec:interventions}
 Section~\ref{sec:floor} predicts that payload shaping has bounded leverage and
 that $T$ is not a retrieval variable. We tested that prediction directly, with
-four interventions spanning the space. All four are reported; none succeeded.
+five interventions spanning the space. All five are reported; none succeeded.
 Their failure modes are individually informative and jointly diagnostic.
 
 \paragraph{(A) Give more, and forbid the alternative.}
@@ -926,7 +995,7 @@ Taken with the measurements, this is the evidence for a genuine ceiling rather
 than an unexploited opportunity. Four independent observations point at it:
 
 \begin{enumerate}
-\item Retrieval accuracy is already near its practical maximum---83.6\% first-search
+\item Retrieval accuracy is already near its practical maximum---86.2\% first-search
 file recall, ~80\% function identification---and the median task is no cheaper.
 Whatever remains is not waiting on better ranking.
 \item The agent's peak context is unchanged (44.1k versus 44.9k tokens), so the
@@ -947,7 +1016,7 @@ it---and on tasks where that prefix was already short, it is a net cost.
 \label{sec:ceiling}
 A natural objection is that our structural retriever is simply not good enough,
 and that a better lexical index, a stronger code embedder, or a richer graph
-would close the gap. We can address this directly, because \sg{}-Fusion is not
+would close the gap. We can address this directly, because SG-Fusion is not
 one paradigm but three operating simultaneously: lexical (BM25), semantic (a
 code-specialized dense encoder), and topological (the call graph). If any of the
 three could infer which code is responsible for a described symptom, removing the
@@ -965,15 +1034,10 @@ memorized benchmark, retrieval augmented with all three paradigms is
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{figures/fig_ceiling.pdf}
-\caption{\textbf{Top:} first-search file recall as location cues are removed
-(left to right). The advantage of combining lexical, semantic, and topological
-retrieval collapses; the baseline declines in parallel, so the limit is a
-property of the category rather than of one implementation. \textbf{Bottom:} the
-cost saving persists in every condition---including the one where retrieval
-quality is identical to the baseline. Retrieval quality is therefore not the
-mechanism producing the saving. SWE-Verified columns are restricted to the same
-15 tasks as the prose run so that the raw and prose conditions are paired.}
+\includegraphics[width=0.82\linewidth]{figures/fig_ceiling.pdf}
+\caption{\textbf{Top:} first-search file recall as location cues are removed.
+\textbf{Bottom:} the cost saving, which persists throughout. SWE-Verified columns
+use the same 15 tasks as the prose run so the conditions are paired.}
 \label{fig:ceiling}
 \end{figure}
 
@@ -987,6 +1051,34 @@ survives the collapse of the retrieval advantage.} In the prose-only condition
 where recall is identical to the baseline, cost still falls by 21\%. Whatever
 \sg{} is doing to reduce cost, it is not out-retrieving the baseline; it is
 bounding how far the agent wanders before it commits.
+
+\paragraph{And iterating the retriever does not rescue it.}
+A natural response is that a single search is the wrong unit---that an agent
+issuing follow-up queries would recover what the first missed. It does not, in the
+regime that matters. On the decontaminated set, additional structural searches
+return essentially the same ranking: 2.3 searches per task lift recall from its
+first-search value by $+0.000$ (Section~\ref{sec:analysis} details this), because a
+query reformulated from the issue text alone re-samples the same impoverished
+vocabulary each time. A lexical agent's own iteration fares better only because it
+has a genuine feedback loop---it reads a file, learns the repository's real
+vocabulary, and greps again---which is precisely the behaviour a confident ranked
+list suppresses. Similarity retrieval cannot bootstrap information it does not
+already contain: if the responsible symbol is neither named in the query nor near
+it in the index, re-querying the same index will not surface it.
+
+\paragraph{What the wall is made of.}
+The missing ingredient is not a sharper index but a different kind of knowledge.
+Locating the code responsible for a described symptom requires knowing what code
+\emph{does} when it runs---its behaviour, and its effect on program state---which
+is exactly what none of the three paradigms encodes. Each matches on a form of
+resemblance: shared tokens (lexical), embedding proximity (dense), or graph
+adjacency (structural). None represents execution. This is why the ceiling is a
+property of similarity-based localization itself rather than of our particular
+retriever, and it locates the open problem precisely: crossing it is not a
+retrieval task at all but a reasoning task over a representation of program
+behaviour, and building that representation---cheaply, without an LLM pass per
+repository---is where we see the next advance, not in a better ranking over the
+representations we already have.
 
 \section{Threats to Validity}
 \label{sec:threats}

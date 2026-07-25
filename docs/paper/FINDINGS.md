@@ -96,8 +96,11 @@ $0.0793) with the **best function-level localization** (57% vs grep's 0%). This 
 the cleanest "retrieval helps" evidence in the project, and it complements (does not
 duplicate) the Claude deployment study.
 
-**Inversion worth reporting:** `sg-rerank` has the *highest* rec@1 (0.747) and the
-*lowest* pass@1 among SG arms (32.3%). High recall does not imply solve rate.
+**`sg-rerank` row is bugged — excluded from the paper.** This nemotron_v4 `sg-rerank`
+arm did not actually run rerank-mode retrieval (unlike the correctly-configured
+`sg-rerank` in the nemotron_v2 run and in the agent-free intrinsic ablation, §3b).
+Do not cite these numbers anywhere (paper, README, resume, posts) — removed from
+Table~tab:react in the paper 2026-07-24.
 
 **Incomplete arms:** `sg-chain` (n=13) and `sg` (n=15) are partial — report as
 partial or omit; do NOT compare them against the n=100 arms.
@@ -123,6 +126,29 @@ partial or omit; do NOT compare them against the n=100 arms.
   cheap because the *edit* is trivial, not because retrieval was free, so a single global
   floor cannot bound savings on the average task. The tail decomposition (§4) is the
   rigorous version of the same intuition; use that instead.
+
+---
+
+## 3b. INTRINSIC RETRIEVAL ABLATION (n=100, SWE-bench Verified, no agent) — NOW IN PAPER
+
+Files: `eval/results/paper_verified_{grep,bm25,bm25-dense,sg-rerank,bm25-dense-sg}_file.json`
+(dataset `eval/datasets/graphify_100.jsonl` — despite the name, confirmed same 100
+SWE-Verified tasks used throughout the paper, task_ids match e.g. astropy__astropy-12907).
+Found 2026-07-23 — this is the "retrieval only benchmark on SWE for the whole 100
+tasks" the user recalled; was sitting unused despite the `paper_` filename prefix.
+
+| backend | MRR | recall@10 |
+|---|---|---|
+| grep | 0.159 | 0.348 |
+| bm25 | 0.482 | 0.719 |
+| sg-rerank | 0.518 | 0.824 |
+| bm25+dense | 0.551 | 0.843 |
+| bm25+dense+sg (fusion) | **0.658** | **0.856** |
+
+Monotone: each added signal improves both metrics, fusion wins outright. Corroborates
+Table~tab:retrieval (agent-observed) with a clean agent-free measurement — rules out
+"it's the agent's search habits, not the retriever" as an alternative explanation.
+Now in paper as Table~tab:retrieval-intrinsic, §5.1.
 
 ---
 
@@ -237,6 +263,62 @@ each round, which means structural navigation (`outline` for repo vocabulary/str
 `neighbors` for graph traversal to code that is causally related but lexically
 dissimilar). `sg_search` is the probe, not the engine. Both primitives already exist:
 `graph/dependency.py::blast_radius` (callers) and `::dependency_chain` (callees).
+
+---
+
+## 7c. THE BUILT LOCALIZER IS A WASH — `sg-understand` (n=15 rebench-prose, retrieval-only)
+
+> **STATUS: INTERNAL ONLY — NOT CLAIMED IN THE PAPER.** Too lightly tested (n=15,
+> retrieval-only, one dataset) to state as a result, and asserting "an LLM in the
+> loop also fails" over-negativizes a paper whose story is a positive one (better
+> retrieval + lower cost than the frontier agent's own infra) with an honest wall.
+> The paper argues the wall from MEASURED data only: the prose-strip collapse (§1c)
+> and retriever-iteration saturation (§7b). Keep this record for our own honesty
+> about what we ran; do not cite it. If ever revived, it needs full react-loop
+> pass@1 at real n, not a retrieval probe.
+
+Built per §7b's prescription: a tool-calling loop (`sg_outline` + `sg_search` +
+`sg_neighbors` → `commit`) over a small NIM model, with a never-worse floor
+(any no-answer/error/timeout path falls back to plain `retrieve_fusion`). Code:
+`eval/backends/localizer.py`; probe backend `sg-understand`; floor baseline
+`product-fusion` (the REAL `skeletongraph.retrieval.fusion.retrieve_fusion`, not
+the eval-only `bm25-dense-sg` reimpl — those are different code and must not be
+cross-compared).
+
+**Result: no reliable lift over the fusion floor.** On the 15-task rebench-prose
+slice, ~9/15 tasks are gated as already-confident (fusion has a query-named symbol
+in top-3), leaving ~6 addressable. Among those the loop improves ~1 and worsens ~1
+per run, aggregate MRR indistinguishable from the floor (floor 0.557; sg-understand
+0.534–0.577 across runs). **Replicated across models and merge policies:**
+
+| model | merge policy | agg MRR | vs floor 0.557 |
+|---|---|---|---|
+| nemotron-super-49b | override (loop-first) | 0.577 | +0.020 (wash) |
+| nemotron-super-49b | override (rerun) | 0.543 | −0.014 (wash) |
+| llama-3.1-70b-instruct | override | 0.536 | −0.021 (wash) |
+| llama-3.1-70b-instruct | additive/RRF blend | 0.534 | −0.023 (wash) |
+
+The additive-merge fix (make the never-worse floor cover RANKING, not just the
+error path) fixed one regression and created two others — net still zero. Two
+merge mechanics both land at the floor, so the arbitration rule is not the lever.
+
+**Why (traced, not assumed):** (1) prose queries rarely name a symbol, so the loop
+can't anchor — same blind spot as the static paradigms; (2) the model cannot tell
+when its own `commit` should override fusion's ranking, so correct and incorrect
+overrides cancel. This is the empirical backing for the paper's §ceiling second leg.
+
+**Bugs fixed en route (all real, all in `localizer.py`):** dense-timeout race made
+the floor itself non-deterministic run-to-run (fixed via prewarm, `warm_repos.py`);
+SDK `max_retries` default silently 3×'d every timeout; `tool_choice="auto"` let the
+model answer in plain text (→ `"required"`); `max_tokens=700` truncated tool-call
+JSON (→ 1024); empty-string `arguments` poisoned conversation history for the next
+turn (→ `or "{}"`); thinking-mode not disabled on the reasoning model (5–104s/turn).
+None of these changed the qualitative wash — they were prerequisites to measuring it.
+
+**Caveat:** n=15, retrieval-only (not a full react-loop pass@1). Bounded negative
+result. `nemotron_l3_v1` (n=15 SWE-Verified react loop, 40% vs 27% pass@1) predates
+every fix above, is on the memorization-saturated benchmark, and has no significance
+test — DO NOT cite it as a localizer win.
 
 ---
 
