@@ -1,0 +1,82 @@
+<svg viewBox="0 0 1280 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SkeletonGraph — zero-LLM structural code retrieval for AI coding agents">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#10161f"/>
+      <stop offset="100%" stop-color="#161f2c"/>
+    </linearGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f2f5f9"/>
+      <stop offset="100%" stop-color="#cdd6e0"/>
+    </linearGradient>
+    <radialGradient id="nodeGlowGreen" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1f9d55" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#1f9d55" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nodeGlowBlue" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#2f6fd0" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#2f6fd0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nodeGlowAmber" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#c9772a" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#c9772a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="240" fill="url(#bg)"/>
+
+  <!-- structural call-graph motif, left field -->
+  <g stroke="#3a4757" stroke-width="1.4" fill="none" opacity="0.9">
+    <path d="M 70 70 L 140 100 L 70 150 L 130 178 M 140 100 L 205 95 M 205 95 L 205 165 L 130 178"/>
+    <path d="M 205 95 L 250 60"/>
+  </g>
+  <g>
+    <circle cx="70" cy="70" r="34" fill="url(#nodeGlowBlue)"/>
+    <circle cx="70" cy="70" r="6" fill="#2f6fd0"/>
+    <circle cx="140" cy="100" r="30" fill="url(#nodeGlowGreen)"/>
+    <circle cx="140" cy="100" r="7.5" fill="#1f9d55"/>
+    <circle cx="70" cy="150" r="26" fill="url(#nodeGlowAmber)"/>
+    <circle cx="70" cy="150" r="5.5" fill="#c9772a"/>
+    <circle cx="205" cy="95" r="28" fill="url(#nodeGlowBlue)"/>
+    <circle cx="205" cy="95" r="6" fill="#2f6fd0"/>
+    <circle cx="205" cy="165" r="24" fill="url(#nodeGlowGreen)"/>
+    <circle cx="205" cy="165" r="5" fill="#1f9d55"/>
+    <circle cx="130" cy="178" r="22" fill="url(#nodeGlowAmber)"/>
+    <circle cx="130" cy="178" r="5" fill="#c9772a"/>
+    <circle cx="250" cy="60" r="20" fill="url(#nodeGlowGreen)"/>
+    <circle cx="250" cy="60" r="4.5" fill="#1f9d55"/>
+  </g>
+
+  <!-- echo of the same motif, right field, mirrored -->
+  <g stroke="#3a4757" stroke-width="1.4" fill="none" opacity="0.9">
+    <path d="M 1210 170 L 1140 140 L 1210 90 L 1150 62 M 1140 140 L 1075 145 M 1075 145 L 1075 75 L 1150 62"/>
+    <path d="M 1075 145 L 1030 180"/>
+  </g>
+  <g>
+    <circle cx="1210" cy="170" r="34" fill="url(#nodeGlowAmber)"/>
+    <circle cx="1210" cy="170" r="6" fill="#c9772a"/>
+    <circle cx="1140" cy="140" r="30" fill="url(#nodeGlowBlue)"/>
+    <circle cx="1140" cy="140" r="7.5" fill="#2f6fd0"/>
+    <circle cx="1210" cy="90" r="26" fill="url(#nodeGlowGreen)"/>
+    <circle cx="1210" cy="90" r="5.5" fill="#1f9d55"/>
+    <circle cx="1075" cy="145" r="28" fill="url(#nodeGlowAmber)"/>
+    <circle cx="1075" cy="145" r="6" fill="#c9772a"/>
+    <circle cx="1075" cy="75" r="24" fill="url(#nodeGlowBlue)"/>
+    <circle cx="1075" cy="75" r="5" fill="#2f6fd0"/>
+    <circle cx="1150" cy="62" r="22" fill="url(#nodeGlowGreen)"/>
+    <circle cx="1150" cy="62" r="5" fill="#1f9d55"/>
+    <circle cx="1030" cy="180" r="20" fill="url(#nodeGlowBlue)"/>
+    <circle cx="1030" cy="180" r="4.5" fill="#2f6fd0"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="640" y="120" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+        font-size="72" font-weight="700" letter-spacing="2" fill="url(#wordmark)">Skeleton<tspan fill="#1f9d55">Graph</tspan></text>
+
+  <!-- tagline -->
+  <text x="640" y="165" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+        font-size="20" font-weight="400" letter-spacing="3.5" fill="#8593a2">ZERO-LLM STRUCTURAL RETRIEVAL FOR AI CODING AGENTS</text>
+
+  <!-- underline accent -->
+  <rect x="470" y="182" width="340" height="3" rx="1.5" fill="#2f6fd0" opacity="0.0"/>
+  <line x1="490" y1="184" x2="790" y2="184" stroke="#3a4757" stroke-width="1"/>
+</svg>

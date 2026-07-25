@@ -1,3 +1,10 @@
+<!-- mcp-name: io.github.yashdoke7/skeletongraph -->
+<p align="center">
+  <img src="docs/paper/figures/skeletongraph_banner.png"
+       alt="SkeletonGraph — the exact function, not a pile of files. Zero-LLM structural retrieval for AI coding agents, served over MCP."
+       width="100%">
+</p>
+
 # SkeletonGraph
 
 <p align="center">
@@ -5,32 +12,64 @@
   <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/pyversions/skeletongraph.svg" alt="Python versions"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-server-orange.svg" alt="MCP server"></a>
+  <img src="https://img.shields.io/badge/index-zero--LLM-16a34a" alt="Zero-LLM index">
+</p>
+
+<p align="center">
+  <strong>Works with</strong>&nbsp;
+  <img src="https://img.shields.io/badge/Cursor-1A1A1A?style=flat-square&logo=cursor&logoColor=white" alt="Cursor">
+  <img src="https://img.shields.io/badge/Claude%20Code-D97757?style=flat-square&logo=anthropic&logoColor=white" alt="Claude Code">
+  <img src="https://img.shields.io/badge/GitHub%20Copilot-000000?style=flat-square&logo=githubcopilot&logoColor=white" alt="GitHub Copilot">
+  <img src="https://img.shields.io/badge/Codex-412991?style=flat-square&logo=openai&logoColor=white" alt="Codex">
+  <img src="https://img.shields.io/badge/Antigravity-4285F4?style=flat-square&logo=google&logoColor=white" alt="Antigravity">
+  <img src="https://img.shields.io/badge/Windsurf-09B6A2?style=flat-square&logo=codeium&logoColor=white" alt="Windsurf">
+  <img src="https://img.shields.io/badge/Cline-1A1A1A?style=flat-square" alt="Cline">
+  <img src="https://img.shields.io/badge/+%20any%20MCP%20client-333333?style=flat-square" alt="Any MCP client">
+</p>
+
+<p align="center">
+  <strong>Languages</strong>&nbsp;
+  <img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black" alt="JavaScript">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go">
+  <img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/Java-ED8B00?style=flat-square&logo=openjdk&logoColor=white" alt="Java">
+  <img src="https://img.shields.io/badge/C%23-239120?style=flat-square&logo=csharp&logoColor=white" alt="C#">
+  <img src="https://img.shields.io/badge/C%2B%2B-00599C?style=flat-square&logo=cplusplus&logoColor=white" alt="C++">
+  <img src="https://img.shields.io/badge/Ruby-CC342D?style=flat-square&logo=ruby&logoColor=white" alt="Ruby">
+  <img src="https://img.shields.io/badge/PHP-777BB4?style=flat-square&logo=php&logoColor=white" alt="PHP">
 </p>
 
 **Coding agents burn tokens reading whole files to find one function. SkeletonGraph
 indexes your repo with tree-sitter — no LLM — and hands the agent the exact function
 to edit, over MCP.**
 
-<p align="center">
-  <img src="docs/paper/figures/skeletongraph_hero.gif"
-       alt="How SkeletonGraph works: index a repo with tree-sitter (no LLM), fuse lexical + semantic + structural retrieval, and return the one function to edit over MCP"
+<picture>
+  <source srcset="docs/paper/figures/skeletongraph_hero.gif" media="(prefers-reduced-motion: no-preference)">
+  <img src="docs/paper/figures/skeletongraph_hero_poster.png"
+       alt="SkeletonGraph pipeline: parse a repo with tree-sitter into a function-level structural index and call graph (no LLM); at query time, fuse BM25 lexical, dense semantic, and structural-rerank signals; return the one function to edit, served to the coding agent over MCP"
        width="100%">
-</p>
+</picture>
 
 <p align="center"><em>Index once (no LLM) → fuse lexical + semantic + structural signals → return the exact function, served to your agent over MCP.</em></p>
 
-SkeletonGraph (SG) indexes a codebase into function-level structure, a cross-file
-call graph, and PageRank centrality — **with no LLM**. At query time it resolves the
-symbols an issue names, expands the call graph, and reranks a BM25 recall pool so the
-agent lands the **right function** instead of burning turns reading files. Its
-companion operating point, **`sg-rerank`** (the product default), takes BM25's wide
-recall pool and reorders it by structural confirmation — best file *and* function
-recall of any method we tested, at the lowest token cost.
+SkeletonGraph is a retrieval engine purpose-built for coding agents, not a general
+RAG library retrofitted onto code. It parses a repository into function-level
+structure, a cross-file call graph, and PageRank centrality with **zero LLM calls** —
+deterministic, cheap, and instant to rebuild after every edit. At query time it
+resolves the symbols an issue names, walks the call graph outward, and reranks a
+BM25 recall pool by structural confirmation so the agent lands on the **right
+function** on the first try, instead of grepping and re-reading its way there. Its
+leaner operating point, **`sg-rerank`** (the product default), skips the dense leg
+entirely and still delivers the best file *and* function recall of any method we
+benchmarked it against — at the lowest token cost of any of them.
 
-The thesis: code-context tools have been validated as a **token-optimization** game
-(token-count math). We re-center on **retrieval quality** — landing the correct
-function — of which lower token cost is a *consequence*, visible only end-to-end
-inside the agent loop.
+The thesis: code-context tools have mostly been validated as a **token-optimization**
+game — how few tokens can you spend. SkeletonGraph re-centers the question on
+**retrieval quality** — did the agent land on the correct function — of which lower
+token cost turns out to be a *consequence*, measurable only end-to-end inside a real
+agent loop, not in an offline benchmark.
 
 ## Results
 
@@ -459,4 +498,19 @@ Cost savings are only meaningful when reported with pass rate.
 
 ## License
 
-MIT
+SkeletonGraph is released under the [MIT License](LICENSE) — free to use, modify, and
+distribute, for commercial and private projects alike.
+
+## Citation
+
+If SkeletonGraph is useful in your research, please cite:
+
+```bibtex
+@misc{doke2026skeletongraph,
+  title  = {Retrieval Is Not Reasoning: The Localization Ceiling in AI Coding Agents},
+  author = {Doke, Yash},
+  year   = {2026},
+  note   = {SkeletonGraph — zero-LLM structural retrieval for coding agents},
+  url    = {https://github.com/yashdoke7/skeletongraph}
+}
+```

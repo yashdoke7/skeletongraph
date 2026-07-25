@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "skeletongraph"
-version = "0.1.0"
+version = "0.1.1"
 description = "Token-minimal, constraint-preserving context assembly for AI coding agents"
 readme = "README.md"
 license = {text = "MIT"}
