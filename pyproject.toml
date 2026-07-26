@@ -64,7 +64,6 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["litellm>=1.0"]
-mcp = ["mcp>=1.0"]
 eval = ["pandas", "matplotlib", "seaborn", "swebench", "openai", "datasets<3"]
 # Strong eval baselines — heavier deps, install separately:
 #   pip install "skeletongraph[eval-strong]"
@@ -80,7 +79,7 @@ daemon = ["watchdog>=3.0"]
 # extra is a no-op alias.
 embeddings = []
 dev = ["pytest", "pytest-cov", "ruff"]
-all = ["skeletongraph[llm,mcp,eval,daemon,dev]"]
+all = ["skeletongraph[llm,eval,daemon,dev]"]
 
 [project.scripts]
 skeletongraph = "skeletongraph.cli.main:app"
