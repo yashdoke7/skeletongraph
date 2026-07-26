@@ -5,8 +5,6 @@
        width="100%">
 </p>
 
-# SkeletonGraph
-
 <p align="center">
   <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/v/skeletongraph.svg?color=blue" alt="PyPI"></a>
   <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/pyversions/skeletongraph.svg" alt="Python versions"></a>
