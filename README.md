@@ -108,7 +108,10 @@ Claude Code on its own tools. 100 paired SWE-bench Verified tasks:
 | arm | pass@1 | file recall@1 | turns | $/task |
 |---|--:|--:|--:|--:|
 | `native` (Claude's own Grep/Read) | 74/100 | .663 | 14.5 | .434 |
-| **`sg-fusion`** (SkeletonGraph MCP) | 75/100 | **.836** | **11.4** | **.371** |
+| **`sg-fusion`** (SkeletonGraph MCP) | 75/100 | **.862** | **11.4** | **.371** |
+
+<sub>SG's first-search recall excludes 3 tasks where the agent never called SG at
+all — those are adoption events, not retrieval failures. Including them gives .836.</sub>
 
 **Equivalent solve rate at −14.6% cost and −21.4% turns.** The saving is not spread
 evenly — it lives almost entirely in the tail:
@@ -132,19 +135,39 @@ semantic (code embeddings), and topological (call graph). Crossing *memorization
 (standard vs. decontaminated benchmark) against *location cues* (original vs.
 prose-stripped issue text) shows the limit:
 
-| condition | cost | file recall native → SG |
-|---|--:|--:|
-| SWE-Verified, raw | −32.2% | .661 → .861 |
-| SWE-Verified, **prose-only** | −21.1% | .717 → .711 (**no edge**) |
-| SWE-rebench (unseen repos), raw | −26.4% | .500 → .639 |
-| SWE-rebench, **prose-only** | −31.3% | .394 → .439 |
+| condition | file recall native → SG | Δ recall | cost | turns |
+|---|--:|--:|--:|--:|
+| SWE-Verified, raw | .661 → .861 | **+.200** | −32.2% | −38.5% |
+| SWE-Verified, **prose-only** | .717 → .711 | **−.006** | −21.1% | −22.6% |
+| SWE-rebench (unseen repos), raw | .500 → .639 | +.139 | −26.4% | −35.6% |
+| SWE-rebench, **prose-only** | .394 → .439 | +.044 | **−31.3%** | −29.3% |
 
-Two things happen at once. **The retrieval advantage collapses** — on prose-only
-issues it disappears entirely — and the lexical baseline falls in parallel, so this
-is a property of the whole category, not of one implementation. **Yet the cost saving
-persists in every condition**, including the one where retrieval quality is identical
-to the baseline. Retrieval quality is therefore *not* the mechanism producing the
-saving; bounding how far the agent wanders before it commits is.
+Read the Δ-recall and cost columns against each other. **The retrieval advantage
+collapses** — a +.200 edge becomes −.006 once the symbols are gone, and the lexical
+baseline falls in parallel, so this is a property of the whole non-LLM category, not
+of one implementation. **Yet the cost saving persists in every condition** (−21% to
+−31%), including the one where retrieval quality is statistically identical to the
+baseline. On the decontaminated benchmark the point sharpens: the **largest** cost
+saving (−31.3%) sits in the cell with the **smallest** retrieval edge (+.044).
+
+**What the agent was missing was direction, not files.** Memorization and location
+cues look like two different factors, but they're the same quantity — knowledge of
+*where to look*, held by the model or supplied by the issue. Order the four conditions
+by how much of it is available and SG's recall orders exactly: `.861 → .711 → .639 →
+.439`.
+
+And when direction isn't given, the agent acquires it by exploring. On the prose-only
+condition, native's **cumulative** recall reaches **.967 against SG's .883** — given
+enough turns, the agent that grepped and read its way through the repo located the
+code *better* than the agent handed a ranked list. SG gets there in half the searches
+and for less money; it does not get further.
+
+That inversion is the honest statement of what this tool is: **a retrieval layer
+delivers candidate files, not knowledge of the repository** — and a confident ranked
+list actively suppresses the agent's own acquisition of that knowledge (reads drop
+3.86 → 1.55/task). The agent spends tokens until it's *certain*, not until it has
+files. That's why recall and cost decouple, and it's what the paper's title refers to
+— the honest ceiling is a finding here, not a caveat.
 
 > SWE-Verified rows are restricted to the same 15 tasks as the prose run so raw and
 > prose are paired. That subset is *not* representative of the full 100 (SG saves

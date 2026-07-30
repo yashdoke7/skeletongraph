@@ -4,7 +4,19 @@ Every number here was recomputed from the run JSONs on 2026-07-22. This is the
 backup-of-record: if the paper and this file disagree, **this file is right**.
 
 Conventions:
-- "cost" = `imputed_cost` (uncached, uniform pricing across arms — the fair unit).
+- "cost" = `imputed_cost`, uniform *within* a harness — the fair unit. Two sources,
+  do not mix them across harnesses:
+  - **Claude Code arm**: Claude Code's own reported `total_cost_usd` (Anthropic's
+    real billing, prompt-cache discounts already applied).
+  - **React loop**: computed by `config.impute_cost()` from a fixed published price
+    sheet ($0.27/M fresh in, $0.07/M cached in, $1.10/M out). NOT "uncached" —
+    cached tokens are billed at the cheap rate, same as production.
+- **Token counts include the system prompt and tool definitions**, not just retrieval
+  payloads. Claude Code context/turn = `input + cache_read + cache_creation`; react
+  loop = the API's `prompt_tokens`. SG registers 7 MCP tools whose schemas sit in the
+  re-sent prefix every turn, so **SG's own overhead is charged to SG** — the cost
+  comparison is conservative in SG's disfavour, not flattering. This is also why the
+  unchanged peak context (44.1k vs 44.9k) is a stronger result than it looks.
 - "rec@1" = fractional FILE recall after the FIRST search (`search_calls[0].cumulative_recall`),
   averaged over tasks. NOT hit-rate. On multi-file tasks recall is stricter.
 - All arm-vs-arm deltas are PAIRED on the arms' common `task_id` set.
@@ -35,6 +47,12 @@ to the **same 15 task_ids** as the prose run so raw-vs-prose is a fair compariso
 | Condition | n | cost Δ | turns Δ | rec@1 native→SG | pass@1 native / SG |
 |---|---|---|---|---|---|
 | SWE-Verified raw (**all 100**) | 100 | **−14.6%** | −21.4% | 0.663 → 0.836 (**+0.173**) | 74/100 / 75/100 |
+
+> **Which recall number the paper uses: 0.862, not 0.836.** The 0.836 above counts
+> all 100 tasks, including 3 where the agent never invoked SG at all. Those are
+> adoption events, not retrieval failures — scoring them as misses attributes to the
+> retriever a decision it never made. Excluding them gives **0.862 (86.2%)**, which is
+> the canonical figure in the paper and README. Do not mix the two across artifacts.
 | SWE-Verified raw (the 15 prose tasks) | 15 | −32.2% | −38.5% | 0.661 → 0.861 (+0.200) | 11/15 / 12/15 |
 | SWE-Verified **PROSE** (same 15) | 15 | **−21.1%** | −22.6% | 0.717 → 0.711 (**−0.006**) | 11/15 / 11/15 |
 | SWE-rebench raw (unseen repos) | 15 | **−26.4%** | −35.6% | 0.500 → 0.639 (+0.139) | 10/15 / 9/15 |
@@ -256,6 +274,22 @@ loop: grep → read a file → learn the repo's real vocabulary → grep better.
 that loop precisely because it looks confident — the agent trusts the ranked list and
 stops exploring (Read 3.86 → 1.55/task). On SWE-prose this backfires: **native's
 cumulative recall (0.967) exceeds SG's (0.883)**. SG gets there cheaper, not further.
+
+**NOW THE PAPER'S UNIFYING FRAME (§ceiling, "direction, not files").** Two facts in
+this table carry it and are now stated in the paper:
+1. Ordering the 4 conditions by *how much direction is available* (memorization
+   and/or location cues — the same quantity, held by the model vs supplied by the
+   issue) orders SG's rec@1 **exactly**: 0.861 / 0.711 / 0.639 / 0.439. Native does
+   NOT order as cleanly (its SWE-prose 0.717 > its SWE-raw 0.661 at n=15) — so rest
+   the claim on SG's ordering only, and say so.
+2. **On SWE-prose, native's cumulative recall (0.967) OVERTAKES SG's (0.883).** Given
+   enough turns the agent that explored located the code *better* than the agent handed
+   a ranked list. SG gets there in half the searches and cheaper — not further.
+⇒ A retrieval layer delivers candidate **files**, not knowledge of the repo, and a
+confident ranked list suppresses the agent's own acquisition of that knowledge
+(Read 3.86 → 1.55/task, §6). The agent pays until **certain**, not until it has files.
+That is the mechanism behind the recall/cost decoupling, and what makes the title
+("Retrieval Is Not Reasoning") mean something concrete.
 
 **Design consequence:** a localization loop built on repeated `sg_search` calls is a
 dead end — proven, not assumed. Any iterative localizer must inject *new* information
