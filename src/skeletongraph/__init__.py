@@ -19,7 +19,18 @@ Features:
     - PR blast-radius analysis with risk scoring
 """
 
-__version__ = "0.1.0"
+# Single source of truth is pyproject.toml — read it from installed metadata so a
+# release bump never has to be mirrored here. (It was: the MCP handshake reported
+# 0.1.0 while 0.1.1 was on PyPI.) The fallback covers running from a source tree
+# that was never pip-installed.
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    try:
+        __version__ = _pkg_version("skeletongraph")
+    except PackageNotFoundError:  # source checkout, not installed
+        __version__ = "0.0.0.dev0"
+except ImportError:  # pragma: no cover — Python < 3.8
+    __version__ = "0.0.0.dev0"
 
 from .build import build_index, update_index
 from .engine import SGEngine

@@ -33,7 +33,10 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="skeletongraph")
+# package_name= lets click resolve the version from installed metadata; passing a
+# literal here goes stale on every release (it did — `sg --version` said 0.1.0
+# while 0.1.1 was on PyPI).
+@click.version_option(package_name="skeletongraph", prog_name="skeletongraph")
 def app():
     """SkeletonGraph - Token-minimal context assembly for AI coding agents."""
     pass

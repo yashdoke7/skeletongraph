@@ -36,6 +36,10 @@ from ..assembly.constraint_store import ConstraintStore
 
 
 SKELETONGRAPH_DIR = ".skeletongraph"
+# INDEX FORMAT version, written to meta.json — deliberately NOT the package version
+# and must not be wired to it. It governs on-disk index compatibility; tying it to
+# the release version would invalidate every user's index on every release. Bump it
+# only when the persisted format actually changes.
 VERSION = "0.1.0"
 
 

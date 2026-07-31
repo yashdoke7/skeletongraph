@@ -28,6 +28,29 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import SGConfig, load_config
 from ..engine import SGEngine
+
+
+def _sg_version() -> str:
+    """Installed package version, for the MCP initialize handshake.
+
+    Resolved from metadata rather than a literal so a release bump cannot leave the
+    handshake advertising a stale version (it did: 0.1.0 while 0.1.1 shipped).
+    Cached after first call — initialize is cheap but this runs per connection.
+    """
+    global _SG_VERSION
+    if _SG_VERSION is None:
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+            try:
+                _SG_VERSION = version("skeletongraph")
+            except PackageNotFoundError:
+                _SG_VERSION = "0.0.0.dev0"
+        except Exception:
+            _SG_VERSION = "0.0.0.dev0"
+    return _SG_VERSION
+
+
+_SG_VERSION: Optional[str] = None
 from ..session.log import append_log, format_log_digest, read_log
 
 logger = logging.getLogger(__name__)
@@ -448,7 +471,9 @@ class MCPServer:
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": "skeletongraph",
-                "version": "0.1.0",
+                # Read from package metadata, never hardcoded — a stale literal here
+                # is visible to every MCP client in the initialize handshake.
+                "version": _sg_version(),
             },
         }
 
