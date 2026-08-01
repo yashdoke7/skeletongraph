@@ -11,8 +11,17 @@
 %  (2) THE CEILING: SG runs all three non-LLM paradigms at once (lexical +
 %      dense semantic + structural graph). Crossing memorization x location-
 %      cues shows the retrieval advantage is ENTITY-ANCHORED — strip the
-%      symbols from the issue and it vanishes (86% -> 44% recall; -0.006 vs
-%      baseline on prose-only). The lexical baseline falls in parallel, so
+%      symbols from the issue and ~2/3 of it goes (86% -> 55% recall; margin over
+%      baseline +0.200 -> +0.065 on SWE, +0.160 -> +0.056 on rebench).
+%      RECALL CONVENTION (decided 2026-07-31, do not re-mix): tasks where the
+%      agent never invoked SG are EXCLUDED from recall averages everywhere —
+%      adoption events, not retrieval failures. This is the rule that makes the
+%      headline 86.2% not 83.6%, and it MUST also apply to the ceiling grid.
+%      Scoring them 0.0 instead makes the prose cell read -0.006 ("parity");
+%      that is the OTHER convention and mixing the two is how the earlier draft
+%      claimed parity while the headline used exclusion. _rec1() in
+%      make_paper_figures.py returns None (not 0.0) to enforce this.
+%      The lexical baseline falls in parallel, so
 %      the limit belongs to the CATEGORY, not to our implementation. Cost
 %      saving survives anyway (-21% where retrieval is identical) => cost is
 %      reduced by BOUNDING WANDERING, not by finding code better.
@@ -21,8 +30,8 @@
 %      held by the model vs supplied by the issue. Ordering the 4 cells by it
 %      orders SG recall exactly (.861/.711/.639/.439). When direction is absent
 %      the baseline ACQUIRES it in-run (grep->read->learn vocabulary->grep
-%      better) and on SWE-prose its CUMULATIVE recall (0.967) OVERTAKES SG's
-%      (0.883). => A retrieval layer delivers candidate FILES, not knowledge of
+%      better) and in BOTH prose cells its CUMULATIVE recall OVERTAKES SG's
+%      (SWE .964 vs .946; rebench .715 vs .632). => A retrieval layer delivers FILES, not knowledge of
 %      the repo, and a confident ranked list suppresses the acquisition of it
 %      (reads 3.86->1.55). The agent pays until CERTAIN, not until it has files;
 %      that is why recall and cost decouple. Do not cut this -- it is what makes
@@ -117,8 +126,9 @@ sits in the expensive tail ($-42.5\%$ at the 95th percentile), and solve rate is
 statistical tie. We then strip the symbol names out of the issue text and repeat
 the comparison on a decontaminated benchmark of unseen repositories. The retrieval
 advantage turns out to be anchored to those symbols: first-search file recall falls
-from 86\% to 44\%, moving in lockstep with plain text search, and issuing more
-searches does not recover the
+from 86\% to 55\%, and \sg{}'s margin over plain text search---$+0.200$ with the
+symbols present---falls by roughly two-thirds, to a residue this sample cannot
+separate from zero. Issuing more searches does not recover the
 gap. No combination of the lexical, dense, and structural signals we test performs
 the inference from a symptom to the code responsible for it, an inference that is
 causal rather than one of resemblance. Memorization and location cues turn out to be
@@ -1144,10 +1154,10 @@ repository (the standard benchmark versus a decontaminated one), and whether the
 issue text still contains location cues (the original text versus a
 prose-stripped variant with tracebacks and code blocks removed).
 Figure~\ref{fig:ceiling} shows the result. First-search recall falls from 86\% to
-44\% as the cues are withdrawn---and the lexical baseline falls with it, from
-66\% to 39\%. The two curves converge: in the prose-only condition on the
-memorized benchmark, retrieval augmented with all three paradigms is
-\emph{indistinguishable} from built-in lexical search ($-0.006$ recall).
+55\% as the cues are withdrawn---and the lexical baseline falls with it, from
+66\% to 49\%. The two curves converge: running all three paradigms at once buys
+$+0.200$ recall over built-in lexical search when the issue names the code, and
+$+0.065$ once it does not---a margin this sample cannot distinguish from zero.
 
 \begin{figure}[t]
 \centering
@@ -1159,11 +1169,14 @@ use the same 15 tasks as the prose run so the conditions are paired.}
 \end{figure}
 
 Table~\ref{tab:grid} gives the four cells numerically, and the two columns should
-be read against each other. The recall column collapses: an advantage of $+0.200$
-on the memorized benchmark with cues becomes $-0.006$ once the symbols are removed
---- statistically nothing. The cost column does not collapse with it. It stays
-between $-21\%$ and $-31\%$ in every cell, including the cell where the retrieval
-advantage is zero.
+be read against each other. The recall column collapses, and it does so by
+almost exactly the same proportion on both benchmarks: an advantage of $+0.200$
+falls to $+0.065$ when the symbols are removed from the memorized benchmark, and
+$+0.160$ falls to $+0.056$ on the unseen one---roughly two-thirds of the advantage
+gone in each case, leaving a residue that $n=15$ cannot separate from zero. The
+cost column does not collapse with it. It stays between $-21\%$ and $-31\%$ in
+every cell, including the cells where the retrieval advantage has all but
+disappeared.
 
 \begin{table}[t]
 \centering
@@ -1174,10 +1187,10 @@ advantage is zero.
 Benchmark & Issue text & Built-in $\to$ \sg{} & $\Delta$ & Cost & Turns \\
 \midrule
 SWE-Verified   & original      & $0.661 \to 0.861$ & $+0.200$          & $-32.2\%$ & $-38.5\%$ \\
-(memorized)    & prose-only    & $0.717 \to 0.711$ & $\mathbf{-0.006}$ & $-21.1\%$ & $-22.6\%$ \\
+(memorized)    & prose-only    & $0.696 \to 0.762$ & $\mathbf{+0.065}$ & $-21.1\%$ & $-22.6\%$ \\
 \addlinespace
-SWE-rebench    & original      & $0.500 \to 0.639$ & $+0.139$          & $-26.4\%$ & $-35.6\%$ \\
-(unseen)       & prose-only    & $0.394 \to 0.439$ & $+0.044$          & $-31.3\%$ & $-29.3\%$ \\
+SWE-rebench    & original      & $0.577 \to 0.737$ & $+0.160$          & $-26.4\%$ & $-35.6\%$ \\
+(unseen)       & prose-only    & $0.493 \to 0.549$ & $\mathbf{+0.056}$ & $-31.3\%$ & $-29.3\%$ \\
 \bottomrule
 \end{tabular}
 \caption{The decoupling, by condition. Recall advantage collapses as location
@@ -1186,14 +1199,22 @@ verified. Solve rate is a tie or $\pm1$ in every cell and is omitted.}
 \label{tab:grid}
 \end{table}
 
-Three points of care belong with this table. The SWE-Verified rows are restricted to
+Four points of care belong with this table. The SWE-Verified rows are restricted to
 the same 15 tasks as the prose run so the raw and prose conditions are paired; that
 subset is \emph{not} representative of the full 100, on which the saving is $-14.6\%$
 rather than $-32.2\%$, and the two must not be compared against each other. The effect
 of removing prose on cost is not monotone --- on the memorized benchmark it shrinks the
 saving, on the unseen one it grows it --- so we claim only that the saving persists,
-not that it trends. And in the rebench prose-only cell one baseline task terminated in
-error and is excluded, leaving 14 baseline runs against 15.
+not that it trends. In the rebench prose-only cell one baseline task terminated in
+error and is excluded, leaving 14 baseline runs against 15. Finally, recall here uses
+the same rule as Table~\ref{tab:retrieval}: tasks on which the agent never invoked
+\sg{} are excluded from the recall average, because they record an adoption decision
+rather than a retrieval outcome. One, two and three tasks are excluded in the three
+prose and unseen cells respectively; cost and turn figures use every paired task, since
+adoption does not change what a run was billed. The convention matters more here than
+at $n=100$ --- scored the other way the prose-only cell reads $-0.006$ instead of
+$+0.065$ --- which is itself a reason to treat these cells as directional and to
+prefer the larger sample for any quantitative claim.
 
 Two conclusions follow, and they pull in opposite directions. The first is
 negative: no combination of non-LLM retrieval paradigms available to us performs
@@ -1229,7 +1250,7 @@ two places. Memorization is knowledge of the repository held by the model; locat
 cues are knowledge of the repository supplied by the issue text. Both answer the
 question \emph{where should I look}, and ordering the four conditions by how much of
 that answer is available orders \sg{}'s first-search recall exactly: $0.861$ with
-both, $0.711$ with memorization alone, $0.639$ with cues alone, $0.439$ with
+both, $0.762$ with memorization alone, $0.737$ with cues alone, $0.549$ with
 neither. Retrieval quality tracks the direction available to it, not the effort
 spent ranking. (The built-in baseline does not order as cleanly---its prose-only
 value slightly exceeds its original-text value at $n=15$---so we rest this on the
@@ -1237,12 +1258,14 @@ structural retriever's ordering, which is monotone.)
 
 The iteration data then shows where direction comes from when it is not given.
 The baseline acquires it \emph{during the run}: it greps, reads a file, learns the
-repository's actual vocabulary, and greps better, lifting recall by $+0.111$ to
-$+0.250$ over its first search. On the prose-only condition this is decisive
-enough that the baseline's cumulative recall reaches $0.967$ against \sg{}'s
-$0.883$ --- given enough turns, the agent that explored the repository ended up
-locating the code \emph{better} than the agent handed a ranked list. \sg{} gets
-there in half the searches and for less money; it does not get further.
+repository's actual vocabulary, and greps better, lifting recall by $+0.128$ to
+$+0.268$ over its first search. In both prose-only conditions this is decisive
+enough to overturn the ranking: the baseline's cumulative recall finishes at
+$0.964$ against \sg{}'s $0.946$ on the memorized benchmark, and at $0.715$ against
+$0.632$ on the unseen one. Given enough turns, the agent that explored the
+repository ended up locating the code \emph{better} than the agent handed a ranked
+list. \sg{} gets there in half the searches and for less money; it does not get
+further.
 
 That inversion is the sharpest statement of what a retrieval layer is and is not.
 It delivers candidate files. It does not deliver knowledge of the repository, and

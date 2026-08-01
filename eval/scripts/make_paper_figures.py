@@ -432,8 +432,18 @@ _GRID_CONDS = [
 
 
 def _rec1(r):
+    """First-search file recall, or None if the agent never issued a search.
+
+    None (not 0.0) is load-bearing. A task where the agent never invoked the
+    retriever is an ADOPTION event, not a retrieval failure, and scoring it zero
+    charges the retriever for a decision it never made. The paper excludes these
+    everywhere — it is the same rule that makes the headline 86.2% rather than
+    83.6%, and it must be applied to the ceiling grid too. Returning 0.0 here
+    silently mixed the two conventions and made the prose cell read as −0.006
+    (parity) when under the paper's own rule it is +0.065.
+    """
     scs = r.get("search_calls") or []
-    return scs[0].get("cumulative_recall", 0.0) if scs else 0.0
+    return scs[0].get("cumulative_recall", 0.0) if scs else None
 
 
 def _cond_stats(tag, restrict=None):
@@ -451,8 +461,12 @@ def _cond_stats(tag, restrict=None):
         common = [t for t in common if t in restrict]
     if not common:
         return None
-    rn = sum(_rec1(nat[t]) for t in common) / len(common)
-    rs = sum(_rec1(sg[t]) for t in common) / len(common)
+    # Recall is averaged over tasks where SG actually ran a search (see _rec1);
+    # cost/turns use every paired task, since the adoption question does not
+    # affect what the run was billed.
+    kept = [t for t in common if _rec1(sg[t]) is not None]
+    rn = sum(_rec1(nat[t]) or 0.0 for t in kept) / len(kept)
+    rs = sum(_rec1(sg[t]) for t in kept) / len(kept)
     cn = sum(nat[t]["imputed_cost"] for t in common)
     cs = sum(sg[t]["imputed_cost"] for t in common)
     return rn, rs, (cs - cn) / cn * 100.0, len(common)
@@ -517,6 +531,81 @@ def fig_ceiling():
     _save(fig, "fig_ceiling")
 
 
+# ── FIG 8 — the tail curve in all four conditions ────────────────────────
+def fig_tail_grid():
+    """fig_tail's ordered-cost view, repeated across the 2x2 grid of conditions.
+
+    Deliberately NOT a clone of fig_tail for each panel. That figure earns its
+    running mean and its p95 annotation from n=100; the other three cells are
+    n=15, where a 9-wide smoothing window would average over more than half the
+    data and "p95" is indistinguishable from the maximum. So the n=15 panels plot
+    every task as a marker with no smoothing, carry no percentile annotation, and
+    state n on the panel. What they can honestly show is the SHAPE — curves
+    together at the cheap end, separating at the expensive end — which is the
+    claim, and the pooled cost change, which is computed not asserted.
+    """
+    conds = [
+        ("claude_v7",               "SWE-Verified · original issue text"),
+        ("claude_v7_prose",         "SWE-Verified · prose-only"),
+        ("claude_rebench_v1",       "SWE-rebench (unseen repos) · original"),
+        ("claude_rebench_prose_v1", "SWE-rebench (unseen repos) · prose-only"),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(9.2, 5.9))
+    for ax, (tag, title) in zip(axes.ravel(), conds):
+        nat, sg = paired(tag, "native", "sg-fusion")
+        pairs = sorted(zip((r["imputed_cost"] for r in nat),
+                           (r["imputed_cost"] for r in sg)), key=lambda p: p[0])
+        nv = [p[0] for p in pairs]
+        sv = [p[1] for p in pairs]
+        n = len(nv)
+        x = list(range(1, n + 1))
+        delta = 100 * (sum(sv) / sum(nv) - 1) if sum(nv) else 0.0
+
+        big = n >= 50
+        if big:                      # n=100: same running mean as fig_tail
+            def smooth(vals, w=9):
+                return [sum(vals[max(0, i - w // 2):min(len(vals), i + w // 2 + 1)])
+                        / (min(len(vals), i + w // 2 + 1) - max(0, i - w // 2))
+                        for i in range(len(vals))]
+            ny, sy = smooth(nv), smooth(sv)
+        else:                        # n=15: no smoothing, show every task
+            ny, sy = nv, sv
+
+        ax.fill_between(x, sy, ny, where=[a > b for a, b in zip(ny, sy)],
+                        color=BLUE, alpha=0.13, linewidth=0, interpolate=True)
+        ax.plot(x, ny, color=INK_2, lw=1.8,
+                marker=None if big else "o", markersize=3,
+                label="Claude Code built-in tools")
+        ax.plot(x, sy, color=BLUE, lw=1.8,
+                marker=None if big else "o", markersize=3,
+                label="+ SkeletonGraph")
+
+        ax.set_title(title, fontsize=9, color=INK, pad=7, loc="left")
+        ax.text(0.02, 0.93,
+                f"n = {n}   ·   total cost {delta:+.1f}%",
+                transform=ax.transAxes, fontsize=8, color=BLUE, fontweight="bold",
+                va="top")
+        if not big:
+            ax.text(0.02, 0.83, "every task shown; no percentiles at n=15",
+                    transform=ax.transAxes, fontsize=7, color=MUTED, va="top")
+        ax.set_xlim(1, n)
+        ax.set_ylim(bottom=0)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"${v:.2f}"))
+        _clean(ax)
+
+    for ax in axes[1]:
+        ax.set_xlabel("Tasks, ordered cheapest → most expensive (by baseline cost)")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("Cost per task (USD)")
+
+    axes[0][0].legend(loc="upper left", bbox_to_anchor=(0.0, 0.80))
+    fig.suptitle("The saving lives in the expensive tail — in every condition",
+                 fontsize=11, x=0.5, y=0.985)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    _save(fig, "fig_tail_grid")
+
+
 def main():
     _style()
     ds = "C:/Users/ASUS/Desktop/CS/Projects/swebench-data/swebench_100.jsonl"
@@ -528,6 +617,7 @@ def main():
     fig_tools(nat, sg)
     fig_pareto()
     fig_ceiling()
+    fig_tail_grid()
 
 
 if __name__ == "__main__":

@@ -136,29 +136,34 @@ prose-stripped issue text) shows the limit:
 | condition | file recall native → SG | Δ recall | cost | turns |
 |---|--:|--:|--:|--:|
 | SWE-Verified, raw | .661 → .861 | **+.200** | −32.2% | −38.5% |
-| SWE-Verified, **prose-only** | .717 → .711 | **−.006** | −21.1% | −22.6% |
-| SWE-rebench (unseen repos), raw | .500 → .639 | +.139 | −26.4% | −35.6% |
-| SWE-rebench, **prose-only** | .394 → .439 | +.044 | **−31.3%** | −29.3% |
+| SWE-Verified, **prose-only** | .696 → .762 | **+.065** | −21.1% | −22.6% |
+| SWE-rebench (unseen repos), raw | .577 → .737 | +.160 | −26.4% | −35.6% |
+| SWE-rebench, **prose-only** | .493 → .549 | **+.056** | **−31.3%** | −29.3% |
+
+<sub>Recall excludes tasks where the agent never invoked SG (adoption events, not
+retrieval failures) — the same rule behind the .862 headline above. n=15 per cell.</sub>
 
 Read the Δ-recall and cost columns against each other. **The retrieval advantage
-collapses** — a +.200 edge becomes −.006 once the symbols are gone, and the lexical
-baseline falls in parallel, so this is a property of the whole non-LLM category, not
-of one implementation. **Yet the cost saving persists in every condition** (−21% to
-−31%), including the one where retrieval quality is statistically identical to the
-baseline. On the decontaminated benchmark the point sharpens: the **largest** cost
-saving (−31.3%) sits in the cell with the **smallest** retrieval edge (+.044).
+collapses**, and by nearly the same fraction on both benchmarks — +.200 → +.065 and
++.160 → +.056, about two-thirds of the edge gone, leaving a residue n=15 can't
+separate from zero. The lexical baseline falls in parallel, so this is a property of
+the whole non-LLM category, not of one implementation. **Yet the cost saving persists
+in every condition** (−21% to −31%). On the decontaminated benchmark the point
+sharpens: the **largest** cost saving (−31.3%) sits in the cell with the **smallest**
+retrieval edge (+.056).
 
 **What the agent was missing was direction, not files.** Memorization and location
 cues look like two different factors, but they're the same quantity — knowledge of
 *where to look*, held by the model or supplied by the issue. Order the four conditions
-by how much of it is available and SG's recall orders exactly: `.861 → .711 → .639 →
-.439`.
+by how much of it is available and SG's recall orders exactly: `.861 → .762 → .737 →
+.549`.
 
-And when direction isn't given, the agent acquires it by exploring. On the prose-only
-condition, native's **cumulative** recall reaches **.967 against SG's .883** — given
-enough turns, the agent that grepped and read its way through the repo located the
-code *better* than the agent handed a ranked list. SG gets there in half the searches
-and for less money; it does not get further.
+And when direction isn't given, the agent acquires it by exploring. In **both**
+prose-only conditions, native's **cumulative** recall ends up ahead of SG's — .964 vs
+.946 on SWE-Verified, .715 vs .632 on unseen repos. Given enough turns, the agent that
+grepped and read its way through the repo located the code *better* than the agent
+handed a ranked list. SG gets there in half the searches and for less money; it does
+not get further.
 
 That inversion is the honest statement of what this tool is: **a retrieval layer
 delivers candidate files, not knowledge of the repository** — and a confident ranked
