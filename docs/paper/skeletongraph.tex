@@ -104,15 +104,21 @@ project's own test suite rather than trusting the agent's own verdict.
 
 Constructing \sg{} as a deliberate superset of the non-LLM retrieval paradigms lets
 us ask a sharper question than whether retrieval helps: when it stops helping, is
-the limit our index or the whole category? Retrieval quality improves sharply---the
-first search locates the correct file in 86\% of tasks against 66\% for the agent's
-built-in search, and the correct \emph{function} in roughly 80\% against 0\%. Yet
-cost decouples from quality. The median task is no cheaper ($+1.9\%$); the entire
-saving lives in the tail ($-42.5\%$ at the 95th percentile), and solve rate is a
-statistical tie. Crossing whether the model has memorized the repository against
-whether the issue still names any code shows the advantage is \emph{anchored to
-those symbols}: strip them and first-search recall falls $86\% \to 44\%$, in
-lockstep with plain text search, and issuing more searches does not recover the
+the limit our index or the whole category?
+
+Retrieval quality improves sharply. On SWE-bench Verified, \sg{}'s first search
+returns the correct \emph{file} for 86\% of tasks, against 66\% for the agent's own
+text search. It also names the correct \emph{function} in roughly 80\% of tasks,
+against 0\%---text search matches lines and returns files, so function-level
+localization is not something it does poorly but something it cannot do at all.
+
+Cost does not follow. The median task is no cheaper ($+1.9\%$); the entire saving
+sits in the expensive tail ($-42.5\%$ at the 95th percentile), and solve rate is a
+statistical tie. We then strip the symbol names out of the issue text and repeat
+the comparison on a decontaminated benchmark of unseen repositories. The retrieval
+advantage turns out to be anchored to those symbols: first-search file recall falls
+from 86\% to 44\%, moving in lockstep with plain text search, and issuing more
+searches does not recover the
 gap. No combination of the lexical, dense, and structural signals we test performs
 the inference from a symptom to the code responsible for it, an inference that is
 causal rather than one of resemblance. Memorization and location cues turn out to be
@@ -172,8 +178,10 @@ tokens by a wide margin.
 And yet the money moves much less than that suggests, and not where one would
 expect. Deployed inside a production agent over 100 tasks, retrieval makes simple
 tasks slightly \emph{more} expensive and removes roughly 40\% of the cost of the
-hardest ones, crossing break-even around \$0.35 per task. Solve rate does not
-change at all.
+hardest ones. Break-even falls around \$0.35 per task---the 66th percentile of
+baseline task cost here, and a trajectory of about twelve turns: below it the agent
+was already locating the code quickly and retrieval is overhead, above it the agent
+was hunting and retrieval pays, increasingly so. Solve rate does not change at all.
 
 The explanation turns out to be simple, and is visible in a single measurement:
 the peak context the agent accumulates is the same with retrieval as without it
@@ -227,8 +235,7 @@ waste was load-bearing (Section~\ref{sec:interventions}).
 
 \item \textbf{A reproducible artifact.} The harness, the frozen task lists, and
 per-task records are released,\footnote{Code, task lists, and per-task run records:
-\url{https://github.com/ANON/skeletongraph} (anonymized for review; de-anonymized
-on acceptance).} along with an index that any user can rebuild from
+\url{https://github.com/yashdoke7/skeletongraph}.} along with an index that any user can rebuild from
 source because building it never calls a language model.
 \end{enumerate}
 
@@ -279,12 +286,17 @@ strategy tested by a wide margin.
 
 \paragraph{Graph query (knowledge-graph servers).}
 Codebase-Memory \citep{cbmem} and Graphify \citep{graphify} extract an entity
-graph, usually with an LLM pass per repository, and expose queries over it.
-\emph{Hypothesis:} the agent's problem is navigating relationships, so answer
-relationship queries on demand. \emph{Implied cost:} pay-per-query rather than
-up-front, but query results are entity-shaped rather than edit-shaped, so
-payloads tend to be broad. There is also a hidden cost these systems' headline
-numbers exclude: graph construction requires an LLM pass over every repository.
+graph and expose queries over it. \emph{Hypothesis:} the agent's problem is
+navigating relationships, so answer relationship queries on demand.
+\emph{Implied cost:} pay-per-query rather than up-front, but query results are
+entity-shaped rather than edit-shaped, so payloads tend to be broad. The two
+differ in what building the graph costs, and the distinction matters enough to
+state precisely rather than lump together. Codebase-Memory builds its graph with
+tree-sitter and adds semantic edges with a code embedding model---no generative
+model is invoked, which puts its index construction in the same category as ours.
+Graphify extracts with a language model, chunk by chunk, once per repository; on a
+large repository that is a substantial one-time cost, and it is excluded from the
+token savings such systems report. We attribute it to that arm explicitly.
 
 \paragraph{Lexical search (grep, BM25).}
 \emph{Hypothesis:} identifiers are highly discriminative in code, so text search
@@ -356,10 +368,17 @@ with \emph{no} measurable quality loss, and paired per-task records that make th
 comparison checkable.
 
 \paragraph{Memory and context management.}
-MemGPT \citep{memgpt} treats context as a paging problem; HierMem
-\citep{hiermem} organizes agent memory hierarchically. \sg{} is deliberately
+MemGPT \citep{memgpt} treats context as a paging problem. \sg{} is deliberately
 narrower---a structural index and reranker, not a memory manager---and zero-LLM
-at index time, so index construction is never billed to a model.
+at index time, so index construction is never billed to a model. One result from
+that literature is worth stating because it rhymes with ours in a different
+setting: HierMem \citep{hiermem} reports that for long-horizon conversational
+agents, \emph{which} material is placed and held in context governs instruction
+compliance more than how much material is retrieved. Our finding has the same
+shape on the cost axis rather than the quality axis---retrieving better does not
+reduce spend, while bounding what the agent does before it commits does---which
+suggests the naive lever in both settings is retrieval volume and the effective
+one is control over what the trajectory carries.
 
 \paragraph{Benchmarks and contamination.}
 SWE-bench \citep{swebench} is the standard benchmark; its contamination is now
@@ -401,10 +420,11 @@ PageRank centrality. A BM25 \citep{bm25} index and, optionally, a code-specializ
 dense embedding (jina-code) are built over the same symbols; embeddings are
 content-hash cached so only changed functions re-encode. The whole index is
 persisted and, because no language model is invoked, is rebuildable by any user
-from source---a substantive difference from the graph-building systems in
-Section~\ref{sec:designspace}, whose extraction requires an LLM pass per repository
-that their reported token savings exclude and that must be re-paid on material
-change.
+from source. This is a substantive difference from the LLM-extracting graph system
+in Section~\ref{sec:designspace}, whose per-repository extraction pass is excluded
+from its reported token savings and must be re-paid on material change; it is
+\emph{not} a difference from every graph system, since Codebase-Memory also builds
+its index without a generative model.
 
 \paragraph{Retrieval (per query).}
 An issue query is run through three legs in parallel---BM25 (lexical), the dense
@@ -429,10 +449,24 @@ fairly (Section~\ref{sec:exclusion} explains why they cannot be compared inside
 a headless frontier agent).
 
 \textbf{Frontier-agent deployment.} \sg{} runs as a real MCP server driven by a
-production frontier coding agent (Claude Code) in headless mode, against the same
-agent using only its unmodified native tools. This measures deployment economics
-under an agent we do not control; subsequent references to ``the frontier agent''
-denote this configuration.
+production frontier coding agent---Claude Code, headless (\texttt{-p}) mode, on
+Claude Sonnet---against the same agent, same model, using only its unmodified
+built-in tools. This measures deployment economics under an agent we do not
+control; subsequent references to ``the frontier agent'' denote this
+configuration.
+
+\paragraph{What ``built-in tools'' means, and where each number comes from.}
+Two baselines recur and must not be conflated. In the deployment study the
+baseline---which tables label \emph{built-in tools} and the released run records
+tag \texttt{native}---is Claude Code driving its own shipped file-navigation
+tools: its text search (\texttt{Grep}), file glob, and file read, with no MCP
+server attached. It is not a reimplementation and not a weakened stand-in; it is
+the product as shipped, and it is a strong baseline precisely because the model is
+heavily trained on those tools. In the react loop the corresponding baselines are
+separate arms we implement---\texttt{grep} and \texttt{bm25}---running on an
+open-weight 120B-class model. Every retrieval, cost, turn and context figure in
+this paper belongs to exactly one of these two settings; we never compute a
+comparison across them, and each table states which one it reports.
 
 The two harnesses implement the same retrieval algorithms in separate code paths
 and their numbers are never pooled. Unless a table states otherwise, \sg{} is
@@ -454,8 +488,18 @@ N \;=\; \sum_{t=1}^{T} c_t \;=\; \sum_{t=1}^{T}\Big( c_0 + \textstyle\sum_{s<t} 
 \label{eq:cost}
 \end{equation}
 where $c_0$ is the fixed prompt overhead, $r_s$ the tokens returned by the tool
-called at turn $s$, and $a_s$ the model's own output at turn $s$. Two consequences
-follow immediately, and both are borne out empirically.
+called at turn $s$, and $a_s$ the model's own output at turn $s$.
+
+It matters what $c_0$ contains, because one component of it is charged to the
+retrieval layer. $c_0$ is the system prompt \emph{together with the serialized
+definitions of every tool the agent can call}---and registering a retrieval server
+adds its tool schemas to that fixed prefix, where Equation~\eqref{eq:cost} bills
+them once per turn for the whole trajectory. A retrieval layer therefore starts
+each task in deficit, before it returns a single result. Our measurements include
+this: token counts are the entire prompt the model receives, so \sg{}'s seven tool
+definitions are charged to \sg{}, and the comparison understates it rather than
+flattering it. Two further consequences follow immediately, and both are borne out
+empirically.
 
 \paragraph{Tool output is charged once per remaining turn, not once.}
 A result $r_s$ appears in every subsequent context, so its true cost is
@@ -526,15 +570,21 @@ tests, how it reacts to a failure. A retrieval layer influences $T$ only through
 the localization prefix. Once that prefix is short, further retrieval improvement
 acts on a term that has already gone to zero.
 
-Section~\ref{sec:interventions} reports three attempts to beat this bound --- one
-below $c^{*}$, one at it, one attempting to control $T$ directly --- and the
-failure mode of each is the one this section predicts.
+Section~\ref{sec:interventions} reports five attempts to beat this bound --- two
+that push the payload above $c^{*}$, two that push it below, and one that declines
+to retrieve at all on the tasks where retrieval does not pay --- and the failure
+mode of each is the one this section predicts.
 
 \subsection{Metrics and statistics}
 We report Docker-verified pass@1; per-task cost, turns, and total input tokens;
 peak context; file- and function-level retrieval hit rate; first-search
-precision; and per-tool call counts. Cost is imputed from token counts under one
-provider's published pricing, applied identically to every arm.
+precision; and per-tool call counts. Token counts are the full prompt the model
+receives each turn---system prompt, tool definitions, accumulated conversation and
+all tool results---not retrieval payloads in isolation. Cost is the runtime's own
+reported billing in the deployment study and is imputed from token counts under a
+fixed published price sheet in the react loop; the two are never pooled, and every
+reported change is paired within a single harness
+(Section~\ref{sec:threats} gives the full accounting).
 
 Following Section~\ref{sec:model} we report the full cost distribution
 (p50/p75/p90/p95), not only means. Paired comparisons use McNemar's exact test
@@ -606,6 +656,28 @@ turns out not to be needed. It finds the right neighbourhood and hands over the
 neighbourhood. Section~\ref{sec:scope} shows this is exactly the mechanism behind
 its worst individual cases---the trade a structural retriever makes is breadth in
 exchange for reliably covering the target.
+
+\paragraph{Why lower precision is not simply waste, and what recall actually buys.}
+It would be natural to read that precision figure as pure overhead, and on the
+cheapest tasks it is. But identifying the file to edit is not the same as knowing
+what to change in it. To write a correct patch the model has to work out which
+behaviour is wrong and why, which generally means reading the code around the
+target---its callers, the helper it delegates to, the test that exercises it. An
+agent given only the responsible file still has to assemble that surrounding
+material before it will act, and it does so by reading. Handing over the
+neighbourhood supplies some of it up front. This is why the precision gap does not
+translate into a proportional cost penalty: part of what a precision metric scores
+as unnecessary is material the agent would otherwise have gone and fetched.
+
+It also clarifies what higher recall is worth. Section~\ref{sec:analysis} shows the
+agent's peak context is essentially identical with and without retrieval, so
+retrieval is not making the working set smaller. What it changes is \emph{when} the
+working set is assembled: the agent reaches the point of having enough to act in
+fewer steps, and because every step re-sends everything accumulated so far, fewer
+steps is where the money is. Better recall front-loads context rather than reducing
+it---and on a task whose localization prefix was already short, front-loading buys
+nothing while the extra tool definitions and retrieval calls still cost, which is
+the $+1.9\%$ at the median.
 
 \begin{figure}[t]
 \centering
@@ -956,10 +1028,11 @@ Their failure modes are individually informative and jointly diagnostic.
 \paragraph{(A) Give more, and forbid the alternative.}
 We inlined function bodies into search results and disallowed native text search,
 forcing retrieval to be the sole path to code. \emph{Prediction:} pushes the
-payload above $c^{*}$ and removes the agent's recovery route. \emph{Outcome:}
-solve rate fell. Removing the recovery route converts a retrieval miss from a
-recoverable detour into an unrecoverable failure, and the inlined bodies were
-billed on every subsequent turn.
+payload above $c^{*}$ and removes the agent's recovery route. \emph{Outcome:} cost
+fell 19\% and solve rate fell with it, by two tasks---the same two in each of two
+independent runs, so not a sampling artifact. Removing the recovery route converts
+a retrieval miss from a recoverable detour into an unrecoverable failure, and the
+inlined bodies were billed on every subsequent turn.
 
 \paragraph{(B) Remove the need to re-read.}
 Returned bodies originally lacked per-line line numbers, so an agent that wanted
@@ -998,7 +1071,9 @@ well-scoped tasks the leaner payload was competitive, but on broad tasks the
 agent made a small number of retrieval calls, then reverted to extended native
 navigation --- and total cost rose. Withholding bodies does not save the tokens;
 it moves them from a targeted retrieval call into a longer sequence of untargeted
-reads, while adding turns.
+reads, while adding turns. We report this one as a trajectory-level observation
+rather than a measured delta: unlike (A)--(C) it was not run as a full paired
+sweep in the deployment harness, and we do not attach a percentage to it.
 
 \paragraph{(E) Route each task to whichever system suits it.}
 The four above shape \emph{what} retrieval returns. A fifth option is to decide
