@@ -77,16 +77,28 @@ figure produces a spurious "the effect grows" conclusion. (This error was made a
 corrected during analysis; it is the single easiest mistake to re-make here.)
 
 ### 1b. What the grid actually shows
-- **Retrieval edge collapses under prose, in both benchmarks — by the same fraction.**
-  Memorized: +0.200 → +0.065. Unseen: +0.160 → +0.056. Both lose ~2/3 of the edge.
-- **Cost advantage persists in every cell** (−21% to −31%), including the cell where
-  retrieval is *identical* to the baseline. → the decoupling.
+- **Retrieval degrades under prose in both benchmarks — but read the two orders apart.**
+  - **FIRST-ORDER (significant, this is the load-bearing one):** SG's *own* rec@1
+    drops when symbols are removed. Within-task, pooled over both benchmarks:
+    **drop = +0.125, 95% CI [+0.010, +0.260], n=26, P(>0)=0.987.**
+  - **SECOND-ORDER (NOT significant — do not claim):** that SG's *margin over the
+    baseline* collapses. Point estimates look like it (+0.200→+0.065 memorized,
+    +0.160→+0.056 unseen) but tested within-task the difference is **+0.058, 95% CI
+    [−0.093, +0.215], P(>0)=0.77, and only 5 of 26 tasks show it.** Per-benchmark it
+    is weaker still (SWE 3/14, P=0.79; rebench 2/12, P=0.59). Resolving it needs
+    n≈370 paired raw+prose tasks. **Never write "collapses to parity" or
+    "indistinguishable from lexical search."** The ceiling argument does not need it:
+    it only requires that all three paradigms together fail on symptom-only issues,
+    which the first-order drop establishes alone.
+- **Cost advantage persists in every cell** (−21% to −31%), including the cells where
+  the retrieval margin is only a few points of recall. → the decoupling. This is the
+  claim that does NOT depend on resolving the margin, which is why it carries §ceiling.
 - **Direction of the prose effect on cost differs by benchmark**: on memorized SWE it
   *shrinks* the advantage (−32.2% → −21.1%); on unseen rebench it *grows* it
   (−26.4% → −31.3%). Do NOT claim a monotone trend.
 - **pass@1 is a tie or ±1 in every cell.** Never significant. Do not lead with it.
 
-### 1c. The L3 ceiling — the proof
+### 1c. The L3 ceiling — the evidence (first-order only; see §1b for what is NOT claimed)
 `sg-fusion` is all three non-LLM paradigms simultaneously (BM25 lexical + jina
 dense semantic + graph topological). Its first-search recall as cues are removed
 and repos become unfamiliar:
@@ -97,8 +109,11 @@ native    rec@1:   0.661  →  0.696  →  0.577  →  0.493      (−25%)
           (SWE raw) (SWE prose) (reb raw) (reb prose)
 ```
 If **any** of the three paradigms could reason from symptom to root cause, recall
-would hold when the symbols disappear. It does not — and the lexical baseline falls
-with it, so this is a property of the whole non-LLM category, not an SG defect.
+would hold when the symbols disappear. It does not (within-task drop +0.125, 95% CI
+[+0.010, +0.260], n=26) — and the lexical baseline falls too, so this reads as a
+property of the whole non-LLM category rather than an SG defect. Note the argument
+is carried by SG's *own* fall, which is significant; the *relative* fall vs native
+is NOT (§1b) and must not be used as the evidence.
 
 ---
 
@@ -311,7 +326,11 @@ this table carry it and are now stated in the paper:
 confident ranked list suppresses the agent's own acquisition of that knowledge
 (Read 3.86 → 1.55/task, §6). The agent pays until **certain**, not until it has files.
 That is the mechanism behind the recall/cost decoupling, and what makes the title
-("Retrieval Is Not Reasoning") mean something concrete.
+("Frontier Coding Agents Don't Have a Retrieval Problem") mean something concrete.
+**The word "frontier" is load-bearing and must never be dropped** — on the open-weight
+react-loop model retrieval IS worth +7pp (fusion 42.0% vs closed-book 35.0%, §2), which
+is the counter-example to an unqualified version of that title. Retrieval matters little
+where the model already knows the repo and a lot where it does not.
 
 **Design consequence:** a localization loop built on repeated `sg_search` calls is a
 dead end — proven, not assumed. Any iterative localizer must inject *new* information

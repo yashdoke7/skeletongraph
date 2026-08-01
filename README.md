@@ -143,14 +143,22 @@ prose-stripped issue text) shows the limit:
 <sub>Recall excludes tasks where the agent never invoked SG (adoption events, not
 retrieval failures) — the same rule behind the .862 headline above. n=15 per cell.</sub>
 
-Read the Δ-recall and cost columns against each other. **The retrieval advantage
-collapses**, and by nearly the same fraction on both benchmarks — +.200 → +.065 and
-+.160 → +.056, about two-thirds of the edge gone, leaving a residue n=15 can't
-separate from zero. The lexical baseline falls in parallel, so this is a property of
-the whole non-LLM category, not of one implementation. **Yet the cost saving persists
-in every condition** (−21% to −31%). On the decontaminated benchmark the point
-sharpens: the **largest** cost saving (−31.3%) sits in the cell with the **smallest**
-retrieval edge (+.056).
+**Retrieval degrades sharply when the symbols go.** SG's own first-search recall
+falls `.861 → .549`; measured within-task across both benchmarks that's a drop of
+**+.125 (95% CI [.010, .260], n=26)**. The lexical baseline falls too. Running all
+three non-LLM paradigms at once does not rescue symptom-only localization — that's
+the ceiling, and it's a property of the category, not of one implementation.
+
+*What we don't claim:* the point estimates suggest SG's **margin** over the baseline
+also collapses (+.200 → +.065, +.160 → +.056), but at n=15 that second-order effect
+isn't statistically resolved (+.058, CI [−.093, +.215]; only 5 of 26 tasks show it).
+The ceiling argument doesn't need it.
+
+**Yet the cost saving persists in every condition** (−21% to −31%) — including the
+cells where the retrieval margin is only a few points of recall. On the
+decontaminated benchmark the **largest** cost saving (−31.3%) sits in the cell with
+the **smallest** retrieval margin (+.056). Whatever drives the saving, it isn't
+out-retrieving the baseline.
 
 **What the agent was missing was direction, not files.** Memorization and location
 cues look like two different factors, but they're the same quantity — knowledge of
@@ -545,7 +553,8 @@ If SkeletonGraph is useful in your research, please cite:
 
 ```bibtex
 @misc{doke2026skeletongraph,
-  title  = {Retrieval Is Not Reasoning: The Localization Ceiling in AI Coding Agents},
+  title  = {Frontier Coding Agents Don't Have a Retrieval Problem:
+            The Localization Ceiling and Where Cost Actually Lives},
   author = {Doke, Yash},
   year   = {2026},
   note   = {SkeletonGraph — zero-LLM structural retrieval for coding agents},

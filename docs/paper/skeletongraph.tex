@@ -1,6 +1,14 @@
 % =====================================================================
 % SkeletonGraph — REFRAMED 2026-07 around the honest finding.
 % Maintained by: yashdoke215@gmail.com
+%
+% TITLE: "FRONTIER Coding Agents Don't Have a Retrieval Problem". The word
+% "frontier" is LOAD-BEARING — never drop it. Unqualified, the title is refuted
+% by our own Table tab:react, where retrieval is worth +7pp on the open-weight
+% model (fusion 42.0% vs closed-book 35.0%). The claim holds only in the
+% memorization-saturated frontier deployment, and the "On the title" paragraph
+% after the contributions states the counter-example explicitly so a reviewer
+% does not have to find it.
 % Compile: pdflatex skeletongraph.tex && bibtex skeletongraph && pdflatex skeletongraph.tex
 %
 % THESIS (do not weaken), in two parts:
@@ -10,9 +18,16 @@
 %      memorization-saturated (no-retrieval control solves 35-44%).
 %  (2) THE CEILING: SG runs all three non-LLM paradigms at once (lexical +
 %      dense semantic + structural graph). Crossing memorization x location-
-%      cues shows the retrieval advantage is ENTITY-ANCHORED — strip the
-%      symbols from the issue and ~2/3 of it goes (86% -> 55% recall; margin over
-%      baseline +0.200 -> +0.065 on SWE, +0.160 -> +0.056 on rebench).
+%      cues shows retrieval is ENTITY-ANCHORED — strip the symbols and SG's own
+%      recall drops 86% -> 55% (within-task 0.125, 95% CI [0.010,0.260], n=26 —
+%      SIGNIFICANT, and this is the leg the ceiling rests on).
+%      WHAT WE DO *NOT* CLAIM (tested 2026-07-31, do not re-add): that SG's MARGIN
+%      over the baseline collapses to parity. That second-order effect is +0.058
+%      within-task, 95% CI [-0.093,0.215], P(>0)=0.77, and only 5 of 26 tasks show
+%      it. Needs n~370 to resolve; not affordable and NOT NEEDED — the ceiling
+%      argument only requires that running all three paradigms fails on
+%      symptom-only issues, which the first-order drop establishes alone.
+%      Never write "collapses to parity" / "indistinguishable from lexical".
 %      RECALL CONVENTION (decided 2026-07-31, do not re-mix): tasks where the
 %      agent never invoked SG are EXCLUDED from recall averages everywhere —
 %      adoption events, not retrieval failures. This is the rule that makes the
@@ -91,10 +106,12 @@
 \newcommand{\tbd}[1]{\textcolor{red}{[\textbf{TBD: }#1]}}
 \newcommand{\sg}{\textsc{SkeletonGraph}}
 
-\title{Retrieval Is Not Reasoning:\\
-The Localization Ceiling in AI Coding Agents}
+\title{Frontier Coding Agents Don't Have a Retrieval Problem:\\
+The Localization Ceiling and Where Cost Actually Lives}
 \author{Yash Doke\\Independent Researcher\\\texttt{yashdoke215@gmail.com}}
-\date{\today}
+% Fixed, not \today: a preprint's date must not change every time it recompiles.
+% Bump manually when a new version is actually posted.
+\date{August 2026}
 
 \begin{document}
 \maketitle
@@ -124,11 +141,10 @@ localization is not something it does poorly but something it cannot do at all.
 Cost does not follow. The median task is no cheaper ($+1.9\%$); the entire saving
 sits in the expensive tail ($-42.5\%$ at the 95th percentile), and solve rate is a
 statistical tie. We then strip the symbol names out of the issue text and repeat
-the comparison on a decontaminated benchmark of unseen repositories. The retrieval
-advantage turns out to be anchored to those symbols: first-search file recall falls
-from 86\% to 55\%, and \sg{}'s margin over plain text search---$+0.200$ with the
-symbols present---falls by roughly two-thirds, to a residue this sample cannot
-separate from zero. Issuing more searches does not recover the
+the comparison on a decontaminated benchmark of unseen repositories. Retrieval turns
+out to be anchored to those symbols: \sg{}'s first-search file recall falls from
+86\% to 55\%, a within-task degradation of $0.125$ ($95\%$ CI $[0.010, 0.260]$), and
+plain text search falls with it. Issuing more searches does not recover the
 gap. No combination of the lexical, dense, and structural signals we test performs
 the inference from a symptom to the code responsible for it, an inference that is
 causal rather than one of resemblance. Memorization and location cues turn out to be
@@ -223,16 +239,18 @@ benchmark. Retrieval quality is not measurable through solve rate here---which
 also invalidates solve-rate comparisons that would favor us
 (Section~\ref{sec:saturation}).
 
-\item \textbf{A localization ceiling, and evidence it is categorical.} Removing
-the code symbols from an issue collapses our three-paradigm retriever to
-lexical-baseline parity, and additional searches do not recover it. This locates
-the limit at similarity-based localization itself rather than at our
-implementation, and identifies the open problem as reasoning over a representation
-of program behavior---not a better index (Section~\ref{sec:ceiling}). Crossing this
-factor with whether the model has memorized the repository yields the sharpest form
-of the decoupling: across all four conditions, including a decontaminated benchmark
-and the condition where our retrieval advantage is statistically zero, the cost
-saving persists at $-21\%$ to $-31\%$. The unifying account is that both factors
+\item \textbf{A localization ceiling, and evidence it is categorical.} Removing the
+code symbols from an issue degrades our three-paradigm retriever sharply and
+significantly---$0.125$ within task, $95\%$ CI $[0.010, 0.260]$---and additional
+searches do not recover it. Running lexical, dense and structural retrieval
+simultaneously therefore does not solve symptom-only localization, which locates the
+limit at similarity-based localization rather than at our implementation and
+identifies the open problem as reasoning over a representation of program
+behavior---not a better index (Section~\ref{sec:ceiling}). Crossing this factor with
+whether the model has memorized the repository yields the sharpest form of the
+decoupling: across all four conditions, including a decontaminated benchmark and the
+conditions where our retrieval margin is a few points of recall, the cost saving
+persists at $-21\%$ to $-31\%$. The unifying account is that both factors
 supply the same thing---knowledge of where to look---and that a retrieval layer
 supplies candidate files rather than that knowledge. Where it is absent the baseline
 acquires it by exploring, and does so well enough that its cumulative recall
@@ -249,14 +267,23 @@ per-task records are released,\footnote{Code, task lists, and per-task run recor
 source because building it never calls a language model.
 \end{enumerate}
 
-\paragraph{On the title.}
-We use \emph{Retrieval Is Not Reasoning} as shorthand for the empirical pattern
-developed in this paper---that improvements in similarity-based localization stop
-converting into deployment savings, and that localization itself fails once an issue
-no longer names the code---rather than as a universal claim about retrieval. What we
-establish is stated precisely in Section~\ref{sec:ceiling}, together with the
-observation that would falsify it, and the limits of its generality are set out in
-Section~\ref{sec:threats}.
+\paragraph{On the title, and the word ``frontier'' in it.}
+The title is a claim about a specific regime, and the qualifier is load-bearing. In
+the frontier-agent deployment the model has substantially memorized these
+repositories, so retrieval quality cannot express itself in outcomes: solve rate is a
+tie, and the median task is no cheaper despite first-search file recall rising from
+66\% to 86\% and function-level localization from 0\% to roughly 80\%. That is the
+sense in which retrieval is not the binding constraint there.
+
+It is emphatically \emph{not} a claim that retrieval never matters, and this paper
+contains the counter-example. On the open-weight model of Section~\ref{sec:systems},
+which memorizes far less, a control receiving no repository code solves 35.0\% of
+tasks and structural retrieval reaches 42.0\%---a genuine seven-point effect
+(Table~\ref{tab:react}). Retrieval is worth little precisely where the model already
+knows the code and a great deal where it does not. Readers who take only one sentence
+from the title should take that one. What we establish is stated precisely in
+Section~\ref{sec:ceiling}, with the observation that would falsify it, and the limits
+of its generality in Section~\ref{sec:threats}.
 
 \section{Background: What a Code-Context System Is For}
 \label{sec:background}
@@ -312,10 +339,11 @@ token savings such systems report. We attribute it to that arm explicitly.
 \emph{Hypothesis:} identifiers are highly discriminative in code, so text search
 is sufficient. This is a stronger baseline than it appears; \citet{agentless}
 show that a simple hierarchical localize-repair pipeline is competitive with
-elaborate agentic scaffolding, and our own results show lexical navigation
-reaching the gold file in the large majority of tasks. \emph{Implied cost:} cheap
-per call, but file-granular --- the agent must read to narrow further, and those
-reads are the dominant token sink we measure.
+elaborate agentic scaffolding, \citet{grepallyouneed} find text search generally
+outperforming vector retrieval inside several production agent CLIs, and our own
+results show lexical navigation reaching the gold file in the large majority of
+tasks. \emph{Implied cost:} cheap per call, but file-granular --- the agent must
+read to narrow further, and those reads are the dominant token sink we measure.
 
 \paragraph{Structural retrieval (this work).}
 \emph{Hypothesis:} the unit an agent edits is a \emph{function}, so retrieval
@@ -967,6 +995,16 @@ exclusion, not non-adoption. We report this as a deployment finding rather than
 a quality comparison, and it is why competitor quality is measured in the react
 loop instead.
 
+The general lesson---that the harness can matter as much as the retriever---has
+independent support. \citet{grepallyouneed} compare text and vector retrieval
+across a custom loop and three production agent CLIs and find that accuracy
+depends strongly on which harness and tool-calling style is used even when the
+underlying data are held fixed. Our exclusion result is an extreme instance of
+that effect: a harness property decided whether a retriever participated at all.
+It is also why we never pool numbers across our two harnesses, and why we treat
+the deployment magnitudes in Section~\ref{sec:decoupling} as specific to the
+agent we measured rather than as properties of retrieval in general.
+
 \section{Analysis}
 \label{sec:analysis}
 
@@ -1153,11 +1191,29 @@ We test this by crossing two factors: whether the model has memorized the
 repository (the standard benchmark versus a decontaminated one), and whether the
 issue text still contains location cues (the original text versus a
 prose-stripped variant with tracebacks and code blocks removed).
-Figure~\ref{fig:ceiling} shows the result. First-search recall falls from 86\% to
-55\% as the cues are withdrawn---and the lexical baseline falls with it, from
-66\% to 49\%. The two curves converge: running all three paradigms at once buys
-$+0.200$ recall over built-in lexical search when the issue names the code, and
-$+0.065$ once it does not---a margin this sample cannot distinguish from zero.
+Figure~\ref{fig:ceiling} shows the result, and the first-order finding is the one
+the argument rests on: running all three paradigms at once does not survive the
+removal of the symbols. \sg{}'s first-search recall falls from 86\% to 55\% as the
+cues are withdrawn. Measured within task---the same issues under both
+conditions---that degradation is $0.125$ on average, with a bootstrap 95\%
+confidence interval of $[0.010,\,0.260]$ over the 26 paired tasks across both
+benchmarks. The built-in lexical baseline degrades as well, from 66\% to 49\%.
+Neither similarity over tokens, nor similarity in an embedding space, nor
+adjacency in a call graph withstands the loss of the symbol names, and running
+all three together does not change that.
+
+We are deliberately more careful about the second-order question---whether
+\sg{}'s \emph{margin} over the baseline shrinks faster than the baseline itself
+does. The point estimates suggest it: the margin is $+0.200$ when the issue names
+the code and $+0.065$ when it does not, and on the decontaminated benchmark
+$+0.160$ against $+0.056$. But tested within task that difference is
+$+0.058$ with a 95\% interval of $[-0.093,\,0.215]$, and only 5 of 26 tasks
+individually show it. At this sample size we can establish that the retriever
+degrades sharply; we cannot establish that it degrades \emph{to parity} with
+lexical search, and we do not claim it. The ceiling argument does not require
+that stronger statement---what matters is that combining every non-LLM paradigm
+available leaves symptom-only localization unsolved, which the first-order result
+shows on its own.
 
 \begin{figure}[t]
 \centering
@@ -1168,15 +1224,16 @@ use the same 15 tasks as the prose run so the conditions are paired.}
 \label{fig:ceiling}
 \end{figure}
 
-Table~\ref{tab:grid} gives the four cells numerically, and the two columns should
-be read against each other. The recall column collapses, and it does so by
-almost exactly the same proportion on both benchmarks: an advantage of $+0.200$
-falls to $+0.065$ when the symbols are removed from the memorized benchmark, and
-$+0.160$ falls to $+0.056$ on the unseen one---roughly two-thirds of the advantage
-gone in each case, leaving a residue that $n=15$ cannot separate from zero. The
-cost column does not collapse with it. It stays between $-21\%$ and $-31\%$ in
-every cell, including the cells where the retrieval advantage has all but
-disappeared.
+Table~\ref{tab:grid} gives the four cells numerically. Read the recall columns
+first: both systems lose accuracy as the cues are withdrawn, \sg{} from $0.861$ to
+$0.549$ and the baseline from $0.661$ to $0.493$. The margin between them is
+smaller in the prose conditions than in the original ones, in the same direction on
+both benchmarks, though as noted above that second-order difference is not resolved
+at this sample size. The cost column behaves differently, and this is the
+comparison that carries the section: it stays between $-21\%$ and $-31\%$ in every
+cell, including the two where the retrieval margin has shrunk to a few points of
+recall. Whatever the exact size of the remaining retrieval advantage, it is not
+what the cost saving is tracking.
 
 \begin{table}[t]
 \centering
@@ -1193,9 +1250,11 @@ SWE-rebench    & original      & $0.577 \to 0.737$ & $+0.160$          & $-26.4\
 (unseen)       & prose-only    & $0.493 \to 0.549$ & $\mathbf{+0.056}$ & $-31.3\%$ & $-29.3\%$ \\
 \bottomrule
 \end{tabular}
-\caption{The decoupling, by condition. Recall advantage collapses as location
-cues are withdrawn; the cost saving does not. All cells $n=15$, paired, test-execution
-verified. Solve rate is a tie or $\pm1$ in every cell and is omitted.}
+\caption{The decoupling, by condition. Retrieval accuracy degrades as location cues
+are withdrawn; the cost saving does not. All cells $n=15$, paired, test-execution
+verified. The $\Delta$ column is a point estimate: at this sample size the
+difference between the original and prose-only margins is not statistically
+resolved (see text). Solve rate is a tie or $\pm1$ in every cell and is omitted.}
 \label{tab:grid}
 \end{table}
 
@@ -1222,13 +1281,16 @@ the inference from symptom to responsible code. That inference is causal---it
 requires knowing what code \emph{does} when it runs, not what it resembles---and
 similarity matching, whether lexical, dense, or topological, does not supply it.
 The second is positive, and is the more useful finding: \textbf{the cost saving
-survives the collapse of the retrieval advantage.} In the prose-only condition
-where recall is identical to the baseline, cost still falls by 21\%. The
-decontaminated benchmark makes the same point from the other direction: its
+does not track retrieval quality.} In the prose-only condition on the memorized
+benchmark, where \sg{} retrieves barely better than the baseline, cost still falls
+by 21\%. The decontaminated benchmark makes the same point more sharply: its
 largest cost saving ($-31.3\%$) occurs in the cell with its \emph{smallest}
-retrieval advantage ($+0.044$). Whatever \sg{} is doing to reduce cost, it is not
-out-retrieving the baseline; it is bounding how far the agent wanders before it
-commits.
+retrieval margin ($+0.056$), and its smallest saving in a cell with a larger one.
+Whatever \sg{} is doing to reduce cost, it is not out-retrieving the baseline; it
+is bounding how far the agent wanders before it commits. This is the one claim in
+the section that does not depend on resolving the retrieval margin precisely---the
+cost effect is present and large in cells where that margin is, on any reading,
+small.
 
 \paragraph{And iterating the retriever does not rescue it.}
 A natural response is that a single search is the wrong unit---that an agent
@@ -1340,6 +1402,10 @@ objection---that our baseline agent has unusually capable built-in search, and a
 weaker agent would show a different picture---runs against the direction of the
 bias: a weaker native searcher would leave \emph{more} exploration for retrieval
 to remove, so measuring against a strong baseline makes our estimate conservative.
+We note that \citet{grepallyouneed}, comparing retrieval strategies across three
+production agent CLIs, report substantial harness-dependent variation in outcomes,
+which is a reason to expect the \emph{size} of our effect to move across agents
+even where its direction does not.
 The react-loop results are consistent with that, showing a larger retrieval effect
 against a weaker model. We would still regard replication on a second production
 agent as the most valuable single addition to this work.
