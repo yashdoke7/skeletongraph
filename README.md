@@ -95,7 +95,7 @@ the function** (57% vs grep's 0% — lexical search is file-granular by construc
 Against the closed-book floor of 35.0%, retrieval is worth **+7 points** here.
 
 `sg-rerank`'s recall/cost profile is reported separately in the agent-free intrinsic
-retrieval ablation in [`docs/paper/skeletongraph.tex`](docs/paper/skeletongraph.tex)
+retrieval ablation in [the paper](docs/paper/ResearchPaper.pdf)
 (Table 2, §5.1) — best MRR/recall@10 short of full fusion, at the lowest index cost.
 
 ### 2. Deployment: SkeletonGraph vs native Claude Code (MCP, Docker-verified)
@@ -130,8 +130,10 @@ p = 1.0 (no difference).
 
 `sg-fusion` runs all three non-LLM retrieval paradigms at once — lexical (BM25),
 semantic (code embeddings), and topological (call graph). Crossing *memorization*
-(standard vs. decontaminated benchmark) against *location cues* (original vs.
-prose-stripped issue text) shows the limit:
+(standard vs. decontaminated benchmark) against *location cues* (original issue text
+vs. a **prose-only** variant with tracebacks and code blocks removed — symbols named
+in running prose are deliberately left in, since cutting them out leaves text no real
+issue report resembles) shows the limit:
 
 | condition | file recall native → SG | Δ recall | cost | turns |
 |---|--:|--:|--:|--:|
@@ -143,7 +145,7 @@ prose-stripped issue text) shows the limit:
 <sub>Recall excludes tasks where the agent never invoked SG (adoption events, not
 retrieval failures) — the same rule behind the .862 headline above. n=15 per cell.</sub>
 
-**Retrieval degrades sharply when the symbols go.** SG's own first-search recall
+**Retrieval degrades sharply once the location cues go.** SG's own first-search recall
 falls `.861 → .549`; measured within-task across both benchmarks that's a drop of
 **+.125 (95% CI [.010, .260], n=26)**. The lexical baseline falls too. Running all
 three non-LLM paradigms at once does not rescue symptom-only localization — that's
@@ -196,8 +198,8 @@ own logs showing it was ready seconds later.
 This is a **deployment-mode result, not a retrieval-quality one**, and we report no
 performance comparison for those systems: with zero tool calls, any such number would
 measure their absence rather than their retrieval. A separately wired zero-LLM graph
-competitor connected cleanly with all 14 tools visible, yet the agent never invoked
-one across 10 tasks, defaulting to native `grep` every time. Fast connection and
+competitor connected cleanly with its full tool set visible, yet the agent never
+invoked a single one across 10 tasks, defaulting to native `grep` every time. Fast connection and
 actual adoption are prerequisites that retrieval quality cannot substitute for.
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
@@ -526,7 +528,7 @@ src/skeletongraph/
 ## Evaluation
 
 The full methodology, verified results, and every withdrawn/superseded claim are in
-[`docs/paper/skeletongraph.tex`](docs/paper/skeletongraph.tex) and
+[the paper](docs/paper/ResearchPaper.pdf) and
 [`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
 
 SkeletonGraph should be evaluated on both quality and cost:
