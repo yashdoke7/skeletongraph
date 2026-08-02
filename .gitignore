@@ -124,6 +124,16 @@ docs/paper/*.log
 docs/paper/*.out
 docs/paper/*.bbl
 docs/paper/*.blg
+
+# Paper SOURCE is kept local, not published. The compiled PDF
+# (docs/paper/ResearchPaper.pdf), the figures, and the verified-claims ledger
+# (docs/paper/FINDINGS.md) ARE committed — those are what a reader wants.
+# Keeping the .tex out avoids publishing a half-edited manuscript alongside the
+# released PDF, and keeps the eventual double-anonymous FSE build (which needs a
+# de-anonymized/anonymized pair of the same file) off the public repo.
+docs/paper/*.tex
+docs/paper/*.tex.*
+docs/paper/references.bib
 **/graphify-out/
 
 eval/scripts/set_nim_env.bat
