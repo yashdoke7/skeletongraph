@@ -117,47 +117,33 @@ The Localization Ceiling and Where Cost Actually Lives}
 \maketitle
 
 \begin{abstract}
-Giving a coding agent structural code retrieval---returning the exact functions it
-needs instead of letting it read its way to them---is a natural way to cut what the
-agent spends, and an active line of both research and product work now pursues it.
-We take that idea and build it out completely. \sg{} is a structural retriever that
-runs lexical, dense-semantic, and call-graph retrieval simultaneously, returns whole
-functions, and serves them to an agent over the Model Context Protocol. We then do
-the step these cost arguments usually omit: we put it inside a real coding agent
-(Claude Code, in headless deployment) and measure the bill an agent actually pays,
-over 100 repository tasks, with every candidate fix adjudicated by executing the
-project's own test suite rather than trusting the agent's own verdict.
+Structural code retrieval---handing a coding agent the exact functions it needs
+instead of letting it read its way to them---is a natural way to cut what the agent
+spends, and an active line of research and product work pursues it. \sg{} runs
+lexical, dense-semantic, and call-graph retrieval simultaneously, returns whole
+functions, and serves them over the Model Context Protocol. We measure what that
+buys inside a real agent: Claude Code in headless deployment, 100 SWE-bench Verified
+tasks, every candidate fix adjudicated by executing the project's own test suite.
 
-Constructing \sg{} as a deliberate superset of the non-LLM retrieval paradigms lets
-us ask a sharper question than whether retrieval helps: when it stops helping, is
-the limit our index or the whole category?
+Retrieval quality improves sharply. The first search returns the correct \emph{file}
+for 86\% of tasks against 66\% for the agent's built-in text search, and names the
+correct \emph{function} in roughly 80\% against 0\%---text search matches lines and
+returns files, so function-level localization is not something it does poorly but
+something it cannot do. Cost does not follow. The median task is no cheaper
+($+1.9\%$); the entire saving sits in the expensive tail ($-42.5\%$ at the 95th
+percentile), and solve rate is a statistical tie.
 
-Retrieval quality improves sharply. On SWE-bench Verified, \sg{}'s first search
-returns the correct \emph{file} for 86\% of tasks, against 66\% for the agent's own
-text search. It also names the correct \emph{function} in roughly 80\% of tasks,
-against 0\%---text search matches lines and returns files, so function-level
-localization is not something it does poorly but something it cannot do at all.
-
-Cost does not follow. The median task is no cheaper ($+1.9\%$); the entire saving
-sits in the expensive tail ($-42.5\%$ at the 95th percentile), and solve rate is a
-statistical tie. We then strip the symbol names out of the issue text and repeat
-the comparison on a decontaminated benchmark of unseen repositories. Retrieval turns
-out to be anchored to those symbols: \sg{}'s first-search file recall falls from
-86\% to 55\%, a within-task degradation of $0.125$ ($95\%$ CI $[0.010, 0.260]$), and
-plain text search falls with it. Issuing more searches does not recover the
-gap. No combination of the lexical, dense, and structural signals we test performs
-the inference from a symptom to the code responsible for it, an inference that is
-causal rather than one of resemblance. Memorization and location cues turn out to be
-the same quantity---knowledge of where to look, held by the model or supplied by the
-issue---and where neither is available the baseline acquires it by exploring, to the
-point that its cumulative recall overtakes ours. A retrieval layer delivers candidate
-files, not knowledge of the repository. The cost saving survives the collapse anyway
-($-21\%$ where retrieval is identical to the baseline), so retrieval is bounding how
-far the agent wanders, not finding code better. Beyond this ceiling, our evidence
-points to a representation of what code \emph{does}, supporting reasoning about
-program behavior, rather than a better index over what code resembles. We release
-the harness, task lists, and per-task records so the result can be checked rather
-than believed.
+Because \sg{} runs every non-LLM retrieval paradigm at once, we can ask whether the
+remaining limit is our index or the category. Stripping the symbol names from the
+issue text, and repeating the comparison on a decontaminated benchmark of unseen
+repositories, drops its first-search recall from 86\% to 55\%, with text search
+falling alongside it; issuing more searches does not recover the gap. Memorization
+and location cues turn out to be one quantity---knowledge of where to look, held by
+the model or supplied by the issue---and where neither is present the agent acquires
+it by exploring instead. A retrieval layer supplies candidate files, not knowledge of
+the repository, and the cost saving persists throughout, so what it reduces is how
+far the agent wanders rather than how well it finds code. We release the harness,
+task lists, and per-task records.
 \end{abstract}
 
 \section{Introduction}
@@ -487,9 +473,10 @@ fairly (Section~\ref{sec:exclusion} explains why they cannot be compared inside
 a headless frontier agent).
 
 \textbf{Frontier-agent deployment.} \sg{} runs as a real MCP server driven by a
-production frontier coding agent---Claude Code, headless (\texttt{-p}) mode, on
-Claude Sonnet---against the same agent, same model, using only its unmodified
-built-in tools. This measures deployment economics under an agent we do not
+production frontier coding agent---Claude Code in headless (\texttt{-p}) mode,
+invoked as \texttt{--model sonnet}, which the run transcripts record as resolving
+to \texttt{claude-sonnet-5} for every task reported here---against the same agent,
+same model, using only its unmodified built-in tools. This measures deployment economics under an agent we do not
 control; subsequent references to ``the frontier agent'' denote this
 configuration.
 
@@ -501,8 +488,9 @@ tools: its text search (\texttt{Grep}), file glob, and file read, with no MCP
 server attached. It is not a reimplementation and not a weakened stand-in; it is
 the product as shipped, and it is a strong baseline precisely because the model is
 heavily trained on those tools. In the react loop the corresponding baselines are
-separate arms we implement---\texttt{grep} and \texttt{bm25}---running on an
-open-weight 120B-class model. Every retrieval, cost, turn and context figure in
+separate arms we implement---\texttt{grep} and \texttt{bm25}---running on
+\texttt{nvidia/nemotron-3-super-120b-a12b}, an open-weight mixture-of-experts model
+with 120B total and 12B active parameters. Every retrieval, cost, turn and context figure in
 this paper belongs to exactly one of these two settings; we never compute a
 comparison across them, and each table states which one it reports.
 
@@ -927,8 +915,9 @@ two axes that matter jointly.
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.82\linewidth]{figures/fig_token_efficiency.pdf}
-\caption{Whole systems on a second model family (120B-class open model, 100
-tasks; each pipeline keeps its own retrieval interface).}
+\caption{Whole systems on a second model family
+(\texttt{nemotron-3-super-120b-a12b}, 100 tasks; each pipeline keeps its own
+retrieval interface).}
 \label{fig:tokens}
 \end{figure}
 
@@ -972,8 +961,9 @@ Repo-map competitor     &  98 & 36.7\% & ---   & ---  & \$0.160 \\
 \texttt{none} (closed-book) & 100 & 35.0\% & 0.000 & 0\% & \$0.066 \\
 \bottomrule
 \end{tabular}
-\caption{Controlled retrieval ablation in the react loop: open-weight model,
-100 tasks, identical action space, only the retrieval backend varies.}
+\caption{Controlled retrieval ablation in the react loop:
+\texttt{nemotron-3-super-120b-a12b}, 100 tasks, identical action space, only the
+retrieval backend varies.}
 \label{tab:react}
 \end{table}
 
