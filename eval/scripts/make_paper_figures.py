@@ -450,10 +450,10 @@ def _cond_stats(tag, restrict=None):
     """(rec1_native, rec1_sg, cost_delta_pct) paired on common task_ids.
 
     `restrict` limits to a task_id set — required for the SWE rows, whose prose
-    run covers only 15 of the 100 tasks. Comparing the n=100 aggregate against
-    an n=15 subset manufactures a trend that isn't there (the 15 happen to be
-    tasks where SG does ~2x better than its average), so raw-vs-prose must be
-    read on the matched subset only.
+    run covers only 50 of the 100 tasks. Comparing the n=100 aggregate against
+    a 50-task subset manufactures a trend that isn't there (that subset is not
+    representative — SG saves -8.9% on it vs -14.6% overall), so raw-vs-prose
+    must be read on the matched subset only.
     """
     nat, sg = load_arm(tag, "native"), load_arm(tag, "sg-fusion")
     common = sorted(set(nat) & set(sg))
@@ -494,7 +494,10 @@ def fig_ceiling():
         2, 1, figsize=(6.0, 3.9), sharex=True,
         gridspec_kw={"height_ratios": [1.3, 1.0], "hspace": 0.20})
 
-    # top: retrieval collapses
+    # top: recall is flat within a benchmark, cliffs between them. The x order
+    # (SWE raw, SWE prose, reb raw, reb prose) is what makes that readable:
+    # the two within-benchmark steps are the cue manipulation, the middle step
+    # is the benchmark change.
     ax.plot(x, natr, marker="o", color=INK_2, linewidth=1.6, markersize=5,
             label="Built-in lexical search")
     ax.plot(x, sgr, marker="o", color=BLUE, linewidth=2.0, markersize=6,
@@ -505,7 +508,7 @@ def fig_ceiling():
     ax.set_ylabel("First-search file recall (%)")
     ax.set_ylim(0, 100)
     ax.legend(frameon=False, fontsize=8, loc="lower left")
-    ax.set_title("Retrieval quality collapses when location cues are removed",
+    ax.set_title("The repository moves retrieval; the issue text does not",
                  fontsize=9.5, color=INK, loc="left", pad=8)
     _clean(ax)
 
@@ -522,7 +525,7 @@ def fig_ceiling():
     ax2.margins(y=0.18)
     ax2.axhline(0, color=BASELINE_AXIS, linewidth=0.9)
     ax2.set_ylabel("Cost change")
-    ax2.set_title("…yet the cost saving persists — retrieval quality is not the mechanism",
+    ax2.set_title("…and the cost saving tracks neither — it is largest where the margin is smallest",
                   fontsize=9.5, color=INK, loc="left", pad=8)
     ax2.set_xticks(list(x)); ax2.set_xticklabels(labels, fontsize=8.5)
     ax2.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
@@ -537,10 +540,10 @@ def fig_tail_grid():
 
     Deliberately NOT a clone of fig_tail for each panel. That figure earns its
     running mean and its p95 annotation from n=100; the other three cells are
-    n=15, where a 9-wide smoothing window would average over more than half the
-    data and "p95" is indistinguishable from the maximum. So the n=15 panels plot
-    every task as a marker with no smoothing, carry no percentile annotation, and
-    state n on the panel. What they can honestly show is the SHAPE — curves
+    n=50, where a 9-wide smoothing window still spans a fifth of the data and
+    "p95" sits within a couple of observations of the maximum. So those panels
+    plot every task as a marker with no smoothing, carry no percentile
+    annotation, and state n on the panel. What they can honestly show is the SHAPE — curves
     together at the cheap end, separating at the expensive end — which is the
     claim, and the pooled cost change, which is computed not asserted.
     """
@@ -569,7 +572,7 @@ def fig_tail_grid():
                         / (min(len(vals), i + w // 2 + 1) - max(0, i - w // 2))
                         for i in range(len(vals))]
             ny, sy = smooth(nv), smooth(sv)
-        else:                        # n=15: no smoothing, show every task
+        else:                        # smaller n: no smoothing, show every task
             ny, sy = nv, sv
 
         ax.fill_between(x, sy, ny, where=[a > b for a, b in zip(ny, sy)],
@@ -587,7 +590,7 @@ def fig_tail_grid():
                 transform=ax.transAxes, fontsize=8, color=BLUE, fontweight="bold",
                 va="top")
         if not big:
-            ax.text(0.02, 0.83, "every task shown; no percentiles at n=15",
+            ax.text(0.02, 0.83, "every task shown; no percentiles at this n",
                     transform=ax.transAxes, fontsize=7, color=MUTED, va="top")
         ax.set_xlim(1, n)
         ax.set_ylim(bottom=0)
@@ -608,7 +611,13 @@ def fig_tail_grid():
 
 def main():
     _style()
-    ds = "C:/Users/ASUS/Desktop/CS/Projects/swebench-data/swebench_100.jsonl"
+    # fig_retrieval reads ONE field out of this file: gold_fqns. The original
+    # swebench_100.jsonl lived under the (since-deleted) swebench-data root, but
+    # make_prose_stripped.py copies every field verbatim and rewrites only
+    # `query` -- so the prose variant carries byte-identical gold_fqns for the
+    # same 100 task_ids and is a safe stand-in for gold lookup. Do NOT use it
+    # anywhere `query` matters.
+    ds = "eval/datasets/swebench_100_prose_stripped.jsonl"
     nat, sg = paired("claude_v7", "native", "sg-fusion")
     print(f"paired frontier-agent tasks: {len(nat)}")
     fig_tail(nat, sg)

@@ -124,67 +124,67 @@ Retrieval does nothing for the typical task and removes over 40% of the cost of 
 worst ones. Paired bootstrap 95% CI on the mean: [−25.3%, −1.2%]; McNemar on pass@1:
 p = 1.0 (no difference).
 
-### 3. The ceiling: what structural retrieval cannot do
+### 3. The ceiling: better localization doesn't buy better outcomes
 
-![Retrieval collapses as location cues are removed](docs/paper/figures/fig_ceiling.png)
+![What moves retrieval: the repository, not the issue text](docs/paper/figures/fig_ceiling.png)
 
 `sg-fusion` runs all three non-LLM retrieval paradigms at once — lexical (BM25),
 semantic (code embeddings), and topological (call graph). Crossing *memorization*
 (standard vs. decontaminated benchmark) against *location cues* (original issue text
-vs. a **prose-only** variant with tracebacks and code blocks removed — symbols named
-in running prose are deliberately left in, since cutting them out leaves text no real
-issue report resembles) shows the limit:
+vs. a **prose-only** variant with tracebacks and code blocks removed) isolates what
+retrieval quality actually depends on:
 
 | condition | file recall native → SG | Δ recall | cost | turns |
 |---|--:|--:|--:|--:|
-| SWE-Verified, raw | .661 → .861 | **+.200** | −32.2% | −38.5% |
-| SWE-Verified, **prose-only** | .696 → .762 | **+.065** | −21.1% | −22.6% |
-| SWE-rebench (unseen repos), raw | .577 → .737 | +.160 | −26.4% | −35.6% |
-| SWE-rebench, **prose-only** | .493 → .549 | **+.056** | **−31.3%** | −29.3% |
+| SWE-Verified, raw | .688 → **.877** | +.189 | −8.9% | −15.4% |
+| SWE-Verified, **prose-only** | .736 → **.859** | +.123 | −7.6% | −19.2% |
+| SWE-rebench (unseen repos), raw | .455 → **.585** | +.130 | −15.0% | −20.3% |
+| SWE-rebench, **prose-only** | .464 → **.577** | +.113 | −15.7% | −18.9% |
 
 <sub>Recall excludes tasks where the agent never invoked SG (adoption events, not
-retrieval failures) — the same rule behind the .862 headline above. n=15 per cell.</sub>
+retrieval failures) — the same rule behind the .862 headline above. n=50 per cell.</sub>
 
-**Retrieval degrades sharply once the location cues go.** SG's own first-search recall
-falls `.861 → .549`; measured within-task across both benchmarks that's a drop of
-**+.125 (95% CI [.010, .260], n=26)**. The lexical baseline falls too. Running all
-three non-LLM paradigms at once does not rescue symptom-only localization — that's
-the ceiling, and it's a property of the category, not of one implementation.
+**Removing the location cues does nothing.** Measured within-task across both
+benchmarks, SG's first-search recall changes by **+.008 (95% CI [−.049, +.068],
+n=93)** — 9 of 93 tasks move at all. The manipulation was real (38% of the issue text
+removed on SWE-Verified, 26% on SWE-rebench) and there's **no dose-response**: the
+correlation between how much text was cut and how much recall was lost is +.07 and
+−.04; the 18 tasks that lost over half their text changed by +.046. Structural
+retrieval simply wasn't resting on the tracebacks and repro snippets.
 
-*What we don't claim:* the point estimates suggest SG's **margin** over the baseline
-also collapses (+.200 → +.065, +.160 → +.056), but at n=15 that second-order effect
-isn't statistically resolved (+.058, CI [−.093, +.215]; only 5 of 26 tasks show it).
-The ceiling argument doesn't need it.
+> An earlier version of this study ran these cells at n=15 and reported a sharp
+> collapse (`.861 → .549`, within-task +.125). It didn't survive n=50 — the CI
+> tightened 3.5× onto zero. A 2×2 at fifteen paired tasks per cell has enough
+> resolution to manufacture a clean monotone pattern out of noise, and it did.
 
-**Yet the cost saving persists in every condition** (−21% to −31%) — including the
-cells where the retrieval margin is only a few points of recall. On the
-decontaminated benchmark the **largest** cost saving (−31.3%) sits in the cell with
-the **smallest** retrieval margin (+.056). Whatever drives the saving, it isn't
-out-retrieving the baseline.
+**What governs retrieval is the repository.** SG scores .877 on the standard
+benchmark and .585 on unseen repos — a gap of **.29, roughly thirty times** the effect
+of rewriting the issue. *Caveat:* the cue axis is within-task, but the benchmark axis
+is between task sets — it's confounded with repo size, domain, and issue style, so
+it's an upper bound on a memorization effect, not an estimate of one.
 
-**What the agent was missing was direction, not files.** Memorization and location
-cues look like two different factors, but they're the same quantity — knowledge of
-*where to look*, held by the model or supplied by the issue. Order the four conditions
-by how much of it is available and SG's recall orders exactly: `.861 → .762 → .737 →
-.549`.
+**The margin is stable, and that's the positive result** — +.113 to +.189 in every
+cell. The retrieval advantage survives every condition we could construct against it.
 
-And when direction isn't given, the agent acquires it by exploring. In **both**
-prose-only conditions, native's **cumulative** recall ends up ahead of SG's — .964 vs
-.946 on SWE-Verified, .715 vs .632 on unseen repos. Given enough turns, the agent that
-grepped and read its way through the repo located the code *better* than the agent
-handed a ranked list. SG gets there in half the searches and for less money; it does
-not get further.
+**But it doesn't convert.** Solve rate never moves: 75 vs 74 on SWE-Verified (McNemar
+p=1.0), 26 vs 27 and 22 vs 25 on unseen repos (p=0.45). And counting *cumulative*
+recall — everything either system surfaced over the whole run — native ends up **ahead
+in 3 of the 4 cells** (.989 vs .971, .695 vs .643, .713 vs .659; SG leads only on
+SWE-raw, .938 vs .907). The mechanism is in the iteration: native lifts its recall
++.19 to +.22 over 3.4–5.4 searches by grepping, reading, learning the repo's real
+vocabulary, and grepping better. SG lifts +.05 to +.11 over 1.6–2.3 searches, because
+re-querying the same index from the same issue text re-samples the same ranking.
 
 That inversion is the honest statement of what this tool is: **a retrieval layer
 delivers candidate files, not knowledge of the repository** — and a confident ranked
 list actively suppresses the agent's own acquisition of that knowledge (reads drop
-3.86 → 1.55/task). The agent spends tokens until it's *certain*, not until it has
-files. That's why recall and cost decouple, and it's what the paper's title refers to
-— the honest ceiling is a finding here, not a caveat.
+3.75 → 1.41/task). The agent spends tokens until it's *certain*, not until it has
+files. That's why recall and cost decouple, and it's what the paper's title refers to.
 
-> SWE-Verified rows are restricted to the same 15 tasks as the prose run so raw and
+> SWE-Verified rows are restricted to the same 50 tasks as the prose run so raw and
 > prose are paired. That subset is *not* representative of the full 100 (SG saves
-> −32.2% on it vs −14.6% overall) — do not compare it against the n=100 figure.
+> −8.9% on it vs −14.6% overall) — do not compare it against the n=100 figure. Solve
+> rate for the SWE-Verified prose cell was not adjudicated and is not reported.
 
 ### 4. Deployment finding: slow MCP servers are structurally excluded
 
@@ -556,7 +556,7 @@ If SkeletonGraph is useful in your research, please cite:
 ```bibtex
 @misc{doke2026skeletongraph,
   title  = {Frontier Coding Agents Don't Have a Retrieval Problem:
-            The Localization Ceiling and Where Cost Actually Lives},
+            Why Better Localization Does Not Buy Better Outcomes},
   author = {Doke, Yash},
   year   = {2026},
   note   = {SkeletonGraph — zero-LLM structural retrieval for coding agents},

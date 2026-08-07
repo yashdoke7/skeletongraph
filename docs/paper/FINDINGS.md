@@ -53,21 +53,27 @@ to the **same 15 task_ids** as the prose run so raw-vs-prose is a fair compariso
 > adoption events, not retrieval failures — scoring them as misses attributes to the
 > retriever a decision it never made. Excluding them gives **0.862 (86.2%)**, which is
 > the canonical figure in the paper and README. Do not mix the two across artifacts.
-| SWE-Verified raw (the 15 prose tasks) | 15 | −32.2% | −38.5% | 0.661 → 0.861 (+0.200) | 11/15 / 12/15 |
-| SWE-Verified **PROSE** (same 15) | 15 | **−21.1%** | −22.6% | 0.696 → 0.762 (**+0.065**) | 11/15 / 11/15 |
-| SWE-rebench raw (unseen repos) | 15 | **−26.4%** | −35.6% | 0.577 → 0.737 (+0.160) | 10/15 / 9/15 |
-| SWE-rebench **PROSE** (same 15) | 15 | **−31.3%** | −29.3% | 0.493 → 0.549 (**+0.056**) | 6/14 / 7/15 |
+| SWE-Verified raw (the 50 prose tasks) | 50 | −8.9% | −15.4% | 0.688 → 0.877 (+0.189) | not adjudicated |
+| SWE-Verified **PROSE** (same 50) | 50 | **−7.6%** | −19.2% | 0.736 → 0.859 (**+0.123**) | not adjudicated |
+| SWE-rebench raw (unseen repos) | 50 | **−15.0%** | −20.3% | 0.455 → 0.585 (+0.130) | 27/49 / 26/49 |
+| SWE-rebench **PROSE** (same 50) | 50 | **−15.7%** | −18.9% | 0.464 → 0.577 (**+0.113**) | 25/50 / 22/50 |
+
+> **THESE ROWS SUPERSEDE THE n=15 VERSION (2026-08).** The prior grid read
+> 0.661→0.861 / 0.696→0.762 / 0.577→0.737 / 0.493→0.549 with cost −32.2/−21.1/
+> −26.4/−31.3. Every one of those cells moved materially at n=50 and the
+> raw-vs-prose collapse they appeared to show is gone (§1b). Do not cite the old
+> numbers from any older artifact.
+>
+> **SWE-prose solve rate is NOT adjudicated** — only 15 of the 50 have `resolved`.
+> Deliberate: the cell is a null we do not report, so the Docker verify was skipped.
+> Never quote a pass@1 for either SWE row of this grid.
 
 > **RECALL CONVENTION — decided 2026-07-31, applies EVERYWHERE.** Tasks where the
 > agent never invoked SG are **excluded** from recall averages (adoption events, not
-> retrieval failures). This is the same rule that makes the headline 86.2% not 83.6%;
-> it was previously applied to the headline but NOT to this grid, which is how the
-> prose cell came to read −0.006 ("parity") while the headline used exclusion. Under
-> one consistent rule the prose cell is **+0.065**, and the honest claim is that
-> ~2/3 of the advantage is lost, not that it reaches parity. Excluded counts: 0 / 1 /
-> 2 / 3 across the four rows. Cost and turns use every paired task — adoption does not
-> change what a run was billed. `_rec1()` in `make_paper_figures.py` now returns
-> `None` (not `0.0`) so this cannot silently regress.
+> retrieval failures). This is the same rule that makes the headline 86.2% not 83.6%.
+> Excluded counts at n=50: 2 / 2 / 3 / 4 across the four rows. Cost and turns use
+> every paired task — adoption does not change what a run was billed. `_rec1()` in
+> `make_paper_figures.py` returns `None` (not `0.0`) so this cannot silently regress.
 
 ### 1a. SAMPLING CAVEAT — do not skip this
 The 15-task prose subset is **not representative** of the full 100: SG saves
@@ -76,44 +82,61 @@ MUST use the matched 15-task rows. Comparing the n=100 figure against an n=15
 figure produces a spurious "the effect grows" conclusion. (This error was made and
 corrected during analysis; it is the single easiest mistake to re-make here.)
 
-### 1b. What the grid actually shows
-- **Retrieval degrades under prose in both benchmarks — but read the two orders apart.**
-  - **FIRST-ORDER (significant, this is the load-bearing one):** SG's *own* rec@1
-    drops when symbols are removed. Within-task, pooled over both benchmarks:
-    **drop = +0.125, 95% CI [+0.010, +0.260], n=26, P(>0)=0.987.**
-  - **SECOND-ORDER (NOT significant — do not claim):** that SG's *margin over the
-    baseline* collapses. Point estimates look like it (+0.200→+0.065 memorized,
-    +0.160→+0.056 unseen) but tested within-task the difference is **+0.058, 95% CI
-    [−0.093, +0.215], P(>0)=0.77, and only 5 of 26 tasks show it.** Per-benchmark it
-    is weaker still (SWE 3/14, P=0.79; rebench 2/12, P=0.59). Resolving it needs
-    n≈370 paired raw+prose tasks. **Never write "collapses to parity" or
-    "indistinguishable from lexical search."** The ceiling argument does not need it:
-    it only requires that all three paradigms together fail on symptom-only issues,
-    which the first-order drop establishes alone.
-- **Cost advantage persists in every cell** (−21% to −31%), including the cells where
-  the retrieval margin is only a few points of recall. → the decoupling. This is the
-  claim that does NOT depend on resolving the margin, which is why it carries §ceiling.
-- **Direction of the prose effect on cost differs by benchmark**: on memorized SWE it
-  *shrinks* the advantage (−32.2% → −21.1%); on unseen rebench it *grows* it
-  (−26.4% → −31.3%). Do NOT claim a monotone trend.
-- **pass@1 is a tie or ±1 in every cell.** Never significant. Do not lead with it.
+### 1b. What the grid actually shows — REVISED 2026-08 AT n=50 (supersedes the n=15 read)
 
-### 1c. The L3 ceiling — the evidence (first-order only; see §1b for what is NOT claimed)
-`sg-fusion` is all three non-LLM paradigms simultaneously (BM25 lexical + jina
-dense semantic + graph topological). Its first-search recall as cues are removed
-and repos become unfamiliar:
+> **WITHDRAWN: the prose-strip collapse.** Everything the n=15 grid appeared to show
+> about location cues was an artifact. Do not restore any version of it.
+
+- **FIRST-ORDER — NULL, and well-powered.** SG's own rec@1 when symbols are removed,
+  within-task, pooled over both benchmarks:
+  **+0.008, 95% CI [−0.049, +0.068], n=93, P(>0)=0.61, 9/93 tasks moving.**
+  The superseded n=15 figure was +0.125, CI [+0.010, +0.260], n=26. n rose 26→93 and
+  the CI tightened ~3.5× *onto zero* — this is a real null, not an underpowered one.
+- **Manipulation check passes, so the null is about the world, not the treatment.**
+  Stripping removed 38% of SWE issue chars (median 35%), 26% of rebench chars.
+  **No dose-response:** r = +0.07 (SWE), −0.04 (rebench). The 18 SWE tasks that lost
+  >50% of their text changed by +0.046 (CI spans 0). Untouched and gutted tasks are
+  indistinguishable.
+- **SECOND-ORDER — also null** (was already flagged not-significant at n=15, and stays
+  that way): margin change SWE **+0.045, CI [−0.076, +0.171]**; rebench **+0.028,
+  CI [−0.088, +0.143]**.
+- **The margin is STABLE, not collapsing: +0.113 to +0.189 across all four cells.**
+  This is a *positive* result for SG and the opposite of the old framing.
+- **What actually moves recall is the REPOSITORY, ~30× the text effect:**
+  prose effect −0.017 (SWE) / −0.008 (reb); benchmark effect −0.292 (raw) / −0.282
+  (prose). **CAVEAT HARD:** prose axis is within-task; benchmark axis is BETWEEN task
+  sets, confounded with repo size/domain/issue-style/patch-selection. It is an UPPER
+  BOUND on a memorization effect, never an estimate of one.
+- **Cost advantage persists in every cell but is SMALLER than the n=15 read:**
+  now **−7.6% to −15.7%** (was −21% to −31%). Still decoupled — the largest margin
+  (+0.189) sits with the smallest saving (−8.9%); the two rebench cells save ~2× more
+  on a smaller margin. Ranking cells by margin vs by saving gives near-opposite orders.
+- **pass@1 never moves.** SWE 75/74 (McNemar p=1.0); reb raw 26/27 (p=1.0);
+  reb prose 22/25 (p=0.45). SWE-prose was NOT adjudicated (15/50 verified) — do not
+  report a solve rate for that cell anywhere.
+
+### 1c. The ceiling that survives — retrieval quality does not CONVERT
+The old "symptom-only localization is unsolvable by similarity" argument is dead: SG
+beats lexical on symptom-only issues by +0.123 (SWE) and +0.113 (reb). The surviving,
+better-evidenced ceiling is that a large durable retrieval win buys no outcome:
 
 ```
-sg-fusion rec@1:   0.861  →  0.762  →  0.737  →  0.549      (−36%)
-native    rec@1:   0.661  →  0.696  →  0.577  →  0.493      (−25%)
-          (SWE raw) (SWE prose) (reb raw) (reb prose)
+sg-fusion rec@1:   0.877  →  0.859  →  0.585  →  0.577
+native    rec@1:   0.688  →  0.736  →  0.455  →  0.464
+margin:            +0.189    +0.123    +0.130    +0.113     <- FLAT
+          (SWE raw) (SWE prose) (reb raw) (reb prose)   all n=50
 ```
-If **any** of the three paradigms could reason from symptom to root cause, recall
-would hold when the symbols disappear. It does not (within-task drop +0.125, 95% CI
-[+0.010, +0.260], n=26) — and the lexical baseline falls too, so this reads as a
-property of the whole non-LLM category rather than an SG defect. Note the argument
-is carried by SG's *own* fall, which is significant; the *relative* fall vs native
-is NOT (§1b) and must not be used as the evidence.
+Three legs, all measured:
+1. **+0.11..+0.19 recall in every cell, zero solve-rate movement** (above).
+2. **Native's CUMULATIVE recall overtakes SG in 3 of 4 cells** — SWE-prose .989 v
+   .971; reb-raw .695 v .643; reb-prose .713 v .659. Only SWE-raw stays SG-ahead
+   (.938 v .907). Given turns, the agent that explored located code *better*.
+3. **Iteration asymmetry:** SG gains +0.05..+0.11 over 1.6–2.3 searches/task; native
+   gains +0.19..+0.22 over 3.4–5.4. A ranked list saturates; a grep→read→grep
+   feedback loop keeps paying. (The old "+0.000 saturation" number was also n=15;
+   it is +0.047 on rebench raw at n=50.)
+
+Reads still displaced hard: 3.75→1.41 (SWE raw), 4.44→1.16, 5.24→2.28, 5.50→2.46.
 
 ---
 
@@ -241,19 +264,24 @@ construct an exact `Edit`. The doc-claimed "one-line prompt fix" for this is inv
 
 ## 6. TOOL-CALL DISPLACEMENT (claude_v7, avg/task)
 
+Recomputed 2026-08 over the 100 paired tasks (an earlier version of this table read
+Bash 4.05 / Read 3.86→1.55 / Grep 3.00→1.43 / Edit 2.69→2.50; those predate a
+`--reprocess` backfill of tool counts and are superseded):
+
 | | native | sg-fusion |
 |---|---|---|
-| Bash | 4.05 | 0.59 |
-| Read | 3.86 | 1.55 |
-| Grep | 3.00 | 1.43 |
-| Edit | 2.69 | 2.50 |
-| sg_search / sg_expand | — | 1.52 / 1.77 |
-| ToolSearch (MCP deferral tax) | 0 | 1.05 |
-| **total** | ~13.9 | ~10.4 |
+| Bash | 3.87 | 0.67 |
+| Read | 3.75 | 1.41 |
+| Grep | 3.10 | 1.34 |
+| Edit | 2.50 | 2.30 |
+| sg_search / sg_expand | — | 1.53 / 1.81 |
+| ToolSearch (MCP deferral tax) | 0.08 | 1.05 |
+| **total** | ~13.5 | ~10.4 |
 
-SG collapses native's exploration (Bash 4.05→0.59, Read 3.86→1.55, Grep 3.00→1.43).
+SG collapses native's exploration (Bash 3.87→0.67, Read 3.75→1.41, Grep 3.10→1.34).
 Note SG pays a ~1.05/task `ToolSearch` deferral tax that native does not — its true
-efficiency is slightly *understated*.
+efficiency is slightly *understated*. **3.75→1.41 is the read-displacement figure the
+paper quotes**; do not use the old 3.86→1.55.
 
 ---
 
@@ -279,52 +307,46 @@ local optimum; every knob available is worse. Reported as a subsection, not hidd
 
 rec@1 (first search) vs rec@cum (after ALL searches), with searches issued per task:
 
-| condition | arm | rec@1 | rec@cum | lift | searches |
-|---|---|---|---|---|---|
-| SWE raw | native | 0.663 | 0.834 | +0.171 | 3.14 |
-| SWE raw | sg-fusion | 0.836 | 0.908 | +0.072 | 1.53 |
-| SWE PROSE | native | 0.717 | **0.967** | +0.250 | 4.13 |
-| SWE PROSE | sg-fusion | 0.711 | 0.883 | +0.172 | 1.87 |
-| rebench raw | native | 0.500 | 0.611 | +0.111 | 5.60 |
-| rebench raw | sg-fusion | 0.639 | 0.639 | **+0.000** | 2.33 |
-| rebench PROSE | native | 0.394 | 0.572 | +0.178 | 5.13 |
-| rebench PROSE | sg-fusion | 0.439 | 0.506 | +0.067 | 1.47 |
+**RECOMPUTED 2026-08 at n=50** (exclude-convention, cumulative = max over all searches):
 
-> **NOTE (2026-07-31): the rec@1/rec@cum columns above use the OLD convention**
-> (no-search scored 0.0). Recomputed under the decided convention (exclude), on the
-> same kept set for both arms: SWE-prose native 0.696→**0.964**, SG 0.762→**0.946**;
-> rebench-raw native 0.577→0.705, SG 0.737→**0.737**; rebench-prose native
-> 0.493→**0.715**, SG 0.549→**0.632**. Two things survive intact: the **+0.000
-> saturation on rebench raw** (0.737→0.737, unchanged), and the **inversion** —
-> native's cumulative recall beats SG's in BOTH prose cells, now visible on rebench
-> prose too (0.715 vs 0.632) where it is wider than on SWE prose (0.964 vs 0.946).
-> The paper quotes the recomputed numbers.
+| condition | arm | rec@cum | lift over rec@1 | searches |
+|---|---|---|---|---|
+| SWE raw | native | 0.907 | +0.186 | 3.4 |
+| SWE raw | sg-fusion | **0.938** | +0.074 | 1.6 |
+| SWE PROSE | native | **0.989** | +0.216 | 4.1 |
+| SWE PROSE | sg-fusion | 0.971 | +0.113 | 1.8 |
+| rebench raw | native | **0.695** | +0.204 | 5.4 |
+| rebench raw | sg-fusion | 0.643 | +0.047 | 2.3 |
+| rebench PROSE | native | **0.713** | +0.211 | 5.3 |
+| rebench PROSE | sg-fusion | 0.659 | +0.069 | 2.3 |
 
-**On rebench raw, SG issues 2.33 searches and recovers +0.000 recall.** Re-querying
-returns the same files: reformulations on an unfamiliar repo all draw from the same
-impoverished vocabulary (the issue text), so different phrasings produce the same
-ranking. No new information enters the loop.
+> The old n=15 table (and its **+0.000 saturation** on rebench raw) is superseded.
+> Saturation is not literally zero — it is **+0.047** there — but the *asymmetry* is
+> the real finding and it got stronger: SG gains +0.05..+0.11 over 1.6–2.3 searches,
+> native +0.19..+0.22 over 3.4–5.4. Quote the asymmetry, not "+0.000".
 
-Native's iteration works *better* (+0.111 to +0.250) because it has a genuine feedback
-loop: grep → read a file → learn the repo's real vocabulary → grep better. SG breaks
-that loop precisely because it looks confident — the agent trusts the ranked list and
-stops exploring (Read 3.86 → 1.55/task). On SWE-prose this backfires: **native's
-cumulative recall (0.967) exceeds SG's (0.883)**. SG gets there cheaper, not further.
+**The inversion is now 3 of 4 cells, not 2.** Native's cumulative recall beats SG's on
+SWE-prose (0.989 v 0.971), rebench-raw (0.695 v 0.643) and rebench-prose (0.713 v
+0.659). Only SWE-raw stays SG-ahead (0.938 v 0.907). This got *stronger* with n and is
+now one of the paper's load-bearing results.
 
-**NOW THE PAPER'S UNIFYING FRAME (§ceiling, "direction, not files").** Two facts in
-this table carry it and are now stated in the paper:
-1. Ordering the 4 conditions by *how much direction is available* (memorization
-   and/or location cues — the same quantity, held by the model vs supplied by the
-   issue) orders SG's rec@1 **exactly**: 0.861 / 0.762 / 0.737 / 0.549. Native does
-   NOT order as cleanly (its SWE-prose 0.696 > its SWE-raw 0.661 at n=15) — so rest
-   the claim on SG's ordering only, and say so.
-2. **Native's cumulative recall OVERTAKES SG's in BOTH prose cells** (convention B):
-   SWE-prose 0.964 vs 0.946, rebench-prose 0.715 vs 0.632. Given enough turns the agent
-   that explored located the code *better* than the agent handed a ranked list. SG gets
-   there in half the searches and cheaper — not further.
+Native's iteration works better because it has a genuine feedback loop: grep → read a
+file → learn the repo's real vocabulary → grep better. SG breaks that loop precisely
+because it looks confident — the agent trusts the ranked list and stops exploring
+(Read 3.75 → 1.41/task on SWE raw; 5.50 → 2.46 on rebench prose).
+
 ⇒ A retrieval layer delivers candidate **files**, not knowledge of the repo, and a
-confident ranked list suppresses the agent's own acquisition of that knowledge
-(Read 3.86 → 1.55/task, §6). The agent pays until **certain**, not until it has files.
+confident ranked list suppresses the agent's own acquisition of that knowledge. The
+agent pays until **certain**, not until it has files. That is why recall and cost
+decouple — and it is what the revised title ("why better localization does not buy
+better outcomes") now refers to.
+
+> **DEAD — do not restore.** The former "direction, not files" ordering argument
+> (0.861/0.762/0.737/0.549 ordered by how much direction is available) is withdrawn.
+> The ordering still happens to be monotone at n=50 (0.877/0.859/0.585/0.577) but it
+> is driven ~30:1 by *which benchmark*, not by cue availability, so it no longer
+> supports treating memorization and location cues as one quantity. §1b has the
+> decomposition and the confound caveat.
 That is the mechanism behind the recall/cost decoupling, and what makes the title
 ("Frontier Coding Agents Don't Have a Retrieval Problem") mean something concrete.
 **The word "frontier" is load-bearing and must never be dropped** — on the open-weight
