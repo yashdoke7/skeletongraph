@@ -555,8 +555,8 @@ If SkeletonGraph is useful in your research, please cite:
 
 ```bibtex
 @misc{doke2026skeletongraph,
-  title  = {Frontier Coding Agents Don't Have a Retrieval Problem:
-            Why Better Localization Does Not Buy Better Outcomes},
+  title  = {SkeletonGraph: A Zero-LLM Structural Retrieval Engine for Coding Agents,
+            and Why Its Gains Land in the Cost Tail, Not the Median},
   author = {Doke, Yash},
   year   = {2026},
   note   = {SkeletonGraph — zero-LLM structural retrieval for coding agents},

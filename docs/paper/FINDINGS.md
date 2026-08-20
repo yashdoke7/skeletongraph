@@ -348,11 +348,28 @@ better outcomes") now refers to.
 > supports treating memorization and location cues as one quantity. §1b has the
 > decomposition and the confound caveat.
 That is the mechanism behind the recall/cost decoupling, and what makes the title
-("Frontier Coding Agents Don't Have a Retrieval Problem") mean something concrete.
-**The word "frontier" is load-bearing and must never be dropped** — on the open-weight
-react-loop model retrieval IS worth +7pp (fusion 42.0% vs closed-book 35.0%, §2), which
-is the counter-example to an unqualified version of that title. Retrieval matters little
-where the model already knows the repo and a lot where it does not.
+("SkeletonGraph: A Zero-LLM Structural Retrieval Engine for Coding Agents, and Why
+Its Gains Land in the Cost Tail, Not the Median" — **retitled 2026-08**, was
+"Frontier Coding Agents Don't Have a Retrieval Problem"; see below) mean something
+concrete. **The tail-vs-median split is the load-bearing claim now, not the word
+"frontier"** — on the open-weight react-loop model retrieval IS worth +7pp (fusion
+42.0% vs closed-book 35.0%, §2), which is the counter-example to reading the title as
+"retrieval never matters." Retrieval matters little to the median where the model
+already knows the repo and a lot where it does not; both remain true and both must
+stay in the paper regardless of title wording.
+
+> **TITLE CHANGED 2026-08.** The old title's "frontier" qualifier drew its whole
+> defense from one paragraph in the paper ("On the title, and the word 'frontier' in
+> it.") — a title that needs a dedicated paragraph to walk itself back is a liability,
+> not a feature: it's the first thing a skimming reviewer reads, unqualified. Two
+> concrete risks it created: (1) "Frontier Coding Agents" (plural) generalizes a
+> single-agent (Claude Code) result — Threats already has to hedge this explicitly;
+> (2) an earlier proposed replacement ("retrieval is an anti-catastrophe layer, not a
+> median improvement") made a categorical claim about retrieval-as-a-concept that
+> directly conflicts with LocAgent's and Codebase-Memory's own reported median-level
+> gains (§3 Related Work) — do not resurrect that phrasing as a title. The current
+> title scopes the claim to SkeletonGraph specifically (not "retrieval" broadly, not
+> "frontier agents" broadly), so it can't be attacked on either axis.
 
 **Design consequence:** a localization loop built on repeated `sg_search` calls is a
 dead end — proven, not assumed. Any iterative localizer must inject *new* information
