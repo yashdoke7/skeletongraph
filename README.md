@@ -8,6 +8,7 @@
 <p align="center">
   <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/v/skeletongraph.svg?color=blue" alt="PyPI"></a>
   <a href="https://pypi.org/project/skeletongraph/"><img src="https://img.shields.io/pypi/pyversions/skeletongraph.svg" alt="Python versions"></a>
+  <a href="https://doi.org/10.21203/rs.3.rs-10749266/v1"><img src="https://img.shields.io/badge/preprint-Research%20Square-b31b1b.svg" alt="Preprint"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-server-orange.svg" alt="MCP server"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=skeletongraph"><img src="https://img.shields.io/badge/MCP%20Registry-listed-blueviolet.svg" alt="MCP Registry"></a>
@@ -559,7 +560,8 @@ If SkeletonGraph is useful in your research, please cite:
             and Why Its Gains Land in the Cost Tail, Not the Median},
   author = {Doke, Yash},
   year   = {2026},
-  note   = {SkeletonGraph — zero-LLM structural retrieval for coding agents},
-  url    = {https://github.com/yashdoke7/skeletongraph}
+  note   = {Preprint, Research Square},
+  doi    = {10.21203/rs.3.rs-10749266/v1},
+  url    = {https://doi.org/10.21203/rs.3.rs-10749266/v1}
 }
 ```
