@@ -101,9 +101,15 @@ def load_arm(tag: str, arm: str) -> dict:
     return d
 
 
-def paired(tag, a1, a2):
+def paired(tag, a1, a2, restrict=None):
+    """Arms intersected on task_id. `restrict` further limits to a task_id set —
+    needed wherever a cell must be paired against a smaller companion run (see
+    fig_tail_grid), since comparing an n=100 aggregate against an n=50 subset of
+    itself is exactly the error tab:grid's caveat paragraph warns about."""
     d1, d2 = load_arm(tag, a1), load_arm(tag, a2)
     common = sorted(set(d1) & set(d2))
+    if restrict:
+        common = [t for t in common if t in restrict]
     return [d1[t] for t in common], [d2[t] for t in common]
 
 
@@ -539,11 +545,11 @@ def fig_tail_grid():
     """fig_tail's ordered-cost view, repeated across the 2x2 grid of conditions.
 
     Deliberately NOT a clone of fig_tail for each panel. That figure earns its
-    running mean and its p95 annotation from n=100; the other three cells are
-    n=50, where a 9-wide smoothing window still spans a fifth of the data and
-    "p95" sits within a couple of observations of the maximum. So those panels
-    plot every task as a marker with no smoothing, carry no percentile
-    annotation, and state n on the panel. What they can honestly show is the SHAPE — curves
+    p95 annotation from n=100; at n=50 "p95" sits within a couple of observations
+    of the maximum, so these panels carry no percentile annotation and state n
+    instead. The running mean is kept on every panel but its window scales with
+    n (~9% of the data each, matching fig_tail's w=9 at n=100), so panels of
+    different size stay visually comparable. What they can honestly show is the SHAPE — curves
     together at the cheap end, separating at the expensive end — which is the
     claim, and the pooled cost change, which is computed not asserted.
     """
@@ -553,10 +559,17 @@ def fig_tail_grid():
         ("claude_rebench_v1",       "SWE-rebench (unseen repos) · original"),
         ("claude_rebench_prose_v1", "SWE-rebench (unseen repos) · prose-only"),
     ]
+    # The SWE-Verified panel MUST be restricted to the same 50 tasks as its
+    # prose counterpart, exactly as tab:grid is. Unrestricted it is n=100 and
+    # reads -14.6%, against the table's -8.9% for a cell with the same label —
+    # and the paper's own caveat states those two "must not be compared against
+    # each other". A 2x2 grid is a paired comparison; one unpaired cell breaks it.
+    prose_ids = set(load_arm("claude_v7_prose", "native"))
 
     fig, axes = plt.subplots(2, 2, figsize=(9.2, 5.9))
     for ax, (tag, title) in zip(axes.ravel(), conds):
-        nat, sg = paired(tag, "native", "sg-fusion")
+        nat, sg = paired(tag, "native", "sg-fusion",
+                         restrict=prose_ids if tag == "claude_v7" else None)
         pairs = sorted(zip((r["imputed_cost"] for r in nat),
                            (r["imputed_cost"] for r in sg)), key=lambda p: p[0])
         nv = [p[0] for p in pairs]
@@ -565,15 +578,20 @@ def fig_tail_grid():
         x = list(range(1, n + 1))
         delta = 100 * (sum(sv) / sum(nv) - 1) if sum(nv) else 0.0
 
-        big = n >= 50
-        if big:                      # n=100: same running mean as fig_tail
-            def smooth(vals, w=9):
-                return [sum(vals[max(0, i - w // 2):min(len(vals), i + w // 2 + 1)])
-                        / (min(len(vals), i + w // 2 + 1) - max(0, i - w // 2))
-                        for i in range(len(vals))]
-            ny, sy = smooth(nv), smooth(sv)
-        else:                        # smaller n: no smoothing, show every task
-            ny, sy = nv, sv
+        # Smooth every panel, but scale the window WITH n so each panel averages
+        # over the same FRACTION of its data (~9%, matching fig_tail's w=9 at
+        # n=100). A fixed w=9 over-smooths at n=50; switching smoothing off
+        # entirely below some threshold makes panels of different n visually
+        # incomparable, which defeats the point of a 2x2. Proportional window
+        # keeps the four panels on the same footing.
+        w = max(3, int(round(n / 11.0)) | 1)   # |1 forces odd so the window centres
+
+        def smooth(vals, w=w):
+            return [sum(vals[max(0, i - w // 2):min(len(vals), i + w // 2 + 1)])
+                    / (min(len(vals), i + w // 2 + 1) - max(0, i - w // 2))
+                    for i in range(len(vals))]
+        ny, sy = smooth(nv), smooth(sv)
+        big = True                   # no per-task markers on any panel
 
         ax.fill_between(x, sy, ny, where=[a > b for a, b in zip(ny, sy)],
                         color=BLUE, alpha=0.13, linewidth=0, interpolate=True)
