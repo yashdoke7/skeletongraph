@@ -1,7 +1,7 @@
 <!-- mcp-name: io.github.yashdoke7/skeletongraph -->
 <p align="center">
-  <img src="docs/paper/figures/skeletongraph_banner.png"
-       alt="SkeletonGraph — the exact function, not a pile of files. Zero-LLM structural retrieval for AI coding agents, served over MCP."
+  <img src="docs/paper/figures/sg_banner.png"
+       alt="SkeletonGraph — the exact function, not a pile of files. An MCP server that indexes your repo with tree-sitter, then ranks symbols by BM25, embeddings, and the call graph, fused with reciprocal-rank fusion. First-search file recall 66% to 86%, function-level localization 0% to ~80%, cost at the 95th percentile down 42%."
        width="100%">
 </p>
 
@@ -46,13 +46,15 @@ indexes your repo with tree-sitter — no LLM — and hands the agent the exact 
 to edit, over MCP.**
 
 <picture>
-  <source srcset="docs/paper/figures/skeletongraph_hero.gif" media="(prefers-reduced-motion: no-preference)">
-  <img src="docs/paper/figures/skeletongraph_hero_poster.png"
-       alt="SkeletonGraph pipeline: parse a repo with tree-sitter into a function-level structural index and call graph (no LLM); at query time, fuse BM25 lexical, dense semantic, and structural-rerank signals; return the one function to edit, served to the coding agent over MCP"
+  <source srcset="docs/paper/figures/sg_hero.gif" media="(prefers-reduced-motion: no-preference)">
+  <img src="docs/paper/figures/sg_hero_still.png"
+       alt="SkeletonGraph walkthrough on a real django/django task. 1 INDEX: tree-sitter parses the repo into named function nodes joined by call edges, no LLM. 2 QUERY: the agent calls sg_search with the plain-English issue text over MCP. 3 RANK: BM25, jina-code embeddings, and the call graph each rank the same symbols in a different order. 4 FUSE: reciprocal-rank fusion merges the three orderings and _alter_field, ranked 2nd, 3rd and 2nd and top of none of them, comes out first with its file and line. 5 RESULT: first-search file recall rises from 66% to 86% and function-level localization from 0% to about 80%, while cost changes by +1.9% at the median task and −42.5% at the 95th percentile."
        width="100%">
 </picture>
 
-<p align="center"><em>Index once (no LLM) → fuse lexical + semantic + structural signals → return the exact function, served to your agent over MCP.</em></p>
+<p align="center"><em>Index once with tree-sitter (no LLM) → three signals rank the same symbols → reciprocal-rank fusion returns the exact function, served to your agent over MCP.</em></p>
+
+<p align="center"><sub>The answer is rank 2, 3, and 2 across the three signals — top of none of them. Fusing is what puts it first.</sub></p>
 
 SkeletonGraph is a retrieval engine purpose-built for coding agents, not a general
 RAG library retrofitted onto code. It parses a repository into function-level
