@@ -34,19 +34,19 @@ def font(kind, size):
     return _cache[key]
 
 
-# palette -- dark ground so the card cuts against a white feed
-BG_TOP = (10, 15, 28)
-BG_BOT = (19, 28, 46)
-CARD = (23, 32, 51)
-CARD_H = (28, 39, 61)          # slightly lifted card
-EDGE = (44, 58, 84)
-INK = (241, 245, 249)
-MUT = (148, 163, 184)
-FAINT = (100, 116, 139)
-GREEN = (52, 211, 153)
-BLUE = (96, 165, 250)
-PURPLE = (167, 139, 250)
-ORANGE = (251, 146, 60)
+# palette -- deep violet ground so the card cuts against a white feed
+BG_TOP = (8, 6, 16)
+BG_BOT = (24, 15, 42)
+CARD = (35, 22, 58)
+CARD_H = (42, 27, 68)          # slightly lifted card
+EDGE = (60, 44, 90)
+INK = (248, 245, 252)
+MUT = (172, 160, 198)
+FAINT = (110, 98, 140)
+GREEN = (190, 242, 100)        # structural -- lime
+BLUE = (34, 211, 238)          # lexical    -- electric cyan
+PURPLE = (232, 90, 192)        # semantic   -- hot magenta
+ORANGE = (251, 191, 36)        # gold, for the headline/cost accent
 RED = (248, 113, 113)
 
 

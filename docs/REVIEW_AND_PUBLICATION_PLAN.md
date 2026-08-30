@@ -182,11 +182,14 @@ non-archival — a citable win that doesn't spend your full-paper submission.
 
 ## Hero visual (delivered alongside this review)
 
-A new "how it works" animation now leads the README
-(`docs/paper/figures/skeletongraph_hero.gif`, with `.mp4` for social and a
-2560×1440 `_poster.png` for slides/docs). It walks a viewer through the whole system in
-one loop: index a repo with tree-sitter (no LLM) → build BM25 + jina-code vectors +
-call-graph/PageRank → an issue arrives in plain language → three legs fuse by RRF →
-the one correct function is returned and served to the agent over MCP → outcome chips
-(first-search file recall 66%→86%, function pinpointed 0%→~80%, worst-case cost −42%).
+A "how it works" explainer now leads the README
+(`docs/paper/figures/sg_hero.gif`, 16:9, with a 4:5 `sg_hero.mp4` for social and
+`sg_hero_still.png` as the static fallback). Five beats, on one real worked task
+(django/django): tree-sitter indexes the repo into symbols + a call graph, no LLM →
+an issue arrives in plain language over MCP → BM25, jina-code, and the call graph
+each rank the same symbols differently → reciprocal-rank fusion merges the three
+orderings (the answer is rank 2/3/2 across them — top of none — and wins the fusion)
+→ the measured payoff, charted with baselines attached (first-search file recall
+66%→86%, function-level localization 0%→~80%, cost +1.9% at the median / −42.5% at
+the 95th percentile).
 It is regenerable from `hero_render.py`.

@@ -49,19 +49,19 @@ def p(v):
     return int(round(v * S))
 
 
-BG0 = (6, 10, 20)
-BG1 = (14, 21, 38)
-PANEL = (21, 30, 48)
-INK = (237, 243, 250)
-MUT = (140, 156, 178)
-DIM = (86, 102, 128)
-EDGE = (40, 55, 82)
-STEEL = (140, 162, 194)
-CODE_C = (86, 106, 136)
-BLUE = (96, 165, 250)
-PURPLE = (167, 139, 250)
-GREEN = (52, 211, 153)
-AMBER = (251, 191, 36)
+BG0 = (8, 6, 16)
+BG1 = (22, 14, 38)
+PANEL = (34, 21, 56)
+INK = (247, 245, 252)
+MUT = (170, 158, 196)
+DIM = (108, 96, 138)
+EDGE = (58, 42, 88)
+STEEL = (166, 150, 202)
+CODE_C = (100, 86, 130)
+BLUE = (34, 211, 238)       # lexical / BM25   -- electric cyan
+PURPLE = (232, 90, 192)     # semantic / jina  -- hot magenta
+GREEN = (190, 242, 100)     # structural       -- lime
+AMBER = (251, 191, 36)      # the answer       -- gold
 
 
 def clamp(x, a=0.0, b=1.0):
