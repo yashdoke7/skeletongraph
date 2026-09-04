@@ -283,6 +283,102 @@ Note SG pays a ~1.05/task `ToolSearch` deferral tax that native does not — its
 efficiency is slightly *understated*. **3.75→1.41 is the read-displacement figure the
 paper quotes**; do not use the old 3.86→1.55.
 
+### 6a. Context-per-turn curve (`fig_context_curve`, added 2026-08-30)
+
+Two-panel figure, same `claude_v7` native/sg-fusion pairing as everything above
+(n=100). Built from `_claude_transcripts/*.jsonl` — `usage.input_tokens +
+cache_creation_input_tokens + cache_read_input_tokens` on each assistant turn,
+deduped on `message.id` (a single API response is logged as multiple JSONL lines
+when it has more than one content block — e.g. a thinking block and a tool_use
+block share one `message.id` and one `usage`; counting lines instead of unique
+ids overcounts turns). Generator: `fig_context_curve()` in
+`eval/scripts/make_paper_figures.py`.
+
+**Right panel — the aggregate, the rigorous claim.** At each turn index, the
+median context size over tasks still running at that turn (cut off once fewer
+than 10 remain, so the tail isn't one slow task's noise). Reads exactly as the
+prose in §"Cost tracks turns" claims: SG's curve runs *above* native's for most
+of the trajectory (its own tool payloads aren't free), and still finishes
+earlier at a comparable peak — turn 22 / ~60k tokens vs turn 34 / ~63k tokens
+at the point each population thins below 10.
+
+**Left panel — one concrete task, `astropy__astropy-13398`.** This is the exact
+task already named in prose in §"When breadth is misread as scope" (50 turns /
+\$1.84 baseline vs 14 turns / \$0.43 SG) — reused here rather than picked to fit
+this figure's story, so it isn't cherry-picked for the aggregate's pattern. It
+actually shows something stronger than the aggregate: SG's peak here (52,767
+tokens) is barely half the baseline's (98,992) — the baseline spent so long
+searching that its own context grew far past anything SG accumulated. That's a
+real outcome, not the typical one, and the caption says so explicitly: this
+task is one of the more dramatic contributors pulling the *mean* saving above
+what the *median* curve on the right shows.
+
+Do not present the single-task panel as if it demonstrates the general "same
+peak" claim — it demonstrates the opposite (a lower peak) for a legitimate but
+different reason (the baseline's search blew up). The general claim is the
+right panel only.
+
+### 6b. Wall-clock latency (`tab:latency`, added 2026-08-30, revised to a table)
+
+New finding, `wall_s` field, same `claude_v7` native/sg-fusion pairing (n=100).
+First cut was a paired scatter (`fig_latency_scatter`, matplotlib) — cut on
+user feedback ("the figure does nothing... a table will give more details and
+[be] readable"). The table version surfaced something the scatter had hidden:
+this is NOT a uniform slowdown. Percentile breakdown:
+
+| Percentile | native | sg-fusion | change |
+|---|---|---|---|
+| 50th (median) | 60.9s | 100.3s | **+64.7%** |
+| 75th | 149.1s | 159.4s | +6.9% |
+| 90th | 251.7s | 272.2s | +8.1% |
+| 95th (worst) | 395.9s | 383.6s | −3.1% |
+| mean | 117.0s | 151.3s | +29.4% |
+| median, per turn | 6.5s | 11.6s | +78.3% |
+
+**This is the mirror image of Table~tab:tail (cost).** Cost saving is a tail
+effect (flat at median, −42.5% at p95). Latency cost is a median-and-below
+effect — largest where cost doesn't move, and it vanishes by p95, roughly
+where the cost saving is largest. Slower on 76/100 tasks.
+
+**CI methodology — use `stats.py`'s `bootstrap_aggregate_pct_ci`, not an
+ad-hoc bootstrap.** First pass computed the CI via a bootstrap of the mean of
+per-task differences: `[+10.0s, +58.4s]` / `[+8.6%, +49.9%]`. That is NOT the
+method `tab:tail`'s stated CI (`[-25.3%, -1.2%]`) actually uses — verified by
+recomputing `tab:tail`'s cost CI with `bootstrap_aggregate_pct_ci` and getting
+an exact match. Redid the latency CI the same way (aggregate ratio-of-sums,
+resampled by task pair): **`[+8.0%, +55.3%]`**, now in the table caption. Added
+a "4. WALL-CLOCK DELTA" section to `eval/scripts/stats.py`, mirroring its
+existing cost/turns sections exactly, so this number is reproducible the same
+way as every other CI in the paper — not a one-off script snippet.
+
+**Mechanism checked, not established.** Correlated the per-task per-turn
+latency delta against: `ToolSearch` call count (r=−0.07), `sg_search`/
+`sg_expand` call count (r=−0.05), per-turn context-size growth (r=+0.02). All
+near zero — the original hypothesis (MCP round-trip / ToolSearch deferred-load
+tax) does **not** hold up and must not be asserted as the cause. The paper
+states the finding and explicitly declines to claim the mechanism. Do not
+strengthen this language later without actually isolating a cause (e.g. an
+A/B run with SG's tools registered-but-unused vs not-registered-at-all, to test
+the "tool-choice overhead independent of use" theory directly). The
+median-vs-tail shape (new in the table) is itself a clue worth chasing: it
+tracks turns-remaining inversely to the cost saving, which is at least
+consistent with a fixed per-turn overhead that a short, easy trajectory can't
+amortize but a long, hard one increasingly can.
+
+### 6c. Solve-rate McNemar power (added 2026-08-30)
+
+13 discordant pairs (7 SG-only + 6 native-only) out of n=100. Exact binomial
+power calc (not simulation — precomputed exact p-values for k=0..13 discordant
+splits, then power = P(reject | true within-discordant win rate) via the exact
+binomial pmf): ~80% power is reached only at a true pass@1 gap of ~10
+percentage points, assuming the discordant-pair rate (13/100) holds under the
+alternative. Below that, this test is not well-powered to detect a true
+difference — which supports, rather than undermines, the paper's existing
+"tie-detection instrument, not a ranking signal" framing in §5.3 and the
+Contamination paragraph of Threats to Validity. Added one sentence to §5.3;
+did not touch the Threats section since §5.3 already covers it and duplicating
+would be redundant.
+
 ---
 
 ## 7. FAILED INTERVENTIONS (all real, all reported)

@@ -423,6 +423,128 @@ def fig_tools(nat, sg):
     _save(fig, "fig_tool_displacement")
 
 
+# ── FIG — context accumulates the same way; retrieval just needs fewer turns
+def _turn_context_series(task_id: str, arm: str, model: str, repeat: int, tag: str):
+    """Context size (input + cache-write + cache-read tokens) at each turn,
+    in trajectory order. One entry per real turn, not per JSONL line: a single
+    API response is logged as multiple assistant objects (e.g. a thinking
+    block and a tool_use block land as separate lines) that share one
+    message.id and one usage block, so lines are deduped on message.id before
+    the usage is read.
+    """
+    p = (RUNS / tag / "_claude_transcripts" /
+         f"{task_id}__{arm}__{model}__r{repeat}.jsonl")
+    if not p.exists():
+        return []
+    seen, series = set(), []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        if o.get("type") != "assistant":
+            continue
+        mid = o.get("message", {}).get("id")
+        if mid is None or mid in seen:
+            continue
+        seen.add(mid)
+        u = o.get("message", {}).get("usage") or {}
+        series.append(u.get("input_tokens", 0)
+                      + u.get("cache_creation_input_tokens", 0)
+                      + u.get("cache_read_input_tokens", 0))
+    return series
+
+
+def fig_context_curve(nat, sg, tag="claude_v7", min_at_risk=10,
+                       example_id="astropy__astropy-13398"):
+    """Two panels: one concrete task's actual trajectory, and the population
+    result it is not a substitute for.
+
+    Left: `example_id`'s real per-turn context (not a median of anything) --
+    the same Astropy task already named in the "breadth is misread as scope"
+    discussion, reused here rather than hand-picked for this figure, so it is
+    not selected to make a story land. It happens to show BOTH a shorter
+    trajectory and a lower peak, which is a real outcome but not the typical
+    one -- flagged as such in the caption.
+
+    Right: median context size at turn i, over the tasks still running at
+    turn i (a curve is drawn only while >= `min_at_risk` tasks are that long,
+    so the tail is not one slow task's noise). This is the general claim:
+    context accumulates at essentially the same rate with or without
+    retrieval, and the SkeletonGraph trajectory simply stops sooner.
+    """
+    def series_for(recs):
+        return [_turn_context_series(r["task_id"], r["arm"], r["model"],
+                                     r["repeat"], tag) for r in recs]
+
+    nser, sser = series_for(nat), series_for(sg)
+
+    def at_risk_median(all_series):
+        max_len = max((len(s) for s in all_series), default=0)
+        xs, ys = [], []
+        for i in range(max_len):
+            at_i = [s[i] for s in all_series if len(s) > i]
+            if len(at_i) < min_at_risk:
+                break
+            xs.append(i + 1)
+            ys.append(statistics.median(at_i))
+        return xs, ys
+
+    nx, ny = at_risk_median(nser)
+    sx, sy = at_risk_median(sser)
+    if not nx or not sx:
+        print("  fig_context_curve: no aggregate data"); return
+
+    ex_n = _turn_context_series(example_id, "native", "sonnet", 0, tag)
+    ex_s = _turn_context_series(example_id, "sg-fusion", "sonnet", 0, tag)
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(8.8, 3.2))
+
+    def draw(ax, xn, yn, xs, ys, title):
+        ax.plot(xn, [v / 1000 for v in yn], color=INK_2, lw=2,
+                label="Claude Code built-in tools")
+        ax.plot(xs, [v / 1000 for v in ys], color=BLUE, lw=2,
+                label="+ SkeletonGraph")
+        ax.scatter([xn[-1]], [yn[-1] / 1000], color=INK_2, s=20, zorder=3)
+        ax.scatter([xs[-1]], [ys[-1] / 1000], color=BLUE, s=20, zorder=3)
+        ax.set_xlabel("Turn number")
+        ax.set_title(title, color=INK, loc="left", pad=8, fontsize=9.5)
+        ax.set_xlim(left=0)
+        ax.set_ylim(0, max(yn[-1], ys[-1]) / 1000 * 1.24)
+        _clean(ax)
+
+    # no section number baked in here -- it lives in the pixels and can't
+    # track LaTeX renumbering; the precise cross-reference goes in the caption
+    draw(axL, list(range(1, len(ex_n) + 1)), ex_n,
+        list(range(1, len(ex_s) + 1)), ex_s,
+        "One task (Astropy): shorter AND\nlower context here")
+    axL.annotate(f"turn {len(ex_n)}", (len(ex_n), ex_n[-1] / 1000),
+                textcoords="offset points", xytext=(-8, 8), fontsize=7.5,
+                color=MUTED, ha="right")
+    axL.annotate(f"turn {len(ex_s)}", (len(ex_s), ex_s[-1] / 1000),
+                textcoords="offset points", xytext=(4, 6), fontsize=7.5,
+                color=BLUE, fontweight="bold")
+    axL.set_ylabel("Context at that turn (k tokens)")
+    axL.legend(loc="lower right", fontsize=7.5)
+
+    draw(axR, nx, ny, sx, sy,
+        f"All {len(nat)} paired tasks (median): same\nclimb, SG stops sooner")
+    axR.annotate(f"turn {sx[-1]}\n~{sy[-1]/1000:.0f}k", (sx[-1], sy[-1] / 1000),
+                textcoords="offset points", xytext=(-64, 20), fontsize=7.5,
+                color=BLUE, fontweight="bold",
+                arrowprops=dict(arrowstyle="-", color=BLUE, lw=0.8))
+    axR.annotate(f"turn {nx[-1]}\n~{ny[-1]/1000:.0f}k", (nx[-1], ny[-1] / 1000),
+                textcoords="offset points", xytext=(-14, -30), ha="right",
+                fontsize=7.5, color=MUTED,
+                arrowprops=dict(arrowstyle="-", color=BASELINE_AXIS, lw=0.8))
+    axR.legend(loc="lower right", fontsize=7.5)
+
+    fig.tight_layout()
+    _save(fig, "fig_context_curve")
+
+
 # ── FIG 6 — the ceiling: retrieval collapses as location cues are removed ─
 # The paper's central proof. `sg-fusion` IS all three non-LLM paradigms at once
 # (BM25 lexical + dense semantic + graph topological). If any of them could
@@ -642,6 +764,7 @@ def main():
     fig_scatter(nat, sg)
     fig_retrieval(nat, sg, ds)
     fig_tools(nat, sg)
+    fig_context_curve(nat, sg)
     fig_pareto()
     fig_ceiling()
     fig_tail_grid()

@@ -197,6 +197,17 @@ def main() -> None:
     print(f"  {a1} mean turns/task: {mean_t1:.1f}   {a2} mean turns/task: {mean_t2:.1f}")
     print(f"  aggregate turns delta: {tpoint:+.1f}%  [95% CI: {tlo:+.1f}%, {thi:+.1f}%]  (paired bootstrap, n_boot={N_BOOT})")
 
+    # ---- 4. bootstrap CI on wall-clock delta ----
+    section(f"4. WALL-CLOCK DELTA — {a2} vs {a1} — {label}")
+    wall1 = [arms[a1][t].get("wall_s", 0) or 0 for t in subset]
+    wall2 = [arms[a2][t].get("wall_s", 0) or 0 for t in subset]
+    mean_w1, mean_w2 = statistics.mean(wall1), statistics.mean(wall2)
+    wpoint, wlo, whi = bootstrap_aggregate_pct_ci(wall1, wall2)
+    print(f"  {a1} mean wall_s/task: {mean_w1:.1f}s   {a2} mean wall_s/task: {mean_w2:.1f}s")
+    print(f"  aggregate wall-clock delta: {wpoint:+.1f}%  [95% CI: {wlo:+.1f}%, {whi:+.1f}%]  (paired bootstrap, n_boot={N_BOOT})")
+    slower = sum(1 for w1, w2 in zip(wall1, wall2) if w2 > w1)
+    print(f"  slower on {slower}/{len(subset)} tasks")
+
 
 if __name__ == "__main__":
     main()
