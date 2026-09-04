@@ -127,83 +127,22 @@ Retrieval does nothing for the typical task and removes over 40% of the cost of 
 worst ones. Paired bootstrap 95% CI on the mean: [−25.3%, −1.2%]; McNemar on pass@1:
 p = 1.0 (no difference).
 
-### 3. The ceiling: better localization doesn't buy better outcomes
+### 3. What the numbers don't cover
 
-![What moves retrieval: the repository, not the issue text](docs/paper/figures/fig_ceiling.png)
+![Retrieval changes nothing on ordinary tasks; it truncates the expensive ones](docs/paper/figures/fig_tail.png)
 
-`sg-fusion` runs all three non-LLM retrieval paradigms at once — lexical (BM25),
-semantic (code embeddings), and topological (call graph). Crossing *memorization*
-(standard vs. decontaminated benchmark) against *location cues* (original issue text
-vs. a **prose-only** variant with tracebacks and code blocks removed) isolates what
-retrieval quality actually depends on:
+That tail effect is where the chart above comes from. Retrieval quality itself holds
+up under real stress-testing: it survives having all the location cues (tracebacks,
+code blocks) stripped from the issue text, and it survives on a decontaminated
+benchmark of repos the model hasn't memorized. But better retrieval doesn't move the
+solve rate (McNemar p=1.0), and an agent given enough turns to explore on its own
+eventually learns a repo about as well as a ranked list tells it — retrieval buys
+speed and cost, not a ceiling past what patient exploration reaches.
 
-| condition | file recall native → SG | Δ recall | cost | turns |
-|---|--:|--:|--:|--:|
-| SWE-Verified, raw | .688 → **.877** | +.189 | −8.9% | −15.4% |
-| SWE-Verified, **prose-only** | .736 → **.859** | +.123 | −7.6% | −19.2% |
-| SWE-rebench (unseen repos), raw | .455 → **.585** | +.130 | −15.0% | −20.3% |
-| SWE-rebench, **prose-only** | .464 → **.577** | +.113 | −15.7% | −18.9% |
-
-<sub>Recall excludes tasks where the agent never invoked SG (adoption events, not
-retrieval failures) — the same rule behind the .862 headline above. n=50 per cell.</sub>
-
-**Removing the location cues does nothing.** Measured within-task across both
-benchmarks, SG's first-search recall changes by **+.008 (95% CI [−.049, +.068],
-n=93)** — 9 of 93 tasks move at all. The manipulation was real (38% of the issue text
-removed on SWE-Verified, 26% on SWE-rebench) and there's **no dose-response**: the
-correlation between how much text was cut and how much recall was lost is +.07 and
-−.04; the 18 tasks that lost over half their text changed by +.046. Structural
-retrieval simply wasn't resting on the tracebacks and repro snippets.
-
-> An earlier version of this study ran these cells at n=15 and reported a sharp
-> collapse (`.861 → .549`, within-task +.125). It didn't survive n=50 — the CI
-> tightened 3.5× onto zero. A 2×2 at fifteen paired tasks per cell has enough
-> resolution to manufacture a clean monotone pattern out of noise, and it did.
-
-**What governs retrieval is the repository.** SG scores .877 on the standard
-benchmark and .585 on unseen repos — a gap of **.29, roughly thirty times** the effect
-of rewriting the issue. *Caveat:* the cue axis is within-task, but the benchmark axis
-is between task sets — it's confounded with repo size, domain, and issue style, so
-it's an upper bound on a memorization effect, not an estimate of one.
-
-**The margin is stable, and that's the positive result** — +.113 to +.189 in every
-cell. The retrieval advantage survives every condition we could construct against it.
-
-**But it doesn't convert.** Solve rate never moves: 75 vs 74 on SWE-Verified (McNemar
-p=1.0), 26 vs 27 and 22 vs 25 on unseen repos (p=0.45). And counting *cumulative*
-recall — everything either system surfaced over the whole run — native ends up **ahead
-in 3 of the 4 cells** (.989 vs .971, .695 vs .643, .713 vs .659; SG leads only on
-SWE-raw, .938 vs .907). The mechanism is in the iteration: native lifts its recall
-+.19 to +.22 over 3.4–5.4 searches by grepping, reading, learning the repo's real
-vocabulary, and grepping better. SG lifts +.05 to +.11 over 1.6–2.3 searches, because
-re-querying the same index from the same issue text re-samples the same ranking.
-
-That inversion is the honest statement of what this tool is: **a retrieval layer
-delivers candidate files, not knowledge of the repository** — and a confident ranked
-list actively suppresses the agent's own acquisition of that knowledge (reads drop
-3.75 → 1.41/task). The agent spends tokens until it's *certain*, not until it has
-files. That's why recall and cost decouple, and it's what the paper's title refers to.
-
-> SWE-Verified rows are restricted to the same 50 tasks as the prose run so raw and
-> prose are paired. That subset is *not* representative of the full 100 (SG saves
-> −8.9% on it vs −14.6% overall) — do not compare it against the n=100 figure. Solve
-> rate for the SWE-Verified prose cell was not adjudicated and is not reported.
-
-### 4. Deployment finding: slow MCP servers are structurally excluded
-
-Two graph/LSP-based competitors wired as MCP servers **never participated at all**.
-Claude Code's headless (`-p`) mode finalizes its tool manifest within ~2 seconds of
-launch and never updates it; servers needing real bootstrap time (a language server,
-a Node CLI + index) finish their handshake just past that window and are silently
-absent for the entire run — confirmed via session-init transcripts and each server's
-own logs showing it was ready seconds later.
-
-This is a **deployment-mode result, not a retrieval-quality one**, and we report no
-performance comparison for those systems: with zero tool calls, any such number would
-measure their absence rather than their retrieval. A separately wired zero-LLM graph
-competitor connected cleanly with its full tool set visible, yet the agent never
-invoked a single one across 10 tasks, defaulting to native `grep` every time. Fast connection and
-actual adoption are prerequisites that retrieval quality cannot substitute for.
+Full methodology — the n=15→50 revision, the dose-response check, the
+cumulative-recall mechanism, and every withdrawn claim — is in
+[the paper](docs/paper/ResearchPaper.pdf) and
+[`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
 
 SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
 retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
