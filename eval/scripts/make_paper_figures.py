@@ -17,6 +17,7 @@ Design rules (validated palette, print/light surface):
 from __future__ import annotations
 
 import glob
+import os
 import json
 import statistics
 from collections import defaultdict
@@ -38,7 +39,12 @@ BLUE = "#2a78d6"     # slot 1 — SkeletonGraph
 GREEN = "#008300"    # slot 2 — second measure
 ORANGE = "#eb6834"   # slot 6 — used only where a warm/cool opposition is meant
 
-OUT = Path("docs/paper/figures")
+# Overridable so the figures can be regenerated under a different label into
+# their own folder without touching the default set:
+#   SG_LABEL=<label> SG_SHORT=<short label> SG_FIG_OUT=<folder> python -m ...
+OUT = Path(os.environ.get("SG_FIG_OUT", "docs/paper/figures"))
+SG = os.environ.get("SG_LABEL", "SkeletonGraph")
+SG_SHORT = os.environ.get("SG_SHORT", "SG")   # abbreviation used inside tight titles
 RUNS = Path("eval/results/agent")
 
 
@@ -141,7 +147,7 @@ def fig_tail(nat, sg):
     ax.fill_between(x, ss, ns, where=[a > b for a, b in zip(ns, ss)],
                     color=BLUE, alpha=0.13, linewidth=0, interpolate=True)
     ax.plot(x, ns, color=INK_2, lw=2, label="Claude Code built-in tools")
-    ax.plot(x, ss, color=BLUE, lw=2, label="+ SkeletonGraph")
+    ax.plot(x, ss, color=BLUE, lw=2, label=f"+ {SG}")
 
     ax.axvline(50, color=BASELINE_AXIS, lw=1, zorder=0)
     # y in axes fraction so the label can never fall outside the data range
@@ -186,12 +192,12 @@ def fig_scatter(nat, sg):
     fmt = FuncFormatter(lambda v, _: f"${v:g}")
     ax.xaxis.set_major_formatter(fmt); ax.yaxis.set_major_formatter(fmt)
     ax.set_xlabel("Cost with built-in tools only (USD)")
-    ax.set_ylabel("Cost with SkeletonGraph (USD)")
+    ax.set_ylabel(f"Cost with {SG} (USD)")
     cheaper = sum(1 for a, b in zip(xs, ys) if b < a)
     # region labels sit inside the plot, clear of the title band
-    ax.text(0.04, 0.90, "above line:\nSG cost more", transform=ax.transAxes,
+    ax.text(0.04, 0.90, f"above line:\n{SG_SHORT} cost more", transform=ax.transAxes,
             fontsize=7.5, color=MUTED, va="top", linespacing=1.4)
-    ax.text(0.96, 0.10, "below line:\nSG cheaper", transform=ax.transAxes,
+    ax.text(0.96, 0.10, f"below line:\n{SG_SHORT} cheaper", transform=ax.transAxes,
             fontsize=7.5, color=BLUE, va="bottom", ha="right", linespacing=1.4)
     ax.set_title(f"Cheaper on {cheaper}/{len(xs)} tasks, and the wins are the expensive ones",
                  color=INK, loc="left", pad=8, fontsize=9)
@@ -271,7 +277,7 @@ def fig_retrieval(nat, sg, dataset_path):
     ax.bar([x - gap / 2 for x in xs], [nf, nfn], w, color=INK_2,
            label="Claude Code built-in tools (text search)")
     ax.bar([x + gap / 2 for x in xs], [sf, sfn], w, color=BLUE,
-           label="+ SkeletonGraph (structural retrieval)")
+           label=f"+ {SG} (structural retrieval)")
 
     # every bar carries its value — a reader should never have to infer one
     for x, v, col in [(xs[0] - gap / 2, nf, INK_2), (xs[0] + gap / 2, sf, BLUE),
@@ -320,8 +326,8 @@ def fig_pareto(tag="nemotron_v2"):
         "cbmem":     "Code knowledge graph (Codebase-Memory)",
         "hybrid":    "Lexical + semantic hybrid",
         "none":      "No retrieval at all (control)",
-        "sg-rerank": "SkeletonGraph (structural rerank)",
-        "sg":        "SkeletonGraph (full)",
+        "sg-rerank": f"{SG} (structural rerank)",
+        "sg":        f"{SG} (full)",
     }
     rows = []
     for arm, label in show.items():
@@ -407,13 +413,13 @@ def fig_tools(nat, sg):
     ax.barh([y + gap / 2 for y in ys], [nm.get(t, 0) for t in native_tools], h,
             color=INK_2, label="Claude Code built-in tools")
     ax.barh([y - gap / 2 for y in ys], [sm.get(t, 0) for t in native_tools], h,
-            color=BLUE, label="+ SkeletonGraph")
+            color=BLUE, label=f"+ {SG}")
     ax.set_yticks(list(ys)); ax.set_yticklabels(native_tools)
     ax.invert_yaxis()
     ax.set_xlabel("Calls per task")
     added = sum(sm.get(t, 0) for t in sg_tools)
     ax.set_title("Retrieval displaces native exploration\n"
-                 f"(replaced by {added:.1f} SG calls/task)",
+                 f"(replaced by {added:.1f} {SG_SHORT} calls/task)",
                  color=INK, loc="left", pad=8)
     # legend outside the plot so it cannot sit on top of the bars
     ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0))
@@ -458,16 +464,15 @@ def _turn_context_series(task_id: str, arm: str, model: str, repeat: int, tag: s
 
 
 def fig_context_curve(nat, sg, tag="claude_v7", min_at_risk=10,
-                       example_id="astropy__astropy-13398"):
+                       example_id="sympy__sympy-13878"):
     """Two panels: one concrete task's actual trajectory, and the population
     result it is not a substitute for.
 
-    Left: `example_id`'s real per-turn context (not a median of anything) --
-    the same Astropy task already named in the "breadth is misread as scope"
-    discussion, reused here rather than hand-picked for this figure, so it is
-    not selected to make a story land. It happens to show BOTH a shorter
-    trajectory and a lower peak, which is a real outcome but not the typical
-    one -- flagged as such in the caption.
+    Left: `example_id`'s real per-turn context (not a median of anything).
+    The default is chosen by a stated rule, not by eye: the largest cost saving
+    among tasks that BOTH arms solved, so the shorter run is not an early
+    give-up. It shows both a shorter trajectory and a lower peak, which is not
+    the typical case -- the caption says so.
 
     Right: median context size at turn i, over the tasks still running at
     turn i (a curve is drawn only while >= `min_at_risk` tasks are that long,
@@ -506,7 +511,7 @@ def fig_context_curve(nat, sg, tag="claude_v7", min_at_risk=10,
         ax.plot(xn, [v / 1000 for v in yn], color=INK_2, lw=2,
                 label="Claude Code built-in tools")
         ax.plot(xs, [v / 1000 for v in ys], color=BLUE, lw=2,
-                label="+ SkeletonGraph")
+                label=f"+ {SG}")
         ax.scatter([xn[-1]], [yn[-1] / 1000], color=INK_2, s=20, zorder=3)
         ax.scatter([xs[-1]], [ys[-1] / 1000], color=BLUE, s=20, zorder=3)
         ax.set_xlabel("Turn number")
@@ -519,18 +524,18 @@ def fig_context_curve(nat, sg, tag="claude_v7", min_at_risk=10,
     # track LaTeX renumbering; the precise cross-reference goes in the caption
     draw(axL, list(range(1, len(ex_n) + 1)), ex_n,
         list(range(1, len(ex_s) + 1)), ex_s,
-        "One task (Astropy): shorter AND\nlower context here")
+        "One task both arms solved (SymPy):\nsame climb, stops sooner")
     axL.annotate(f"turn {len(ex_n)}", (len(ex_n), ex_n[-1] / 1000),
                 textcoords="offset points", xytext=(-8, 8), fontsize=7.5,
                 color=MUTED, ha="right")
     axL.annotate(f"turn {len(ex_s)}", (len(ex_s), ex_s[-1] / 1000),
-                textcoords="offset points", xytext=(4, 6), fontsize=7.5,
+                textcoords="offset points", xytext=(6, -14), fontsize=7.5,
                 color=BLUE, fontweight="bold")
     axL.set_ylabel("Context at that turn (k tokens)")
     axL.legend(loc="lower right", fontsize=7.5)
 
     draw(axR, nx, ny, sx, sy,
-        f"All {len(nat)} paired tasks (median): same\nclimb, SG stops sooner")
+        f"All {len(nat)} paired tasks (median): same\nclimb, {SG_SHORT} stops sooner")
     axR.annotate(f"turn {sx[-1]}\n~{sy[-1]/1000:.0f}k", (sx[-1], sy[-1] / 1000),
                 textcoords="offset points", xytext=(-64, 20), fontsize=7.5,
                 color=BLUE, fontweight="bold",
@@ -543,6 +548,158 @@ def fig_context_curve(nat, sg, tag="claude_v7", min_at_risk=10,
 
     fig.tight_layout()
     _save(fig, "fig_context_curve")
+
+
+# ── FIG — mechanism: per task, cost follows turns; payloads replace reads ─
+def fig_mechanism(nat, sg):
+    """(a) per-task turn ratio against cost ratio; (b) tool calls per task.
+
+    The aggregate turn and token reductions happening to match is weak evidence
+    on its own. Panel (a) tests it task by task. Panel (b) shows where the saved
+    turns went: exploration calls fall and retrieval calls replace them.
+    """
+    import math
+    tr = [s["n_turns"] / n["n_turns"] for n, s in zip(nat, sg)]
+    cr = [s["imputed_cost"] / n["imputed_cost"] for n, s in zip(nat, sg)]
+    lt, lc = [math.log(v) for v in tr], [math.log(v) for v in cr]
+    mt, mc = statistics.mean(lt), statistics.mean(lc)
+    r = (sum((a - mt) * (b - mc) for a, b in zip(lt, lc))
+         / math.sqrt(sum((a - mt) ** 2 for a in lt) * sum((b - mc) ** 2 for b in lc)))
+    same = sum(1 for a, b in zip(lt, lc) if (a < 0) == (b < 0))
+
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(5.5, 2.45),
+                                 gridspec_kw={"width_ratios": [1, 1.15]})
+    lo, hi = 0.15, 6.5
+    ax.plot([lo, hi], [lo, hi], color=BASELINE_AXIS, lw=1, zorder=1)
+    ax.axhline(1, color=GRID, lw=0.6, zorder=0)
+    ax.axvline(1, color=GRID, lw=0.6, zorder=0)
+    # code each task by paired outcome, so a shorter run that lost the task
+    # (an early stop) is not read as the same thing as a shorter run that won
+    groups = [
+        ("Both solved", lambda n, s: n["resolved"] and s["resolved"],
+         dict(marker="o", color=BLUE, s=12, alpha=0.65, edgecolors=SURFACE, linewidths=0.5)),
+        ("Both failed", lambda n, s: not n["resolved"] and not s["resolved"],
+         dict(marker="o", color=MUTED, s=12, alpha=0.6, edgecolors=SURFACE, linewidths=0.5)),
+        ("Only retrieval solved", lambda n, s: s["resolved"] and not n["resolved"],
+         dict(marker="^", color=GREEN, s=20, alpha=0.9, linewidths=0)),
+        ("Only built-in solved", lambda n, s: n["resolved"] and not s["resolved"],
+         dict(marker="x", color=ORANGE, s=20, alpha=0.95, linewidths=1.1)),
+    ]
+    for lab, pred, kw in groups:
+        idx = [i for i, (n, s) in enumerate(zip(nat, sg)) if pred(n, s)]
+        ax.scatter([tr[i] for i in idx], [cr[i] for i in idx],
+                   label=f"{lab} ({len(idx)})", zorder=3, **kw)
+    ax.legend(loc="lower right", fontsize=5.6, handletextpad=0.2, borderpad=0.3,
+              labelspacing=0.25, frameon=False)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
+    ticks = [0.25, 0.5, 1, 2, 4]
+    ax.set_xticks(ticks); ax.set_yticks(ticks)
+    fmt = FuncFormatter(lambda v, _: f"{v:g}×")
+    ax.xaxis.set_major_formatter(fmt); ax.yaxis.set_major_formatter(fmt)
+    ax.minorticks_off()
+    ax.set_xlabel("Turns, retrieval / built-in", fontsize=8)
+    ax.set_ylabel("Cost, retrieval / built-in", fontsize=8)
+    ax.text(0.04, 0.96, f"r = {r:.2f} (log ratios)\nsame direction: {same}/{len(tr)}",
+            transform=ax.transAxes, fontsize=7, color=INK_2, va="top")
+    ax.set_title("(a) Per task, cost follows turns", loc="left", fontsize=8.5, pad=4)
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+
+    def per_task(recs):
+        c = defaultdict(float)
+        for rec in recs:
+            for k, v in (rec.get("tool_counts") or {}).items():
+                c[k.split("__")[-1] if k.startswith("mcp__") else k] += v
+        return {k: v / len(recs) for k, v in c.items()}
+
+    nm, sm = per_task(nat), per_task(sg)
+    rows = [("Shell", "Bash"), ("Read", "Read"), ("Search", "Grep"), ("Edit", "Edit")]
+    names = [lab for lab, _ in rows] + ["Retrieval", "Tool lookup"]
+    base = [nm.get(k, 0.0) for _, k in rows] + [0.0, nm.get("ToolSearch", 0.0)]
+    retr = sm.get("sg_search", 0.0) + sm.get("sg_expand", 0.0)
+    with_sg = [sm.get(k, 0.0) for _, k in rows] + [retr, sm.get("ToolSearch", 0.0)]
+    ys = list(range(len(names)))
+    h = 0.38
+    bx.barh([y - h / 2 for y in ys], base, h, color=INK_2, label="Built-in tools")
+    bx.barh([y + h / 2 for y in ys], with_sg, h, color=BLUE, label=f"+ {SG_SHORT}")
+    bx.set_yticks(ys); bx.set_yticklabels(names, fontsize=7.5)
+    bx.invert_yaxis()
+    bx.set_xlabel("Calls per task", fontsize=8)
+    bx.set_title("(b) Retrieval replaces exploration", loc="left", fontsize=8.5, pad=4)
+    # widen the axis so the legend sits right of every bar instead of over them
+    bx.set_xlim(0, 5.4)
+    bx.legend(loc="lower right", fontsize=7)
+    bx.spines["top"].set_visible(False); bx.spines["right"].set_visible(False)
+    bx.set_axisbelow(True)
+    bx.grid(True, axis="x", color=GRID, linewidth=0.6)
+    bx.grid(False, axis="y")
+    fig.tight_layout(w_pad=1.2)
+    print(f"  fig_mechanism: r={r:.3f}, same direction {same}/{len(tr)}")
+    _save(fig, "fig_mechanism")
+
+
+# ── FIG — controlled ablation: tokens differ, solve-rate intervals overlap ─
+def fig_ablation(tag="nemotron_v4"):
+    """Pass@1 with a Wilson 95% interval against mean input tokens per task."""
+    import math
+    arms = [("fusion", f"{SG_SHORT}-Fusion"), ("bm25", "BM25"), ("graphify", "Graphify"),
+            ("grep", "Grep"), ("aider", "Aider map"), ("none", "Closed-book")]
+    pts = []
+    for arm, label in arms:
+        recs = [r for r in load_arm(tag, arm).values() if r.get("resolved") is not None]
+        if not recs:
+            continue
+        n, k = len(recs), sum(1 for r in recs if r["resolved"])
+        z = 1.96
+        p = k / n
+        den = 1 + z * z / n
+        mid = (p + z * z / (2 * n)) / den
+        half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+        # the react loop records prompt tokens as billed_input (Claude runs use
+        # total_input_tokens); both are the full prompt re-sent each turn
+        tok = statistics.mean((r.get("total_input_tokens") or r.get("billed_input") or 0)
+                              for r in recs)
+        pts.append((label, tok / 1000, p * 100, (mid - half) * 100, (mid + half) * 100))
+    if not pts:
+        print("  fig_ablation: no data"); return
+
+    # Forest-plot layout: one row per arm. Three arms sit within ~7% of each other
+    # on the token axis, so a token-vs-pass@1 scatter cannot label them legibly.
+    pts.sort(key=lambda p: p[1])
+    labels = [p[0] for p in pts]
+    ys = list(range(len(pts)))
+    cols = [BLUE if lab.endswith("-Fusion") else INK_2 for lab in labels]
+
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(5.5, 1.95), sharey=True,
+                                 gridspec_kw={"width_ratios": [1, 1.1]})
+    for y, (label, x, p, lo, hi), c in zip(ys, pts, cols):
+        ax.plot([lo, hi], [y, y], color=c, lw=1.2, solid_capstyle="butt", zorder=2)
+        ax.plot([p], [y], "o", ms=4, color=c, zorder=3)
+    ax.set_xlim(20, 60)
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
+    ax.set_xlabel("Pass@1 with 95% CI", fontsize=8)
+    ax.set_yticks(ys)
+    ax.set_yticklabels(labels, fontsize=7.5)
+    for t, c in zip(ax.get_yticklabels(), cols):
+        t.set_color(c)
+    ax.invert_yaxis()
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    ax.set_axisbelow(True)
+    ax.grid(True, axis="x", color=GRID, linewidth=0.6)
+    ax.grid(False, axis="y")
+
+    bx.barh(ys, [p[1] for p in pts], 0.55, color=cols)
+    for y, (label, x, *_ ) in zip(ys, pts):
+        bx.text(x + 18, y, f"{x:,.0f}k", va="center", fontsize=7, color=INK_2)
+    bx.set_xlim(0, max(p[1] for p in pts) * 1.2)
+    bx.set_xlabel("Input tokens per task (thousands)", fontsize=8)
+    bx.spines["top"].set_visible(False); bx.spines["right"].set_visible(False)
+    bx.set_axisbelow(True)
+    bx.grid(True, axis="x", color=GRID, linewidth=0.6)
+    bx.grid(False, axis="y")
+    bx.tick_params(axis="y", length=0)
+    fig.tight_layout(w_pad=1.0)
+    _save(fig, "fig_ablation")
 
 
 # ── FIG 6 — the ceiling: retrieval collapses as location cues are removed ─
@@ -629,7 +786,7 @@ def fig_ceiling():
     ax.plot(x, natr, marker="o", color=INK_2, linewidth=1.6, markersize=5,
             label="Built-in lexical search")
     ax.plot(x, sgr, marker="o", color=BLUE, linewidth=2.0, markersize=6,
-            label="+ SkeletonGraph (all 3 paradigms)")
+            label=f"+ {SG} (all 3 paradigms)")
     for xi, (a, b) in enumerate(zip(natr, sgr)):
         ax.annotate(f"{b:.0f}", (xi, b), textcoords="offset points",
                     xytext=(0, 8), ha="center", fontsize=8, color=BLUE)
@@ -722,7 +879,7 @@ def fig_tail_grid():
                 label="Claude Code built-in tools")
         ax.plot(x, sy, color=BLUE, lw=1.8,
                 marker=None if big else "o", markersize=3,
-                label="+ SkeletonGraph")
+                label=f"+ {SG}")
 
         ax.set_title(title, fontsize=9, color=INK, pad=7, loc="left")
         ax.text(0.02, 0.93,
@@ -765,7 +922,14 @@ def main():
     fig_retrieval(nat, sg, ds)
     fig_tools(nat, sg)
     fig_context_curve(nat, sg)
-    fig_pareto()
+    fig_mechanism(nat, sg)
+    fig_ablation()
+    # fig_pareto reads the older nemotron_v2 run, which is not part of every release
+    # of the records; skip it rather than crash the rest of the figures.
+    if (RUNS / "nemotron_v2").is_dir():
+        fig_pareto()
+    else:
+        print("  fig_pareto: skipped (nemotron_v2 records not present)")
     fig_ceiling()
     fig_tail_grid()
 

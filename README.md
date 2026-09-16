@@ -95,7 +95,9 @@ Identical action space for every arm; **only the retrieval backend changes**. Th
 
 **`sg-fusion` is the top arm, the cheapest arm, and the only one that localizes to
 the function** (57% vs grep's 0% — lexical search is file-granular by construction).
-Against the closed-book floor of 35.0%, retrieval is worth **+7 points** here.
+Against the closed-book floor of 35.0% the difference is 7 points, which is not
+statistically significant at n=100 (McNemar p = 0.14): a model with no repository
+access already solves 35 of these 100 tasks.
 
 `sg-rerank`'s recall/cost profile is reported separately in the agent-free intrinsic
 retrieval ablation in [the paper](docs/paper/ResearchPaper.pdf)

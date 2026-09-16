@@ -27,15 +27,22 @@ Conventions:
 
 ## 0. The headline, in one paragraph
 
-Structural retrieval's advantage is **entity-anchored**: it depends on the issue
-text naming a symbol that exists in the repo. Strip those cues and SkeletonGraph's
-retrieval edge collapses to zero — yet its **cost advantage persists**. In the
-prose-stripped SWE-Verified condition SG's first-search recall is statistically
-indistinguishable from lexical grep (−0.006) while still costing **21% less**.
-Retrieval quality is therefore *not* the mechanism behind the cost saving; bounding
-the agent's exploration is. Combining all three non-LLM retrieval paradigms at once
-(lexical BM25 + semantic dense + topological graph = `sg-fusion`) does not escape
-this ceiling.
+> **Rewritten 2026-09-15.** The previous version of this paragraph described the
+> n=15 "entity-anchored collapse" that §1b withdrew. It is gone; do not restore it.
+
+Structural retrieval localizes far better than a production agent's built-in search
+(first-search file recall 0.663→0.862, function-level 0%→79–81%), but cost does not
+follow in proportion: the median task is +1.9%, the saving sits in the tail (p95
+−42.5%, mean −14.6%), and pass@1 never moves significantly in any setting. Peak
+context is unchanged (44.1k vs 44.9k), so the saving is a shorter trajectory, not a
+smaller context. At n=50 the retrieval margin is **stable** (+0.113 to +0.189) across
+cue removal and a decontaminated benchmark, yet does not convert into outcomes, and
+the baseline's cumulative recall overtakes SG in 3 of 4 cells.
+
+**Significance of the react-loop solve rates (computed 2026-09-15 from nemotron_v4
+records, paired McNemar exact):** fusion 42 vs closed-book 35 → 12 vs 5 discordant,
+**p = 0.143**; fusion vs grep 8 vs 5, p = 0.581; fusion vs bm25 6 vs 5, p = 1.000.
+The "+7pp retrieval effect" is **not significant** — do not call it genuine or real.
 
 ---
 
@@ -156,11 +163,11 @@ Identical action space across arms; only the retrieval backend varies.
 | sg-chain *(incomplete)* | 13 | 23.1% | 0.769 | 69% | 226,719 | 23.9 | $0.0478 |
 | sg *(incomplete)* | 15 | 20.0% | 0.489 | 33% | 332,553 | 28.5 | $0.0633 |
 
-**Why this table matters:** on a model that memorizes *less* than Sonnet, the
-closed-book floor is **35.0%** and `fusion` reaches **42.0%** — a real +7pp
-retrieval effect, and it is simultaneously the **cheapest** arm ($0.0523 vs grep
-$0.0793) with the **best function-level localization** (57% vs grep's 0%). This is
-the cleanest "retrieval helps" evidence in the project, and it complements (does not
+**Why this table matters:** the closed-book floor is **35.0%** and `fusion` reaches
+**42.0%**, but that 7pp gap is **not significant (McNemar p = 0.143, see §0)**. What
+the table does establish is that `fusion` is the **cheapest** arm ($0.0523 vs grep
+$0.0793) with the **best function-level localization** (57% vs grep's 0%), and that
+35/100 tasks are solvable with no repository access. It complements (does not
 duplicate) the Claude deployment study.
 
 **`sg-rerank` row is bugged — excluded from the paper.** This nemotron_v4 `sg-rerank`

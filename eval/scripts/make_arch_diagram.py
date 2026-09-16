@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -29,7 +30,11 @@ EDGE    = "#c6d0db"
 ARROW   = "#8593a2"
 WHITE   = "#ffffff"
 
-OUT = Path("docs/paper/figures")
+OUT = Path(os.environ.get("SG_FIG_OUT", "docs/paper/figures"))
+SG = os.environ.get("SG_LABEL", "SkeletonGraph")
+SG_SHORT = os.environ.get("SG_SHORT", "SG")
+# MCP tool prefix shown in the diagram; overridable like the label above.
+TP = os.environ.get("SG_TOOL_PREFIX", "sg_")
 
 
 def box(ax, x, y, w, h, lines, *, fill=WHITE, edge=EDGE, tc=INK,
@@ -91,7 +96,7 @@ def draw_static(ax):
     box(ax, 38, y1,   20, 6.0, ["Call graph  +  PageRank", "callers / callees · centrality"], edge=EDGE, body_fs=7.2)
     box(ax, 62, y1+7, 15, 6.5, ["BM25 index", "lexical"], edge=BLUE, title_color=BLUE)
     box(ax, 62, y1,   15, 6.0, ["Dense vectors", "jina-code · hash-cached"], edge=BLUE, title_color=BLUE, body_fs=7.2)
-    box(ax, 81, y1, 14, h1, [".skeletongraph/", "persisted index", "rebuildable · no LLM"], fill=GREEN_FILL, edge=GREEN, title_color=GREEN)
+    box(ax, 81, y1, 14, h1, [f".{SG.lower()}/", "persisted index", "rebuildable · no LLM"], fill=GREEN_FILL, edge=GREEN, title_color=GREEN)
 
     arrow(ax, 18, y1+h1/2, 22, y1+h1/2)
     arrow(ax, 34, y1+h1/2, 38, y1+9.5)
@@ -110,7 +115,7 @@ def draw_static(ax):
     box(ax, 30, y2, 24, h2, ["Structural rerank", "entity-anchor · PageRank · call-graph"], edge=BLUE, title_color=BLUE, body_fs=7.1)
     box(ax, 60, y2+7.5, 13, 8, ["RRF fuse", "k = 60"], fill=BLUE_FILL, edge=BLUE, title_color=BLUE)
     box(ax, 78, y2+7.5, 17, 8, ["Ranked functions", "edit-shaped payload"], edge=INK)
-    ax.text(50, 36.0, "SG-Fusion = all 3 legs   ·   SG-Rerank = BM25 + structural (no dense)",
+    ax.text(50, 36.0, f"{SG_SHORT}-Fusion = all 3 legs   ·   {SG_SHORT}-Rerank = BM25 + structural (no dense)",
             ha="center", va="center", fontsize=7.6, color=MUTED, style="italic")
 
     for yy in (y2+15+h2/2, y2+7.5+h2/2, y2+h2/2):
@@ -123,13 +128,13 @@ def draw_static(ax):
 
     # ── Band 3: SERVE ────────────────────────────────────────────────────
     band(ax, 2, 4, 96, 26, "SERVE  ·  Model Context Protocol", "3", AMBER)
-    box(ax, 14, 9, 40, 11, ["MCP server", "sg_overview · sg_search · sg_get",
-                            "sg_expand · sg_constraint · sg_log"], fill=AMBER_FILL, edge=AMBER, title_color=AMBER)
+    box(ax, 14, 9, 40, 11, ["MCP server", f"{TP}overview · {TP}search · {TP}get · {TP}expand",
+                            f"{TP}constraint · {TP}log · {TP}decision"], fill=AMBER_FILL, edge=AMBER, title_color=AMBER)
     box(ax, 62, 9, 30, 11, ["Host agent", "Claude Code (headless)", "· react loop  · CLI"], edge=INK)
 
     arrow(ax, 78, 40, 78, 20, color=INK, label="ranked functions", lx=8, ly=0)
     arrow(ax, 54, 14.5, 62, 14.5, color=AMBER)
-    arrow(ax, 62, 17.5, 54, 17.5, color=AMBER, rad=0.0, label="sg_search(query)", ly=1.8, lcolor=AMBER)
+    arrow(ax, 62, 17.5, 54, 17.5, color=AMBER, rad=0.0, label=f"{TP}search(query)", ly=1.8, lcolor=AMBER)
 
 
 def main():
