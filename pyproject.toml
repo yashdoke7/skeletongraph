@@ -64,7 +64,10 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["litellm>=1.0"]
-eval = ["pandas", "matplotlib", "seaborn", "swebench", "openai", "datasets<3"]
+# Statistics and figures only (eval/scripts/stats.py, make_paper_figures.py, compare_arms.py).
+analysis = ["scipy>=1.10", "numpy>=1.24", "matplotlib>=3.7"]
+# Full evaluation harness, including test-execution verification and the analysis scripts.
+eval = ["scipy>=1.10", "numpy>=1.24", "matplotlib>=3.7", "pandas", "seaborn", "swebench", "openai", "datasets<3"]
 # Strong eval baselines — heavier deps, install separately:
 #   pip install "skeletongraph[eval-strong]"
 # aider-chat pulls a large dependency tree; install in a SEPARATE venv if
@@ -79,7 +82,7 @@ daemon = ["watchdog>=3.0"]
 # extra is a no-op alias.
 embeddings = []
 dev = ["pytest", "pytest-cov", "ruff"]
-all = ["skeletongraph[llm,eval,daemon,dev]"]
+all = ["skeletongraph[llm,eval,analysis,daemon,dev]"]
 
 [project.scripts]
 skeletongraph = "skeletongraph.cli.main:app"

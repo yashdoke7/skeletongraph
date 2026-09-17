@@ -22,6 +22,12 @@ Prints:
      (resample task indices with replacement, 10000 iterations) — so "-14.6%"
      comes with an interval, not just a point estimate.
   3. Effect size (Cohen's d for paired differences) on cost.
+
+Outcome verdicts: `resolved: true/false` is an execution-adjudicated result.
+A missing or null `resolved` is UNADJUDICATED (the test harness never ran on that
+patch) and is never counted as a failure. The McNemar test and pass rates use only
+task pairs adjudicated in both arms; cost, turns, and wall-clock use every paired
+task. Each section prints its own denominator.
 """
 
 from __future__ import annotations
@@ -36,8 +42,16 @@ from pathlib import Path
 
 from scipy.stats import binomtest
 
-DEFAULT_DATASET = "C:/Users/ASUS/Desktop/CS/Projects/swebench-data/swebench_100.jsonl"
+# Repository-relative, so the script runs from any checkout. The dataset is only read
+# for the named/unnamed subsets.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATASET = str(REPO_ROOT / "eval" / "datasets" / "graphify_100.jsonl")
 N_BOOT = 10000
+
+
+def adjudicated(rec: dict) -> bool:
+    """True only for an execution-adjudicated verdict; null or missing is not a failure."""
+    return rec.get("resolved") in (True, False)
 
 
 def load_arm(tag: str, arm: str) -> dict:
@@ -143,38 +157,50 @@ def main() -> None:
         print(f"loaded {a}: {len(d)} runs")
 
     common = sorted(set(arms[a1]) & set(arms[a2]))
-    ds = load_dataset(args.dataset)
     print(f"paired common task_ids: {len(common)}")
     if not common:
         raise SystemExit("no common tasks")
 
-    # ---- 1. McNemar on pass@1 (always on the FULL common set — subset doesn't apply here) ----
-    section(f"1. McNEMAR EXACT TEST — pass@1, {a1} vs {a2} (n={len(common)})")
-    a1_resolved = sum(1 for t in common if arms[a1][t].get("resolved"))
-    a2_resolved = sum(1 for t in common if arms[a2][t].get("resolved"))
-    a1_only = [t for t in common if arms[a1][t].get("resolved") and not arms[a2][t].get("resolved")]
-    a2_only = [t for t in common if not arms[a1][t].get("resolved") and arms[a2][t].get("resolved")]
-    print(f"  {a1}: {a1_resolved}/{len(common)} ({a1_resolved/len(common)*100:.1f}%)")
-    print(f"  {a2}: {a2_resolved}/{len(common)} ({a2_resolved/len(common)*100:.1f}%)")
-    print(f"  discordant pairs: {a1}-only-win={len(a1_only)}  {a2}-only-win={len(a2_only)}")
-    p = mcnemar_exact(len(a1_only), len(a2_only))
-    verdict = "SIGNIFICANT" if p < 0.05 else "NOT significant"
-    print(f"  McNemar exact p-value: {p:.4f}  ({verdict} at alpha=0.05)")
-    if p >= 0.05:
-        print(f"  => pass@1 difference between {a1} and {a2} is NOT distinguishable from chance at this n.")
-        print(f"     Do not claim '{a2} solves more' as a headline off this number alone.")
+    # ---- 1. McNemar on pass@1: only pairs adjudicated in BOTH arms ----
+    adj = [t for t in common if adjudicated(arms[a1][t]) and adjudicated(arms[a2][t])]
+    unadj = {a: [t for t in common if not adjudicated(arms[a][t])] for a in arm_names}
+    section(f"1. McNEMAR EXACT TEST — pass@1, {a1} vs {a2} "
+            f"(n={len(adj)} adjudicated pairs of {len(common)} paired tasks)")
+    for a in arm_names:
+        if unadj[a]:
+            print(f"  {a}: {len(unadj[a])} unadjudicated (resolved missing/null), excluded: "
+                  f"{', '.join(unadj[a][:5])}{' ...' if len(unadj[a]) > 5 else ''}")
+    if not adj:
+        print("  no pair is adjudicated in both arms; outcome comparison not possible")
+    else:
+        a1_resolved = sum(1 for t in adj if arms[a1][t]["resolved"])
+        a2_resolved = sum(1 for t in adj if arms[a2][t]["resolved"])
+        a1_only = [t for t in adj if arms[a1][t]["resolved"] and not arms[a2][t]["resolved"]]
+        a2_only = [t for t in adj if not arms[a1][t]["resolved"] and arms[a2][t]["resolved"]]
+        print(f"  {a1}: {a1_resolved}/{len(adj)} ({a1_resolved/len(adj)*100:.1f}%)")
+        print(f"  {a2}: {a2_resolved}/{len(adj)} ({a2_resolved/len(adj)*100:.1f}%)")
+        print(f"  discordant pairs: {a1}-only-win={len(a1_only)}  {a2}-only-win={len(a2_only)}")
+        p = mcnemar_exact(len(a1_only), len(a2_only))
+        verdict = "SIGNIFICANT" if p < 0.05 else "NOT significant"
+        print(f"  McNemar exact p-value: {p:.4f}  ({verdict} at alpha=0.05)")
+        if p >= 0.05:
+            print(f"  => pass@1 difference between {a1} and {a2} is NOT distinguishable from chance at this n.")
+            print(f"     Do not claim '{a2} solves more' as a headline off this number alone.")
 
     # ---- pick the subset for cost/turns analysis ----
     if args.subset == "both_pass":
-        subset = [t for t in common if arms[a1][t].get("resolved") and arms[a2][t].get("resolved")]
+        subset = [t for t in adj if arms[a1][t]["resolved"] and arms[a2][t]["resolved"]]
         label = f"BOTH-PASS (matched outcome, n={len(subset)})"
     elif args.subset in ("named", "unnamed"):
+        ds = load_dataset(args.dataset)
         named_set = {t for t in common if names_gold(ds[t].get("query", ""), ds[t].get("gold_files", []), ds[t].get("gold_fqns", []))}
         subset = [t for t in common if (t in named_set) == (args.subset == "named")]
         label = f"{args.subset.upper()} (n={len(subset)})"
     else:
         subset = common
-        label = f"ALL PAIRED TASKS (n={len(subset)})"
+        label = f"ALL PAIRED TASKS (n={len(subset)}, adjudicated or not)"
+    if not subset:
+        raise SystemExit(f"subset '{args.subset}' is empty")
 
     # ---- 2. bootstrap CI on cost delta ----
     section(f"2. COST DELTA — {a2} vs {a1} — {label}")

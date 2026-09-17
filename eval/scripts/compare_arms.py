@@ -37,7 +37,8 @@ import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 
-DEFAULT_DATASET = "C:/Users/ASUS/Desktop/CS/Projects/swebench-data/swebench_100.jsonl"
+# Repository-relative, so the script runs from any checkout.
+DEFAULT_DATASET = str(Path(__file__).resolve().parents[2] / "eval" / "datasets" / "graphify_100.jsonl")
 
 
 def load_arm(tag: str, arm: str) -> dict:

@@ -25,7 +25,8 @@ from collections import defaultdict
 from pathlib import Path
 
 _RANK_LINE = re.compile(r"^\s*\d+\.\s+(.+?)\s*$")
-_DEFAULT_DS = Path(r"C:/Users/ASUS/Desktop/CS/Projects/swebench-data/swebench_100_fqn.jsonl")
+# Repository-relative: function-level gold from eval/scripts/tighten_gold_fqns.py.
+_DEFAULT_DS = Path(__file__).resolve().parents[2] / "eval" / "datasets" / "swebench_100_fqn.jsonl"
 
 
 def _norm(p: str) -> str:
