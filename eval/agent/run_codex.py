@@ -224,10 +224,11 @@ def leak_flags(objs: list) -> list:
             out.append("web_search: " + str(it.get("query") or "")[:200])
         elif it.get("type") == "command_execution":
             c = it.get("command") or ""
+            tag = f"exit={it.get('exit_code')}"   # non-zero: blocked or failed
             if _NET_CMD.search(c):
-                out.append("network: " + c[:200])
+                out.append(f"network ({tag}): " + c[:200])
             elif _GIT_DIG.search(c):
-                out.append("git: " + c[:200])
+                out.append(f"git ({tag}): " + c[:200])
     return out
 
 
