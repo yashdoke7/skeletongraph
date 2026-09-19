@@ -111,6 +111,11 @@ _DEAD_PROXY = "http://127.0.0.1:9"
 _NO_NET = "{" + ",".join(f'{k}="{_DEAD_PROXY}"' for k in (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) + ',NO_PROXY="",no_proxy=""}'
 _NET_CMD = re.compile(r"\b(curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b|git\s+(fetch|pull|clone|ls-remote)|pip\s+(download|install)", re.I)
+_URL = re.compile(r"https?://", re.I)
+_BLOCKED = re.compile(r"Failed to connect|Could not connect|Unable to connect|actively refused|"
+                      r"No connection could be made|ProxyError|Max retries exceeded|timed out|"
+                      r"Could not resolve|No such host|SEC_E_", re.I)
+_BYPASS = re.compile(r"--noproxy|-NoProxy|trust_env\s*=\s*False|proxies\s*=\s*\{\s*\}|ProxyHandler\(\s*\{\s*\}", re.I)
 _GIT_DIG = re.compile(r"git\s+(fsck|cat-file|reflog|stash\s+(show|list|apply|pop))|lost-found|unreachable|dangling", re.I)
 
 
@@ -258,12 +263,24 @@ def leak_flags(objs: list) -> list:
             out.append("web_search: " + str(it.get("query") or "")[:200])
         elif it.get("type") == "command_execution":
             c = it.get("command") or ""
-            tag = f"exit={it.get('exit_code')}"   # non-zero: blocked or failed
-            if _NET_CMD.search(c):
-                out.append(f"network ({tag}): " + c[:200])
+            tag = f"exit={it.get('exit_code')}"
+            if _NET_CMD.search(c) or _URL.search(c):
+                # Through the dead proxy nothing can connect, so only a command that
+                # bypasses it (curl --noproxy, -NoProxy, ...) and returned something
+                # other than a connection error counts as REACHED. Exit codes and
+                # output alone mislead: compound commands mix in local git output.
+                outp = it.get("aggregated_output") or ""
+                bypass = bool(_BYPASS.search(c))
+                reached = bypass and outp.strip() and not _BLOCKED.search(outp)
+                state = "REACHED" if reached else "blocked"
+                out.append(f"network {state}{' bypass' if bypass else ''} ({tag}): " + c[:200])
             elif _GIT_DIG.search(c):
                 out.append(f"git ({tag}): " + c[:200])
     return out
+
+
+def leak_reached(flags: list) -> bool:
+    return any(f.startswith("network REACHED") for f in flags)
 
 
 def parse_codex(objs: list, gold_files: list, repo: Path, model: str) -> dict:
@@ -397,6 +414,7 @@ def run_one_task(task: dict, arm: str, model: str, effort: str, timeout: int) ->
         "wall_s": round(time.time() - t0, 1), "agent_exit": run["exit"],
         "error": None if stopped == "submit" else (run["error"] or run["stderr"][-500:] or "timeout"),
         "leak_flags": leak_flags(run["objs"]),
+        "leak_reached": leak_reached(leak_flags(run["objs"])),
         "tool_counts": meta["tool_counts"], "n_tool_calls": meta["n_tool_calls"],
         "sg_tool_calls": meta["sg_tool_calls"], "native_tool_calls": meta["native_tool_calls"],
         "retrieval_hit": meta["retrieval_hit"], "retrieval_precision": meta["retrieval_precision"],
@@ -461,7 +479,8 @@ def main() -> None:
                   f"tokens={r['total_input_tokens']:,} cost=${r['imputed_cost']:.3f} "
                   f"sg_calls={r['sg_tool_calls']} gold_edit={r['edited_gold_file']} {r['wall_s']}s"
                   + (f"  ERROR: {str(r['error'])[:150]}" if r["stopped"] != "submit" else "")
-                  + (f"  LEAK-ATTEMPT x{len(r['leak_flags'])}" if r["leak_flags"] else ""))
+                  + (f"  LEAK-ATTEMPT x{len(r['leak_flags'])}" if r["leak_flags"] else "")
+                  + ("  LEAK-REACHED (upstream content fetched)" if r["leak_reached"] else ""))
         except QuotaExhausted as e:
             print(f"  [{i}/{len(tasks)}] {t['task_id']}: usage limit reached, run discarded.\n"
                   f"  {e}\n  Stopped. Rerun the same command after the limit resets; "
