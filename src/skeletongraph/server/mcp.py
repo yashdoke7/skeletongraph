@@ -356,6 +356,56 @@ _TOOL_SCHEMAS = [
 ]
 
 
+# ── Plain mode (evaluation only) ─────────────────────────────────────────
+# SG_MCP_PLAIN=1 serves the same retrieval with every behavioural directive
+# removed: tool descriptions say what a tool returns, not when or how often to
+# call it or what to stop doing, and results carry no "do not re-read / do not
+# search again / proceed to edit" lines. Measures retrieval as a plain tool,
+# separately from the instructions the shipped integration adds.
+def _plain_mode() -> bool:
+    return os.environ.get("SG_MCP_PLAIN", "0") == "1"
+
+
+_PLAIN_DESCRIPTIONS = {
+    "sg_overview": ("Project overview: the most central functions by PageRank, project "
+                    "constraints, recent session notes, and index statistics."),
+    "sg_search": ("Search this repository's code with hybrid lexical, semantic and "
+                  "call-graph ranking. Returns ranked matches (FQN, file:line-range, "
+                  "signature, summary), related helpers and likely test files, and a "
+                  "plain-text fallback for module-level names."),
+    "sg_get": ("Get one or more functions/classes by fully-qualified name (FQN), e.g. "
+               "'path/to/file.py::ClassName.method_name'; comma-separate several. Returns "
+               "signature, docstring, summary, callers and callees."),
+    "sg_expand": ("Return source code for a function, class, file or line range, e.g. "
+                  "'src/file.py::MyClass.method', 'src/file.py' or 'src/file.py:42-80'; "
+                  "comma-separate several targets."),
+    "sg_constraint": "View or propose project constraints (coding rules, decisions, style).",
+    "sg_log": "Read or append project notes: recent turn notes or recorded decisions.",
+    "sg_decision": ("Record a design or implementation decision and its rationale; recall "
+                    "it with sg_log(kind='decision')."),
+}
+_PLAIN_PARAMS = {
+    ("sg_search", "query"): "Search query.",
+    ("sg_search", "max_tokens"): "Response budget in tokens (hard cap 4000).",
+    ("sg_expand", "target"): "FQN, file path, or file:start-end range; comma-separate several.",
+    ("sg_expand", "max_tokens"): "Body budget in tokens (hard cap 4000).",
+}
+
+
+def _plain_schemas() -> list:
+    import copy
+    out = []
+    for t in _TOOL_SCHEMAS:
+        t = copy.deepcopy(t)
+        t["description"] = _PLAIN_DESCRIPTIONS.get(t["name"], t["description"])
+        props = (t.get("inputSchema") or {}).get("properties", {})
+        for (name, param), desc in _PLAIN_PARAMS.items():
+            if t["name"] == name and param in props:
+                props[param]["description"] = desc
+        out.append(t)
+    return out
+
+
 # ── MCPServer ────────────────────────────────────────────────────────────
 
 # Cap for any body inlined by sg_search when body_top>0 (the lean+rankN A/B
@@ -451,6 +501,8 @@ class MCPServer:
                           "that exact range to view and edit the code."
                     )
                     result = {"tools": [tool]}
+                elif _plain_mode():
+                    result = {"tools": _plain_schemas()}
                 else:
                     result = {"tools": _TOOL_SCHEMAS}
             elif method == "tools/call":
@@ -583,7 +635,7 @@ class MCPServer:
                     parts.append(digest)
             return "\n\n".join(parts)
 
-        parts = [_USE_SG_REMINDER, ""]
+        parts = [] if _plain_mode() else [_USE_SG_REMINDER, ""]
 
         # Project DNA — the glimpse: what this project is, so the model frames
         # its retrieval well before searching.
@@ -800,6 +852,8 @@ class MCPServer:
                 body_note = "Anchors only (locator mode) — Read the target file at the given line range to edit"
             elif body_top:
                 body_note = f"Bodies inline for top {body_top}"
+            elif _plain_mode():
+                body_note = "Anchors only"
             else:
                 body_note = "Anchors only — sg_expand or Read the target to edit"
             lines.append(
@@ -977,6 +1031,11 @@ class MCPServer:
             return (f"No results for {query!r}. Try different keywords, "
                     f"or sg_overview to see what's indexed.")
 
+        if _plain_mode():
+            lines.append("_Each match above gives its file:line range; "
+                         "sg_expand(target=\"<fqn>\") returns a body._")
+            return "\n".join(lines)
+
         if confidence == "HIGH":
             lines.append("🛑 **CONFIDENCE: HIGH** — All likely targets returned above. "
                          "Proceed to edit. Do NOT call sg_search again unless this "
@@ -1049,7 +1108,8 @@ class MCPServer:
                         else "sg_expand a target for its body.")
         lines = [
             "## SG quick map",
-            f"Exact anchors — use these instead of native grep/read; {locator_hint}",
+            ("Exact anchors." if _plain_mode()
+             else f"Exact anchors — use these instead of native grep/read; {locator_hint}"),
         ]
         for c in edit_candidates[:3]:
             sk = c.skeleton
@@ -1996,7 +2056,7 @@ class MCPServer:
 
         # Session dedup: FQN expansions whose body is already in context.
         # A file path or range is always fresh (may differ from what sg_search sent).
-        if "::" in target and target in self._returned_fqns:
+        if "::" in target and target in self._returned_fqns and not _plain_mode():
             try:
                 sk = self._engine.get_store().skeleton_table.get(target)
             except Exception:
