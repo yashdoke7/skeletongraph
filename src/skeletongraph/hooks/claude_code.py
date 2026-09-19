@@ -244,6 +244,17 @@ def hook_pre_tool_use(project_root: Path, event_data: Dict[str, Any]) -> Dict[st
     sg_dir = project_root / ".skeletongraph"
     st = _read_gate_state(sg_dir)
 
+    if os.environ.get("SG_MCP_PLAIN", "0") == "1":
+        # Plain mode (evaluation): routing only. Grep/Glob wait for the first SG
+        # call, with a neutral message; Read is never blocked.
+        if tool in _GATED_TOOLS and st.get("sg_search", 0) < 1 \
+                and st.get("denials", 0) < _GATE_MAX_DENIALS:
+            st["denials"] = st.get("denials", 0) + 1
+            _write_gate_state(sg_dir, st)
+            return _deny("Code search in this session goes through sg_search first; "
+                         "Grep and Glob become available after that.")
+        return {}
+
     if tool in _GATED_TOOLS:
         if (st.get("sg_search", 0) >= _GATE_MIN_SG
                 or st.get("denials", 0) >= _GATE_MAX_DENIALS):

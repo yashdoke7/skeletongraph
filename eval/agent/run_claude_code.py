@@ -100,17 +100,18 @@ ARM_RULES = "native-rules"
 # do not search again / proceed to edit" lines). native vs sg-fusion-plain measures
 # retrieval; sg-fusion-plain vs sg-fusion measures the directives.
 ARM_PLAIN = "sg-fusion-plain"
-# Claude Code defers MCP tools behind ToolSearch, and a plain mention was not enough:
-# with a routing sentence alone the agent still used Grep and never loaded SG (0 SG
-# calls in 3 test runs). So in this arm SG replaces the search tools, as the
-# controlled loop's arms each have their own search backend: Grep and Glob are
-# removed (Read, Edit and Bash stay), and this line names the tools. Nothing about
-# re-reading, verifying or when to stop.
+# Claude Code defers MCP tools behind ToolSearch, and a routing sentence alone left
+# 0 SG calls. Removing Grep/Glob fixed adoption but changed how the agent works
+# (it moved to sed/python-in-Bash for reading and editing, a confound; those 15 runs
+# are archived). So, as the shipped arm does, a PreToolUse gate defers Grep/Glob
+# until the first SG call and then allows them - routing only, with a neutral
+# message and no Read blocking (SG_MCP_PLAIN in the hook) - plus this line naming
+# the tools. Nothing about re-reading, verifying or when to stop.
 _PLAIN_APPEND_SYSTEM = (
     "SkeletonGraph MCP tools are this session's code-search tools: sg_search searches "
     "the repository's code, sg_expand shows the source of a function, class, file or "
-    "line range, and sg_get looks up a function or class by name. Grep and Glob are "
-    "not available; use sg_search to search the code.")
+    "line range, and sg_get looks up a function or class by name. Use sg_search to "
+    "search the code.")
 ARMS = (ARM_SG, ARM_FUSION, ARM_LOCATOR, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE,
         ARM_RULES, ARM_PLAIN)
 _NATIVE_LIKE = frozenset({ARM_NATIVE, ARM_RULES})
@@ -455,7 +456,17 @@ def _repo_dir(task: dict, arm: str = ARM_SG) -> Path:
 # ── prepare: editable copy + clean baseline + (SG arm only) index + MCP ──────
 
 def _write_plain_mcp(repo: Path) -> None:
-    """The .mcp.json `sg install` would write, without its CLAUDE.md or hooks."""
+    """The .mcp.json `sg install` would write, without its CLAUDE.md, plus only the
+    routing gate: PreToolUse on Grep/Glob and the PostToolUse counter of SG calls
+    (the hook runs in plain mode because SG_MCP_PLAIN is set for the session)."""
+    hook = lambda ev: {"type": "command",
+                       "command": f"sg hook {ev} --path '{str(repo).replace(chr(92), '/')}'"}
+    settings = {"hooks": {
+        "PreToolUse": [{"matcher": "Grep|Glob", "hooks": [hook("pre_tool_use")]}],
+        "PostToolUse": [{"matcher": "mcp__skeletongraph__.*", "hooks": [hook("post_tool_use")]}]}}
+    (repo / ".claude").mkdir(exist_ok=True)
+    (repo / ".claude" / "settings.json").write_text(json.dumps(settings, indent=2),
+                                                     encoding="utf-8")
     cfg = {"mcpServers": {"skeletongraph": {
         "type": "stdio", "command": "sg",
         "args": ["serve", "--path", str(repo).replace("\\", "/")]}}}
@@ -473,6 +484,15 @@ def _clear_sg_session(repo: Path) -> None:
                     f.unlink()
     for name in ("current_session.txt", "gate_state.json", "last_hook.log"):
         (sg_dir / name).unlink(missing_ok=True)
+
+
+def _fresh_plain_session(repo: Path) -> None:
+    """Clear earlier SG session state and open a new session (what the SessionStart
+    hook does, minus its message, which the plain arm does not get). The gate's SG
+    call counter only runs inside a session."""
+    from skeletongraph.hooks.claude_code import hook_session_start
+    _clear_sg_session(repo)
+    hook_session_start(repo, {})
 
 
 def _seed_plain_index(task: dict, repo: Path) -> None:
@@ -524,7 +544,7 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
             (repo / "CLAUDE.md").write_text(_RULES_ONLY_MD, encoding="utf-8")
         elif arm == ARM_PLAIN:
             _write_plain_mcp(repo)
-            _clear_sg_session(repo)
+            _fresh_plain_session(repo)
         reset_repo(repo)
         return repo
 
@@ -590,6 +610,7 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
     elif arm == ARM_PLAIN:
         _seed_plain_index(task, repo)
         _write_plain_mcp(repo)
+        _fresh_plain_session(repo)
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
@@ -792,7 +813,7 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         # servers (no project or global leakage). Truly Claude-on-its-own.
         cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
-    if disallow_grep or arm == ARM_PLAIN:
+    if disallow_grep:
         cmd += ["--disallowedTools", "Grep", "Glob"]
     try:
         r = subprocess.run(cmd, cwd=str(repo), input=prompt, env=env,
@@ -1456,7 +1477,7 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         "repeat": 0,
         "stopped": stopped,
         "harness": "claude-code",     # real-agent arm (SG-MCP or native)
-        "disallow_grep": disallow_grep or arm == ARM_PLAIN,
+        "disallow_grep": disallow_grep,
         "repo": task.get("repo", ""),
         "base_commit": task.get("base_commit", ""),
         "gold_files": gold,
