@@ -51,6 +51,15 @@ def main() -> None:
         ids = ids[:args.limit]
 
     import docker
+    import sys
+    if sys.platform == "win32" and "resource" not in sys.modules:
+        import types
+        res = types.ModuleType("resource")
+        res.getrlimit = lambda *args: (0, 0)
+        res.setrlimit = lambda *args: None
+        res.RLIMIT_NOFILE = 0
+        sys.modules["resource"] = res
+
     from swebench.harness.utils import load_swebench_dataset
     make_test_spec = _make_test_spec()
 
