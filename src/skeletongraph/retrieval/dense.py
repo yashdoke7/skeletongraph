@@ -103,7 +103,7 @@ def _encode(texts: List[str]):
     m.max_seq_length = min(orig_max, 512)
     try:
         embs = m.encode(
-            texts, batch_size=int(os.environ.get("SG_DENSE_BATCH_SIZE", "8")),
+            texts, batch_size=int(os.environ.get("SG_DENSE_BATCH_SIZE", "32")),
             show_progress_bar=False,
             convert_to_numpy=True, normalize_embeddings=True,
         )
@@ -123,11 +123,22 @@ def _doc_hash(doc: str) -> str:
 # In-process mirror of the on-disk store, so repeated retrieve() calls in one
 # server session don't re-read the .npz from disk. Keyed by the store path.
 _STORE_CACHE: dict = {}   # store_path -> {hash: np.ndarray}
+_LAST_STORE_PATH = None
+
 
 
 def _load_store(store_path: Path) -> dict:
+    global _LAST_STORE_PATH
     import numpy as np
-    cached = _STORE_CACHE.get(str(store_path))
+    
+    # If loading a different store, clear the old one to prevent system RAM 
+    # from filling up when iterating over many repositories (e.g., in eval).
+    path_str = str(store_path)
+    if _LAST_STORE_PATH and _LAST_STORE_PATH != path_str:
+        _STORE_CACHE.pop(_LAST_STORE_PATH, None)
+    _LAST_STORE_PATH = path_str
+
+    cached = _STORE_CACHE.get(path_str)
     if cached is not None:
         return cached
     store: dict = {}
@@ -138,7 +149,7 @@ def _load_store(store_path: Path) -> dict:
             store = {str(k): vecs[i] for i, k in enumerate(keys)}
         except Exception:
             store = {}
-    _STORE_CACHE[str(store_path)] = store
+    _STORE_CACHE[path_str] = store
     return store
 
 
