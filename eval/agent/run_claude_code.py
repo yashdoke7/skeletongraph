@@ -593,6 +593,12 @@ def reset_repo(repo: Path) -> None:
     `git clean -fd` — only -x would remove ignored files — so the index is reused."""
     _git(repo, "reset", "--hard", "HEAD")
     _git(repo, "clean", "-fd")
+    # extract_patch's `git add -A` writes each run's edited files into the object
+    # store, and agents may `git stash`; reset keeps both. A later agent can then
+    # recover an earlier run's solution with `git fsck --unreachable` (observed).
+    _git(repo, "stash", "clear")
+    _git(repo, "reflog", "expire", "--expire=now", "--all")
+    _git(repo, "prune", "--expire=now")
 
 
 def extract_patch(repo: Path) -> str:
