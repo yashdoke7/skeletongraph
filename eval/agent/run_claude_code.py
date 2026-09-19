@@ -87,7 +87,39 @@ ARM_CBMEM = "cbmem"      # competitor: Codebase-Memory MCP server (tree-sitter k
 ARM_SERENA = "serena"    # competitor: Serena MCP server (LSP-based symbol navigation, 25k stars)
 ARM_GITNEXUS = "gitnexus"  # competitor: GitNexus MCP server (knowledge graph, own SWE-bench claim)
 ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
-ARMS = (ARM_SG, ARM_FUSION, ARM_LOCATOR, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE)
+# Rules-only control: native tools and NO SG server, but SG's tool-neutral
+# behavioural rules (don't re-read, stay scoped, don't verify edits via Bash),
+# through the same channels the SG arm gets them (CLAUDE.md + one appended system
+# line). Separates what the SG integration's instructions do from what its
+# retrieval does. The text is fixed below before any run of this arm exists.
+ARM_RULES = "native-rules"
+ARMS = (ARM_SG, ARM_FUSION, ARM_LOCATOR, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE,
+        ARM_RULES)
+_NATIVE_LIKE = frozenset({ARM_NATIVE, ARM_RULES})
+
+# SG's CLAUDE.md (as installed by `sg install --ide claude-code`) with every SG tool
+# reference removed and nothing added. Kept: rule 3's "don't re-read" sentence,
+# rule 7 (stay scoped) and rule 8 (don't verify edits via Bash), wording otherwise
+# verbatim. Dropped: rules 1-6's tool instructions and the tool list.
+_RULES_ONLY_MD = """## Project rules
+
+Follow these rules every session:
+
+1. **Don't re-read.** Do NOT re-Read or re-grep code whose body you have already
+   seen; that repeats work and adds turns for nothing.
+2. **Stay scoped — stop when the task is done.** Make the smallest change that
+   correctly satisfies the request. Once the code you have is enough to complete
+   it, stop searching/reading "to be thorough". Do NOT add changelog/release
+   notes, sync type-stub (`.pyi`) files, write docs, or refactor code the task
+   does not require. Broaden scope only if the request explicitly asks for it.
+3. **Do NOT verify edits by running `inspect.getsource()` on the installed
+   package or grepping the site-packages directory.** Trust the file content you
+   read and the edits you made. Post-edit verification via Bash is wasteful
+   — if you need to confirm, re-Read the few edited lines with a narrow range.
+"""
+# Mirrors the one tool-neutral sentence of _SG_APPEND_SYSTEM.
+_RULES_APPEND_SYSTEM = ("Do NOT re-Read or re-grep code whose body you have already seen; "
+                        "that just repeats work and adds turns.")
 # SG's own MCP-server family (all launch `sg serve`, differ only in retrieval mode).
 # cbmem is a competitor MCP server; native has no MCP. Used to branch prepare/run.
 _SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_LOCATOR})
@@ -434,6 +466,8 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         elif arm == ARM_GITNEXUS:
             _gitnexus_analyze(repo)       # cheap/incremental if already indexed
             _write_gitnexus_mcp(repo)
+        elif arm == ARM_RULES:
+            (repo / "CLAUDE.md").write_text(_RULES_ONLY_MD, encoding="utf-8")
         reset_repo(repo)
         return repo
 
@@ -493,6 +527,9 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
         # above) so, like cbmem/SG, the only tracked-tree file is .mcp.json.
         _gitnexus_analyze(repo)
         _write_gitnexus_mcp(repo)
+    elif arm == ARM_RULES:
+        # CLAUDE.md is gitignored (_GITIGNORE), so it never enters the patch.
+        (repo / "CLAUDE.md").write_text(_RULES_ONLY_MD, encoding="utf-8")
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
@@ -673,6 +710,12 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
                 "--append-system-prompt",
                 _GITNEXUS_APPEND_SYSTEM.format(name=repo.name)]
+        prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+    elif arm == ARM_RULES:
+        # Same zero-MCP setup as native; only the rules differ (CLAUDE.md, written
+        # by prepare_repo, plus this appended line).
+        cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config",
+                "--append-system-prompt", _RULES_APPEND_SYSTEM]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     else:
         # An explicit EMPTY config + --strict-mcp-config ⇒ exactly zero MCP
@@ -1314,7 +1357,7 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
     # from its own Grep/Glob/Read (reconstructed at file granularity) — so the
     # paper can compare SG retrieval head-to-head against Claude Code's own.
     gold_files = task.get("gold_files", [])
-    if arm == ARM_NATIVE:
+    if arm in _NATIVE_LIKE:
         ret = _retrieval_from_native_transcript(run["transcript"], gold_files, str(repo))
     elif arm == ARM_CBMEM:
         ret = _retrieval_from_cbmem_transcript(run["transcript"], gold_files, str(repo))
@@ -1518,7 +1561,7 @@ def reprocess_retrieval(runs_dir: Path) -> None:
                 except Exception:
                     pass
         gold = rec.get("gold_files", [])
-        if rec.get("arm") == ARM_NATIVE:
+        if rec.get("arm") in _NATIVE_LIKE:
             cwd = next((o.get("cwd") for o in objs
                         if o.get("type") == "system" and o.get("cwd")), "")
             ret = _retrieval_from_native_transcript(objs, gold, cwd)
