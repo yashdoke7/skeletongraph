@@ -451,7 +451,10 @@ def main() -> None:
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--effort", default=DEFAULT_EFFORT)
     ap.add_argument("--limit", type=int, default=0, help="first N tasks in dataset order")
-    ap.add_argument("--tasks", default="", help="comma-separated task ids (overrides --limit)")
+    ap.add_argument("--range", default="", dest="task_range",
+                    help="'A-B': tasks A..B (1-based, inclusive) in dataset order, e.g. 31-40; "
+                         "lets two windows split a batch (overrides --limit)")
+    ap.add_argument("--tasks", default="", help="comma-separated task ids (overrides --limit/--range)")
     ap.add_argument("--shard", default="", help="'k/N' strided shard")
     ap.add_argument("--timeout", type=int, default=2400)
     ap.add_argument("--force", action="store_true", help="re-run tasks that already have a record")
@@ -462,6 +465,11 @@ def main() -> None:
     if args.tasks:
         want = [t.strip() for t in args.tasks.split(",") if t.strip()]
         tasks = [t for t in tasks if t["task_id"] in set(want)]
+    elif args.task_range:
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", args.task_range)
+        if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+            raise SystemExit(f"--range must look like 31-40, got {args.task_range!r}")
+        tasks = tasks[int(m.group(1)) - 1:int(m.group(2))]
     elif args.limit:
         tasks = tasks[:args.limit]
     sh = _parse_shard(args.shard)
