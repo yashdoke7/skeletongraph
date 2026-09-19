@@ -85,6 +85,20 @@ DEFAULT_EFFORT = "medium"
 PRICES = {"gpt-5.6-terra": {"input": 2.00, "cached": 0.20, "cache_write": 2.50, "output": 12.00}}
 
 CODEX = shutil.which("codex") or os.path.join(os.environ.get("APPDATA", ""), "npm", "codex.cmd")
+
+
+def _codex_argv() -> list:
+    """npm's codex.cmd runs through cmd.exe, which caps a command line at 8191 chars;
+    the SG arm's developer instructions and MCP env exceed that. Call node on the
+    package's entry script directly (CreateProcess allows 32767)."""
+    if CODEX.lower().endswith(".cmd"):
+        js = Path(CODEX).parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+        node = shutil.which("node")
+        if js.exists() and node:
+            return [node, str(js)]
+    return [CODEX]
+
+
 SG = shutil.which("sg") or "sg"
 _SECRET = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.I)
 _QUOTA = re.compile(r"usage limit|rate limit|quota|too many requests|\b429\b", re.I)
@@ -192,7 +206,7 @@ def _sg_session_context(repo: Path, prompt: str) -> str:
 
 
 def run_codex(repo: Path, issue: str, model: str, effort: str, timeout: int, arm: str) -> dict:
-    cmd = [CODEX, "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
+    cmd = [*_codex_argv(), "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
            "--dangerously-bypass-approvals-and-sandbox",
            "-m", model, "-c", f"model_reasoning_effort={_toml_str(effort)}", "-C", str(repo)]
     for f in _DISABLED_FEATURES:
@@ -364,7 +378,7 @@ def run_one_task(task: dict, arm: str, model: str, effort: str, timeout: int) ->
     stopped = "timeout" if run["timed_out"] else ("submit" if run["ok"] else "error")
     version = ""
     try:
-        version = subprocess.run([CODEX, "--version"], capture_output=True, text=True).stdout.strip()
+        version = subprocess.run([*_codex_argv(), "--version"], capture_output=True, text=True).stdout.strip()
     except Exception:
         pass
     record = {
