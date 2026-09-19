@@ -100,6 +100,15 @@ ARM_RULES = "native-rules"
 # do not search again / proceed to edit" lines). native vs sg-fusion-plain measures
 # retrieval; sg-fusion-plain vs sg-fusion measures the directives.
 ARM_PLAIN = "sg-fusion-plain"
+# Claude Code defers MCP tools behind ToolSearch, so with no mention of them the
+# agent never loads SG (observed: 0 SG calls). This names the tools and routes code
+# search through them - which tool to use, as the controlled loop's search backend
+# is - and says nothing about re-reading, verifying or when to stop.
+_PLAIN_APPEND_SYSTEM = (
+    "SkeletonGraph MCP tools are available for this repository: sg_search searches "
+    "the code, sg_expand shows the source of a function, class, file or line range, "
+    "and sg_get looks up a function or class by name. Use sg_search for code "
+    "searches in this repository instead of Grep or Glob.")
 ARMS = (ARM_SG, ARM_FUSION, ARM_LOCATOR, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE,
         ARM_RULES, ARM_PLAIN)
 _NATIVE_LIKE = frozenset({ARM_NATIVE, ARM_RULES})
@@ -451,6 +460,19 @@ def _write_plain_mcp(repo: Path) -> None:
     (repo / ".mcp.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
+def _clear_sg_session(repo: Path) -> None:
+    """No SG session history from an earlier run (sg_log/sg_overview would show it)."""
+    sg_dir = repo / ".skeletongraph"
+    for name in ("sessions", "session"):
+        d = sg_dir / name
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.is_file():
+                    f.unlink()
+    for name in ("current_session.txt", "gate_state.json", "last_hook.log"):
+        (sg_dir / name).unlink(missing_ok=True)
+
+
 def _seed_plain_index(task: dict, repo: Path) -> None:
     """Reuse the sg-fusion copy's index and dense cache (same source, and the index
     stores repo-relative paths) instead of rebuilding; drop its session state."""
@@ -500,6 +522,7 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
             (repo / "CLAUDE.md").write_text(_RULES_ONLY_MD, encoding="utf-8")
         elif arm == ARM_PLAIN:
             _write_plain_mcp(repo)
+            _clear_sg_session(repo)
         reset_repo(repo)
         return repo
 
@@ -747,9 +770,11 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
                 _GITNEXUS_APPEND_SYSTEM.format(name=repo.name)]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     elif arm == ARM_PLAIN:
-        # SG server in plain mode, same prompt as sg-fusion, nothing appended, and
+        # SG server in plain mode, same prompt as sg-fusion, only the tool-routing
+        # line appended (_PLAIN_APPEND_SYSTEM), and
         # no hooks or CLAUDE.md in the copy (prepare_repo never runs `sg install`).
-        cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config"]
+        cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
+                "--append-system-prompt", _PLAIN_APPEND_SYSTEM]
         prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
         env["SG_MCP_RETRIEVAL"] = _RETRIEVAL_MODE[arm]
         env["SG_MCP_BODY_TOP"] = str(body_top)
