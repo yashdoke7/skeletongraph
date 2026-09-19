@@ -93,8 +93,15 @@ ARM_NATIVE = "native"    # Claude Code on its own — no SG, native tools only
 # line). Separates what the SG integration's instructions do from what its
 # retrieval does. The text is fixed below before any run of this arm exists.
 ARM_RULES = "native-rules"
+# SG as a plain tool: the same server, index and fusion retrieval as sg-fusion, and
+# the same user prompt, but none of the integration's behavioural directives - no
+# CLAUDE.md rules, no hooks, no appended system prompt, and the server in
+# SG_MCP_PLAIN mode (neutral tool descriptions; results without "do not re-read /
+# do not search again / proceed to edit" lines). native vs sg-fusion-plain measures
+# retrieval; sg-fusion-plain vs sg-fusion measures the directives.
+ARM_PLAIN = "sg-fusion-plain"
 ARMS = (ARM_SG, ARM_FUSION, ARM_LOCATOR, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE,
-        ARM_RULES)
+        ARM_RULES, ARM_PLAIN)
 _NATIVE_LIKE = frozenset({ARM_NATIVE, ARM_RULES})
 
 # SG's CLAUDE.md (as installed by `sg install --ide claude-code`) with every SG tool
@@ -134,7 +141,8 @@ _SG_ARMS = frozenset({ARM_SG, ARM_FUSION, ARM_LOCATOR})
 # guarantee, not a hope.
 # sg-locator uses the SAME retrieval algorithm as sg-fusion — the ablation's
 # only variable is body delivery (tool surface), not the ranking algorithm.
-_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion", ARM_LOCATOR: "fusion"}
+_RETRIEVAL_MODE = {ARM_SG: "rerank", ARM_FUSION: "fusion", ARM_LOCATOR: "fusion",
+                   ARM_PLAIN: "fusion"}
 
 # SG artifacts + standard caches kept OUT of the agent's patch. Written to the
 # copy's .gitignore BEFORE the baseline commit, so `git add -A` never stages
@@ -435,6 +443,28 @@ def _repo_dir(task: dict, arm: str = ARM_SG) -> Path:
 
 # ── prepare: editable copy + clean baseline + (SG arm only) index + MCP ──────
 
+def _write_plain_mcp(repo: Path) -> None:
+    """The .mcp.json `sg install` would write, without its CLAUDE.md or hooks."""
+    cfg = {"mcpServers": {"skeletongraph": {
+        "type": "stdio", "command": "sg",
+        "args": ["serve", "--path", str(repo).replace("\\", "/")]}}}
+    (repo / ".mcp.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def _seed_plain_index(task: dict, repo: Path) -> None:
+    """Reuse the sg-fusion copy's index and dense cache (same source, and the index
+    stores repo-relative paths) instead of rebuilding; drop its session state."""
+    src = _repo_dir(task, ARM_FUSION) / ".skeletongraph"
+    dst = repo / ".skeletongraph"
+    if (src / "index.json").exists():
+        skip = shutil.ignore_patterns("sessions", "session", "current_session.txt",
+                                      "gate_state.json", "last_hook.log")
+        shutil.copytree(src, dst, ignore=skip, dirs_exist_ok=True)
+    else:
+        _sg(repo, "build", "--path", str(repo))
+    _warm_dense_cache(repo)   # no-op when the copied cache is warm
+
+
 def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
                  verbose: bool = True) -> Path:
     """Create (or reuse) a persistent editable copy.
@@ -468,6 +498,8 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
             _write_gitnexus_mcp(repo)
         elif arm == ARM_RULES:
             (repo / "CLAUDE.md").write_text(_RULES_ONLY_MD, encoding="utf-8")
+        elif arm == ARM_PLAIN:
+            _write_plain_mcp(repo)
         reset_repo(repo)
         return repo
 
@@ -530,6 +562,9 @@ def prepare_repo(task: dict, arm: str = ARM_SG, rebuild: bool = False,
     elif arm == ARM_RULES:
         # CLAUDE.md is gitignored (_GITIGNORE), so it never enters the patch.
         (repo / "CLAUDE.md").write_text(_RULES_ONLY_MD, encoding="utf-8")
+    elif arm == ARM_PLAIN:
+        _seed_plain_index(task, repo)
+        _write_plain_mcp(repo)
 
     # Safety net: prepare must leave a CLEAN tracked tree (SG state all ignored).
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
@@ -711,6 +746,14 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
                 "--append-system-prompt",
                 _GITNEXUS_APPEND_SYSTEM.format(name=repo.name)]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+    elif arm == ARM_PLAIN:
+        # SG server in plain mode, same prompt as sg-fusion, nothing appended, and
+        # no hooks or CLAUDE.md in the copy (prepare_repo never runs `sg install`).
+        cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config"]
+        prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+        env["SG_MCP_RETRIEVAL"] = _RETRIEVAL_MODE[arm]
+        env["SG_MCP_BODY_TOP"] = str(body_top)
+        env["SG_MCP_PLAIN"] = "1"
     elif arm == ARM_RULES:
         # Same zero-MCP setup as native; only the rules differ (CLAUDE.md, written
         # by prepare_repo, plus this appended line).
