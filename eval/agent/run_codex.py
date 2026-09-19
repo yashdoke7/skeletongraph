@@ -11,8 +11,13 @@ verify.py / stats.py / aggregate.py unchanged:
     the same project rules text Claude reads from CLAUDE.md (here written to
     AGENTS.md, which Codex reads), and the same system-level SG guidance Claude gets
     from --append-system-prompt and its session hook (here developer_instructions).
-    Claude's PreToolUse hook (defer Grep until sg_search) has no Codex equivalent
-    and is NOT reproduced — disclose this when reporting.
+    Claude's session hooks are reproduced by calling the same handlers: before each
+    run the copy's SG session history is cleared and a fresh session started
+    (SessionStart; otherwise sg_log/sg_overview would show the previous run's edits),
+    and the text Claude's UserPromptSubmit hook injected (SG guidance, constraints,
+    routed project sections) goes into developer_instructions. Claude's PreToolUse
+    hook (defer Grep until sg_search) has no Codex equivalent and is NOT reproduced
+    — disclose this when reporting.
 
 Isolation and parity choices:
   * Clean Codex home (<data root>/_codex_home, holding only a copy of auth.json) and
@@ -170,6 +175,22 @@ def _remove_agents_md(repo: Path) -> None:
         pass
 
 
+def _sg_session_context(repo: Path, prompt: str) -> str:
+    """What Claude's SG hooks give a run: a fresh session with no earlier history,
+    and the UserPromptSubmit briefing (returned here)."""
+    from skeletongraph.hooks.claude_code import hook_session_start, hook_user_prompt_submit
+    sg_dir = repo / ".skeletongraph"
+    for name in ("sessions", "session"):
+        d = sg_dir / name
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.is_file():
+                    f.unlink()
+    (sg_dir / "current_session.txt").unlink(missing_ok=True)
+    hook_session_start(repo, {})
+    return hook_user_prompt_submit(repo, {"prompt": prompt})["additionalContext"]
+
+
 def run_codex(repo: Path, issue: str, model: str, effort: str, timeout: int, arm: str) -> dict:
     cmd = [CODEX, "exec", "--json", "--ignore-user-config", "--skip-git-repo-check",
            "--dangerously-bypass-approvals-and-sandbox",
@@ -178,8 +199,8 @@ def run_codex(repo: Path, issue: str, model: str, effort: str, timeout: int, arm
         cmd += ["--disable", f]
     cmd += ["-c", 'web_search="disabled"', "-c", f"shell_environment_policy.set={_NO_NET}"]
     if arm == ARM_CX_SG:
-        from skeletongraph.hooks.claude_code import _USE_SG_SYSTEM_MSG
-        dev = _SG_APPEND_SYSTEM + "\n\n" + _USE_SG_SYSTEM_MSG
+        prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+        dev = _SG_APPEND_SYSTEM + "\n\n" + _sg_session_context(repo, prompt)
         cmd += ["-c", f"developer_instructions={_toml_str(dev)}",
                 "-c", f"mcp_servers.skeletongraph.command={_toml_str(SG.replace(chr(92), '/'))}",
                 "-c", "mcp_servers.skeletongraph.args=[\"serve\",\"--path\","
@@ -187,7 +208,6 @@ def run_codex(repo: Path, issue: str, model: str, effort: str, timeout: int, arm
                 "-c", "mcp_servers.skeletongraph.startup_timeout_sec=120",
                 "-c", "mcp_servers.skeletongraph.tool_timeout_sec=300",
                 "-c", f"mcp_servers.skeletongraph.env={_mcp_env()}"]
-        prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     else:
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     cmd.append("-")
