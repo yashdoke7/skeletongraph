@@ -100,15 +100,17 @@ ARM_RULES = "native-rules"
 # do not search again / proceed to edit" lines). native vs sg-fusion-plain measures
 # retrieval; sg-fusion-plain vs sg-fusion measures the directives.
 ARM_PLAIN = "sg-fusion-plain"
-# Claude Code defers MCP tools behind ToolSearch, so with no mention of them the
-# agent never loads SG (observed: 0 SG calls). This names the tools and routes code
-# search through them - which tool to use, as the controlled loop's search backend
-# is - and says nothing about re-reading, verifying or when to stop.
+# Claude Code defers MCP tools behind ToolSearch, and a plain mention was not enough:
+# with a routing sentence alone the agent still used Grep and never loaded SG (0 SG
+# calls in 3 test runs). So in this arm SG replaces the search tools, as the
+# controlled loop's arms each have their own search backend: Grep and Glob are
+# removed (Read, Edit and Bash stay), and this line names the tools. Nothing about
+# re-reading, verifying or when to stop.
 _PLAIN_APPEND_SYSTEM = (
-    "SkeletonGraph MCP tools are available for this repository: sg_search searches "
-    "the code, sg_expand shows the source of a function, class, file or line range, "
-    "and sg_get looks up a function or class by name. Use sg_search for code "
-    "searches in this repository instead of Grep or Glob.")
+    "SkeletonGraph MCP tools are this session's code-search tools: sg_search searches "
+    "the repository's code, sg_expand shows the source of a function, class, file or "
+    "line range, and sg_get looks up a function or class by name. Grep and Glob are "
+    "not available; use sg_search to search the code.")
 ARMS = (ARM_SG, ARM_FUSION, ARM_LOCATOR, ARM_CBMEM, ARM_SERENA, ARM_GITNEXUS, ARM_NATIVE,
         ARM_RULES, ARM_PLAIN)
 _NATIVE_LIKE = frozenset({ARM_NATIVE, ARM_RULES})
@@ -790,7 +792,7 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         # servers (no project or global leakage). Truly Claude-on-its-own.
         cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
-    if disallow_grep:
+    if disallow_grep or arm == ARM_PLAIN:
         cmd += ["--disallowedTools", "Grep", "Glob"]
     try:
         r = subprocess.run(cmd, cwd=str(repo), input=prompt, env=env,
@@ -1454,7 +1456,7 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         "repeat": 0,
         "stopped": stopped,
         "harness": "claude-code",     # real-agent arm (SG-MCP or native)
-        "disallow_grep": disallow_grep,
+        "disallow_grep": disallow_grep or arm == ARM_PLAIN,
         "repo": task.get("repo", ""),
         "base_commit": task.get("base_commit", ""),
         "gold_files": gold,
