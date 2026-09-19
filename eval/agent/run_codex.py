@@ -74,9 +74,21 @@ from .run_claude_code import (ARM_FUSION, ARM_NATIVE, _NATIVE_PROMPT, _SCOPE_BLO
 
 ARM_CX_NATIVE = "codex-native"
 ARM_CX_SG = "codex-sg-fusion"
-ARMS = (ARM_CX_NATIVE, ARM_CX_SG)
+# SG as a plain tool (counterpart of the Claude sg-fusion-plain arm): the server in
+# SG_MCP_PLAIN mode, no AGENTS.md rules, no hook briefing, a clean SG session, and one
+# line naming the tools and routing code search to sg_search. Nothing about orienting
+# first, re-reading, verifying or when to stop. Codex has no separate Grep tool to
+# remove; it searches through its shell, as Claude still can through Bash.
+ARM_CX_PLAIN = "codex-sg-plain"
+ARMS = (ARM_CX_NATIVE, ARM_CX_SG, ARM_CX_PLAIN)
+_SG_ARMS_CX = frozenset({ARM_CX_SG, ARM_CX_PLAIN})
+_CX_PLAIN_DEV = (
+    "SkeletonGraph MCP tools are this session's code-search tools: sg_search searches "
+    "the repository's code, sg_expand shows the source of a function, class, file or "
+    "line range, and sg_get looks up a function or class by name. Use sg_search to "
+    "search the code.")
 # Codex arms reuse the Claude arms' prepared copies (same code, same index).
-_COPY_ARM = {ARM_CX_NATIVE: ARM_NATIVE, ARM_CX_SG: ARM_FUSION}
+_COPY_ARM = {ARM_CX_NATIVE: ARM_NATIVE, ARM_CX_SG: ARM_FUSION, ARM_CX_PLAIN: ARM_FUSION}
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_EFFORT = "medium"
@@ -148,11 +160,12 @@ def _toml_str(s: str) -> str:
     return json.dumps(s)          # a JSON string literal is a valid TOML basic string
 
 
-def _mcp_env() -> str:
+def _mcp_env(plain: bool = False) -> str:
     env = {k: v for k, v in os.environ.items()
            if not _SECRET.search(k) and "\n" not in v and len(v) < 4000}
     env["SG_MCP_RETRIEVAL"] = "fusion"
     env["SG_MCP_BODY_TOP"] = "0"
+    env["SG_MCP_PLAIN"] = "1" if plain else "0"
     return "{" + ",".join(f"{json.dumps(k)}={_toml_str(v)}" for k, v in sorted(env.items())) + "}"
 
 
@@ -194,10 +207,7 @@ def _remove_agents_md(repo: Path) -> None:
         pass
 
 
-def _sg_session_context(repo: Path, prompt: str) -> str:
-    """What Claude's SG hooks give a run: a fresh session with no earlier history,
-    and the UserPromptSubmit briefing (returned here)."""
-    from skeletongraph.hooks.claude_code import hook_session_start, hook_user_prompt_submit
+def _clear_sg_session(repo: Path) -> None:
     sg_dir = repo / ".skeletongraph"
     for name in ("sessions", "session"):
         d = sg_dir / name
@@ -205,7 +215,15 @@ def _sg_session_context(repo: Path, prompt: str) -> str:
             for f in d.iterdir():
                 if f.is_file():
                     f.unlink()
-    (sg_dir / "current_session.txt").unlink(missing_ok=True)
+    for name in ("current_session.txt", "gate_state.json", "last_hook.log"):
+        (sg_dir / name).unlink(missing_ok=True)
+
+
+def _sg_session_context(repo: Path, prompt: str) -> str:
+    """What Claude's SG hooks give a run: a fresh session with no earlier history,
+    and the UserPromptSubmit briefing (returned here)."""
+    from skeletongraph.hooks.claude_code import hook_session_start, hook_user_prompt_submit
+    _clear_sg_session(repo)
     hook_session_start(repo, {})
     return hook_user_prompt_submit(repo, {"prompt": prompt})["additionalContext"]
 
@@ -217,16 +235,20 @@ def run_codex(repo: Path, issue: str, model: str, effort: str, timeout: int, arm
     for f in _DISABLED_FEATURES:
         cmd += ["--disable", f]
     cmd += ["-c", 'web_search="disabled"', "-c", f"shell_environment_policy.set={_NO_NET}"]
-    if arm == ARM_CX_SG:
+    if arm in _SG_ARMS_CX:
         prompt = _SG_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
-        dev = _SG_APPEND_SYSTEM + "\n\n" + _sg_session_context(repo, prompt)
+        if arm == ARM_CX_PLAIN:
+            _clear_sg_session(repo)
+            dev = _CX_PLAIN_DEV
+        else:
+            dev = _SG_APPEND_SYSTEM + "\n\n" + _sg_session_context(repo, prompt)
         cmd += ["-c", f"developer_instructions={_toml_str(dev)}",
                 "-c", f"mcp_servers.skeletongraph.command={_toml_str(SG.replace(chr(92), '/'))}",
                 "-c", "mcp_servers.skeletongraph.args=[\"serve\",\"--path\","
                       f"{_toml_str(str(repo).replace(chr(92), '/'))}]",
                 "-c", "mcp_servers.skeletongraph.startup_timeout_sec=120",
                 "-c", "mcp_servers.skeletongraph.tool_timeout_sec=300",
-                "-c", f"mcp_servers.skeletongraph.env={_mcp_env()}"]
+                "-c", f"mcp_servers.skeletongraph.env={_mcp_env(arm == ARM_CX_PLAIN)}"]
     else:
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
     cmd.append("-")
@@ -388,7 +410,7 @@ def run_one_task(task: dict, arm: str, model: str, effort: str, timeout: int) ->
         reset_repo(repo)
         raise QuotaExhausted(str(run["error"] or run["stderr"][-300:]))
     meta = parse_codex(run["objs"], task.get("gold_files", []), repo, model)
-    if arm == ARM_CX_SG and meta["sg_tool_calls"] and not meta["search_calls"]:
+    if arm in _SG_ARMS_CX and meta["sg_tool_calls"] and not meta["search_calls"]:
         print(f"  WARN {task['task_id']}: sg tools called but no sg_search result parsed")
     pm = _patch_metrics(patch)
     gold = task.get("gold_files", [])
