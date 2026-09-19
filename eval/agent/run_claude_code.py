@@ -50,6 +50,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# Captured BEFORE any import that may load the repo's .env (skeletongraph.config
+# calls load_dotenv, and the hooks import it): Claude Code prefers an API key in the
+# environment over the subscription login, so a stale key in .env fails every run
+# with "Invalid API key" and re-logging in cannot help. Only a key the user set in
+# their own shell is passed through; see run_claude.
+_SHELL_ANTHROPIC_AUTH = {k: v for k, v in os.environ.items()
+                         if k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+
 from . import config
 from .isolation import _GIT, _rmtree_safe, run_id
 from .run_agent import load_tasks
@@ -755,6 +763,13 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         "--dangerously-skip-permissions",
     ]
     env = dict(os.environ)
+    # Keep the run on the CLI's own login: drop any Anthropic key that only
+    # appeared because the repo's .env was loaded (see _SHELL_ANTHROPIC_AUTH).
+    for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        if k not in _SHELL_ANTHROPIC_AUTH:
+            env.pop(k, None)
+        else:
+            env[k] = _SHELL_ANTHROPIC_AUTH[k]
     if arm in _SG_ARMS:
         append_sys = _SG_APPEND_SYSTEM_LOCATOR if arm == ARM_LOCATOR else _SG_APPEND_SYSTEM
         cmd += ["--mcp-config", str(repo / ".mcp.json"), "--strict-mcp-config",
