@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -160,6 +161,31 @@ def run_harness(predictions: Path, run_tag: str, dataset: str,
     return candidates[-1] if candidates else Path("logs/run_evaluation")
 
 
+def _drop_stale_logs(records: list, run_id: str, arm: str) -> int:
+    """Delete this arm's per-instance harness logs for the tasks we're verifying.
+
+    The harness skips any instance whose report.json already exists under
+    logs/run_evaluation/<run_id>/<model>/<instance_id>/ — `exclude_completed` is
+    hardcoded True in run_evaluation.py and is NOT exposed as a CLI flag. Because
+    our run_id is stable (<tag>_<arm>), a task that was verified once and then
+    RE-RUN with a different patch keeps its old verdict forever: the harness
+    prints "N instances already run, skipping..." and the stale report feeds
+    straight back into `resolved`. Clearing the logs for exactly the records in
+    this batch makes the verdict match the patch on disk. Everything else (images,
+    other arms, other tasks) is untouched, so nothing is rebuilt needlessly.
+    """
+    log_dir = Path("logs") / "run_evaluation" / run_id / arm.replace("/", "__")
+    if not log_dir.is_dir():
+        return 0
+    dropped = 0
+    for r in records:
+        d = log_dir / r["task_id"]
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            dropped += 1
+    return dropped
+
+
 def _resolved_task_ids(results_path: Path) -> set:
     """Parse the harness report → set of resolved instance_ids (task_ids)."""
     try:
@@ -216,16 +242,38 @@ def main() -> None:
                          "your sampled task set spans them — verify.py merges "
                          "them into a local dataset so no instance is missed. "
                          "Empty = harness default.")
-    ap.add_argument("--cache-level", default="env",
+    ap.add_argument("--cache-level", default="instance",
                     choices=["none", "base", "env", "instance"],
-                    help="Docker image retention. Use 'instance' to KEEP per-task "
-                         "images (offline-safe reuse, max disk); 'env' (default) "
-                         "bounds disk but may rebuild/re-clone instances.")
+                    help="Docker image retention. 'instance' (default) KEEPS "
+                         "per-task images: re-verifying the same task set costs "
+                         "no rebuild and no teardown, at the price of disk. "
+                         "'env' bounds disk, but it deletes every instance image "
+                         "THIS run built — so the next verify rebuilds them, and "
+                         "the end-of-run 'Cleaning cached images...' sweep walks "
+                         "every image in the daemon. That is the usual cause of "
+                         "a verify that hangs before it starts and again after "
+                         "it finishes.")
+    ap.add_argument("--reuse-verdicts", action="store_true",
+                    help="keep the harness's existing per-instance logs instead "
+                         "of clearing them. Faster, but any task that was RE-RUN "
+                         "since its last verify keeps its OLD verdict (see "
+                         "_drop_stale_logs). Only safe when no patch changed.")
     ap.add_argument("--max-workers", type=int, default=4,
                     help="Parallel harness workers. Raise (e.g. 8-12) on an "
                          "unlimited-data/fast window to fetch+build all images "
                          "faster; lower if Docker/CPU thrash.")
     args = ap.parse_args()
+
+    # RUNS_DIR comes from SG_EVAL_RUN_TAG at import time, NOT from --run-tag, so
+    # `verify --run-tag codex_v1` with no env var used to read the wrong (parent)
+    # directory and die with "no run JSONs match the filter" — it looked like
+    # verify could not see runs that were sitting right there. Point it at the
+    # tag the user actually named.
+    if args.run_tag and args.run_tag != "sg_eval" and args.run_tag != config._RUN_TAG:
+        tagged = config.EVAL_DIR / "results" / "agent" / args.run_tag
+        if tagged.is_dir():
+            config.RUNS_DIR = tagged
+    print(f"reading run records from {config.RUNS_DIR}")
 
     stage = None if args.all else args.stage
     only = {a.strip() for a in args.only_arms.split(",") if a.strip()} or None
@@ -264,6 +312,11 @@ def main() -> None:
         preds = write_predictions(nonempty,
                                   config.RUNS_DIR / f"_predictions_{arm}.jsonl")
         tag = f"{args.run_tag}_{arm}"
+        if not args.reuse_verdicts:
+            n = _drop_stale_logs(nonempty, tag, arm)
+            if n:
+                print(f"[{arm}] cleared {n} stale harness logs "
+                      f"(else re-run tasks keep their old verdict)")
         print(f"[{arm}] {len(nonempty)} non-empty predictions -> {preds}")
         results = run_harness(preds, tag, args.dataset, args.cache_level,
                               args.max_workers, args.namespace, args.hf_split)
