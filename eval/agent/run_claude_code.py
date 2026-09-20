@@ -40,6 +40,7 @@ Then score with the existing harness (same tag):
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -64,6 +65,24 @@ from .run_agent import load_tasks
 
 SG = shutil.which("sg") or "sg"
 CLAUDE = shutil.which("claude") or "claude"
+
+
+@functools.lru_cache(maxsize=1)
+def _claude_version() -> str:
+    """`claude --version`, recorded on every run record.
+
+    The Codex driver has always stored harness_version; this one did not, so the
+    existing Claude tags carry None and we cannot say which CLI produced which
+    numbers. Two runs of an identical arm two months apart differ by ~33% in mean
+    cost, so the version is not a detail.
+    """
+    try:
+        r = subprocess.run([CLAUDE, "--version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        out = (r.stdout or "").strip().splitlines()
+        return f"claude-code {out[0].strip()}" if out else "claude-code ?"
+    except Exception:
+        return "claude-code ?"
 
 ARM_SG = "sg-rerank"     # MCP server pinned to SG_MCP_RETRIEVAL=rerank (BM25+structural, no dense)
 ARM_FUSION = "sg-fusion"  # MCP server pinned to SG_MCP_RETRIEVAL=fusion (3-way RRF incl. dense)
@@ -1543,6 +1562,7 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         "repeat": 0,
         "stopped": stopped,
         "harness": "claude-code",     # real-agent arm (SG-MCP or native)
+        "harness_version": _claude_version(),
         "disallow_grep": disallow_grep,
         "repo": task.get("repo", ""),
         "base_commit": task.get("base_commit", ""),
