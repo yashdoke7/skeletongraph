@@ -82,11 +82,12 @@ def names_gold(query: str, gold_files: list, gold_fqns: list) -> bool:
 def is_sg_arm(arm: str) -> bool:
     """True for any SkeletonGraph-capable arm (sg, sg-fusion, sg-rerank, ...).
 
-    Non-SG arms (native, cbmem, serena, ...) always carry sg_tool_calls==0 —
+    Non-SG arms (native, cbmem, serena, ...) always carry sg_tool_calls==0 -
     they never had SG to call at all, so that 0 is legitimate, not a missed
     adoption event. Only SG arms should have the sg_tool_calls==0 exclusion
     applied to their retrieval metrics.
     """
+    arm = arm.split(":")[-1]  # strip optional tag prefix
     return arm == "sg" or arm.startswith("sg-")
 
 
@@ -131,11 +132,22 @@ def main() -> None:
     ap.add_argument("--outlier-mult", type=float, default=2.5, help="flag tasks costing >Nx an arm's own median")
     args = ap.parse_args()
 
-    arm_names = [a.strip() for a in args.arms.split(",") if a.strip()]
-    if len(arm_names) < 2:
+    raw_arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    if len(raw_arms) < 2:
         raise SystemExit("need at least 2 arms to compare")
 
-    arms = {a: load_arm(args.tag, a) for a in arm_names}
+    arm_names = []
+    arms = {}
+    for a in raw_arms:
+        if ":" in a:
+            tag, name = a.split(":", 1)
+        else:
+            tag, name = args.tag, a
+            
+        label = f"{tag}:{name}" if name in arm_names else name
+        arm_names.append(label)
+        arms[label] = load_arm(tag, name)
+
     for a, d in arms.items():
         print(f"loaded {a}: {len(d)} runs")
 

@@ -315,3 +315,115 @@ if __name__ == "__main__":
     print(f"figures -> {OUT}")
     for fn in (fig1, fig2, fig3, fig4, fig5):
         fn()
+
+
+# ── fig 6 — the same retriever, eight harness operating points ──────────────
+def fig6():
+    """The headline. One retrieval system, measured against every harness we ran.
+
+    Left: its effect on tokens against how many tokens the harness spends on its
+    own. Right: its effect on pass@1 against how often the harness reaches the
+    gold file on its own. Neither effect is a property of the retriever.
+    """
+    import math
+    SET = [("ReAct·nemotron v2", "nemotron_v2", "none", "nemotron_v2", "sg-rerank"),
+           ("ReAct·nemotron v4", "nemotron_v4", "none", "nemotron_v4", "fusion"),
+           ("CC 2.1.206-211", "claude_v7", "native", "claude_v7", "sg-fusion"),
+           ("CC 2.1.211-14 (rebench)", "claude_rebench_v1", "native",
+            "claude_rebench_v1", "sg-fusion"),
+           ("CC 2.1.214 (prose)", "claude_rebench_prose_v1", "native",
+            "claude_rebench_prose_v1", "sg-fusion"),
+           ("CC 2.1.274", "claude_v7_rep2", "native", "claude_v7_rep2", "sg-fusion"),
+           ("CC 2.1.278", "claude_v8", "native", "claude_v7_rep2", "sg-fusion-plain"),
+           ("Codex 0.155.0", "codex_v1", "codex-native", "codex_v1", "codex-sg-plain")]
+
+    def tok(d):
+        v = d.get("total_input_tokens")
+        if isinstance(v, (int, float)) and v:
+            return v
+        return ((d.get("billed_input") or 0) + (d.get("cached_input") or 0)
+                + (d.get("cache_creation_input") or 0))
+
+    pts = []
+    for lab, tb, ab, tg, ag in SET:
+        A, B = load(tb)[ab], load(tg)[ag]
+        c = sorted(set(A) & set(B))
+        m0 = st.mean(tok(A[t]) for t in c)
+        m1 = st.mean(tok(B[t]) for t in c)
+        reach = 100 * sum(1 for t in c if A[t].get("edited_gold_file")) / len(c)
+        dsolve = sum(B[t]["resolved"] for t in c) - sum(A[t]["resolved"] for t in c)
+        pts.append((lab, m0, 100 * (m1 - m0) / m0, reach, dsolve * 100 / len(c)))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7.2, 3.2))
+    for ax, xs, ys, xlab, ylab, title in [
+            (ax1, [p[1] / 1000 for p in pts], [p[2] for p in pts],
+             "tokens the harness spends on its own (1000s)",
+             "effect on tokens (%)", "What retrieval costs, or saves"),
+            (ax2, [p[3] for p in pts], [p[4] for p in pts],
+             "runs reaching the gold file on its own (%)",
+             "effect on pass@1 (points)", "What retrieval buys in accuracy")]:
+        ax.axhline(0, color=MUTED, linewidth=0.8, zorder=1)
+        ax.scatter(xs, ys, s=52, color=BLUE, zorder=3,
+                   edgecolors="white", linewidths=1.2)
+        for (lab, *_), x, y in zip(pts, xs, ys):
+            ax.annotate(lab, (x, y), textcoords="offset points", xytext=(0, 9),
+                        ha="center", fontsize=6.2, color=INK2)
+        ax.set_xlabel(xlab)
+        ax.set_ylabel(ylab)
+        ax.set_title(title)
+        ax.set_axisbelow(True)
+    ax1.set_xscale("log")
+    ax1.set_ylim(-85, 88)
+    ax2.set_xlim(58, 106)
+    ax2.set_ylim(-16, 16)
+    fig.tight_layout()
+    save(fig, "fig6_effect_is_a_harness_property")
+
+
+# ── fig 7 — the corroboration gap ───────────────────────────────────────────
+def fig7():
+    """Why faster localisation does not become a faster fix.
+
+    Retrieval delivers the gold file several turns earlier, and the agent edits
+    barely earlier: the saved turns are re-absorbed into corroboration. The turn
+    of the first edit is near-invariant across every backend.
+    """
+    D = load("nemotron_v4")
+    arms = [("none", "no retrieval"), ("graphify", "graphify"), ("grep", "grep"),
+            ("bm25", "bm25"), ("fusion", "SG fusion")]
+    names, reads, edits = [], [], []
+    for arm, pretty in arms:
+        rs = [r for r in D.get(arm, {}).values()
+              if isinstance(r.get("time_to_first_gold_read_turn"), (int, float))
+              and isinstance(r.get("time_to_first_edit_turn"), (int, float))]
+        if not rs:
+            continue
+        names.append(pretty)
+        reads.append(st.mean(r["time_to_first_gold_read_turn"] for r in rs))
+        edits.append(st.mean(r["time_to_first_edit_turn"] for r in rs))
+
+    fig, ax = plt.subplots(figsize=(6.6, 3.0))
+    y = list(range(len(names)))
+    for i, (a, b) in enumerate(zip(reads, edits)):
+        ax.plot([a, b], [i, i], color="#cfcec9", linewidth=5,
+                solid_capstyle="round", zorder=2)
+        ax.text((a + b) / 2, i + 0.26, f"{b - a:.1f} turns", ha="center",
+                fontsize=7, color=INK2)
+    ax.scatter(reads, y, s=58, color=BLUE, zorder=3, label="first reads the gold file",
+               edgecolors="white", linewidths=1.2)
+    ax.scatter(edits, y, s=58, color=ORANGE, zorder=3, label="first edits anything",
+               edgecolors="white", linewidths=1.2)
+    for v, i in zip(reads, y):
+        ax.text(v, i - 0.30, f"{v:.1f}", ha="center", fontsize=7, color=INK2)
+    for v, i in zip(edits, y):
+        ax.text(v, i - 0.30, f"{v:.1f}", ha="center", fontsize=7, color=INK2)
+    ax.set_yticks(y)
+    ax.set_yticklabels(names)
+    ax.set_ylim(-0.6, len(names) - 0.25)
+    ax.set_xlim(0, 16)
+    ax.set_xlabel("turn number")
+    ax.set_title("Retrieval arrives sooner; the edit does not", pad=20)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.005), ncol=2)
+    ax.yaxis.grid(False)
+    ax.set_axisbelow(True)
+    save(fig, "fig7_corroboration_gap")
