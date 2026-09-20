@@ -828,8 +828,16 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         # servers (no project or global leakage). Truly Claude-on-its-own.
         cmd += ["--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
         prompt = _NATIVE_PROMPT.format(issue=issue, scope=_SCOPE_BLOCK)
+    # No arm may consult the internet: the upstream fix for most SWE-bench tasks is
+    # a public commit, and a run that fetches it is measuring memorisation, not
+    # localisation. Codex gets the same treatment via its dead-proxy shell env
+    # (_NO_NET in run_codex.py); Claude Code has no equivalent knob for Bash, so
+    # its two network tools are removed and Bash network use is flagged instead
+    # (see _leak_flags).
+    denied = ["WebSearch", "WebFetch"]
     if disallow_grep:
-        cmd += ["--disallowedTools", "Grep", "Glob"]
+        denied += ["Grep", "Glob"]
+    cmd += ["--disallowedTools", *denied]
     try:
         r = subprocess.run(cmd, cwd=str(repo), input=prompt, env=env,
                            capture_output=True, text=True,
@@ -854,6 +862,48 @@ def run_claude(repo: Path, issue: str, model: str, timeout: int,
         and not result.get("is_error", False)
     return {"ok": ok, "exit": exit_code, "timed_out": timed_out,
             "transcript": objs, "result": result, "raw": raw}
+
+
+# ── contamination detection ──────────────────────────────────────────────────
+# Same channels the Codex driver watches (run_codex.py): reaching the network for
+# the upstream fix, and digging unreachable git objects left by an earlier run.
+# The regexes are deliberately identical so the two harnesses' leak counts mean
+# the same thing.
+_NET_CMD = re.compile(r"\b(curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b|"
+                      r"git\s+(fetch|pull|clone|ls-remote)|pip\s+(download|install)", re.I)
+_URL = re.compile(r"https?://", re.I)
+_GIT_DIG = re.compile(r"git\s+(fsck|cat-file|reflog|stash\s+(show|list|apply|pop))|"
+                      r"lost-found|unreachable|dangling", re.I)
+
+
+def _leak_flags(objs: list) -> list:
+    """Every attempt in the transcript to reach outside the checkout.
+
+    Unlike Codex we cannot poison the shell's proxy env (Claude Code reads the
+    same env to talk to its own API), so a Bash network command here may well have
+    succeeded. Anything flagged needs looking at before the run is used.
+    """
+    flags = []
+    for o in objs:
+        if o.get("type") != "assistant":
+            continue
+        for b in (o.get("message", {}) or {}).get("content", []) or []:
+            if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                continue
+            name = b.get("name", "")
+            inp = b.get("input", {}) or {}
+            if name in ("WebSearch", "WebFetch"):
+                detail = str(inp.get("url") or inp.get("query") or "")[:200]
+                flags.append(f"{name}: {detail}")
+                continue
+            if name != "Bash":
+                continue
+            cmd = str(inp.get("command", ""))
+            if _NET_CMD.search(cmd) and _URL.search(cmd):
+                flags.append(f"bash network: {cmd[:200]}")
+            elif _GIT_DIG.search(cmd):
+                flags.append(f"bash git-dig: {cmd[:200]}")
+    return flags
 
 
 def parse_transcript(objs: list, result: dict | None) -> dict:
@@ -905,6 +955,7 @@ def parse_transcript(objs: list, result: dict | None) -> dict:
         "n_tool_calls": n_calls,
         "sg_tool_calls": sg_calls,
         "native_tool_calls": n_calls - sg_calls,
+        "leak_flags": _leak_flags(objs),
     }
 
 
@@ -1518,6 +1569,7 @@ def run_one_task(task: dict, arm: str, model: str, timeout: int,
         "n_tool_calls": meta["n_tool_calls"],
         "sg_tool_calls": meta["sg_tool_calls"],
         "native_tool_calls": meta["native_tool_calls"],
+        "leak_flags": meta["leak_flags"],
         # ── retrieval — SG arms from sg_search, native from Grep/Glob/Read ──
         "retrieval_hit": ret["retrieval_hit"],
         "retrieval_precision": ret["retrieval_precision"],
@@ -1747,6 +1799,12 @@ def main() -> None:
                     help="'k/N' — run only the k-th of N strided task shards "
                          "(1-based). Run the SAME command in N terminals.")
     ap.add_argument("--limit", type=int, default=0, help="first N tasks only")
+    ap.add_argument("--range", default="", dest="task_range",
+                    help="'A-B': tasks A..B (1-based, inclusive) in dataset order, "
+                         "e.g. 51-100; lets two windows split a batch by contiguous "
+                         "block instead of striding (overrides --limit)")
+    ap.add_argument("--tasks", default="",
+                    help="comma-separated task ids (overrides --limit/--range)")
     ap.add_argument("--workers", type=int, default=1,
                     help="concurrent claude processes IN THIS terminal (default 1; "
                          "raise only if you want one terminal to drive several)")
@@ -1767,7 +1825,17 @@ def main() -> None:
         raise SystemExit("--dataset is required (unless --reprocess)")
 
     tasks = load_tasks(Path(args.dataset))
-    if args.limit > 0:
+    # Same selection precedence as the Codex driver: --tasks > --range > --limit,
+    # then --shard strides whatever survived.
+    if args.tasks:
+        want = {t.strip() for t in args.tasks.split(",") if t.strip()}
+        tasks = [t for t in tasks if t["task_id"] in want]
+    elif args.task_range:
+        m = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", args.task_range)
+        if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+            raise SystemExit(f"--range must look like 51-100, got {args.task_range!r}")
+        tasks = tasks[int(m.group(1)) - 1:int(m.group(2))]
+    elif args.limit > 0:
         tasks = tasks[:args.limit]
     shard = _parse_shard(args.shard)
     if shard:
