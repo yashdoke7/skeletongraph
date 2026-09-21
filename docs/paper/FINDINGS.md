@@ -1,4 +1,13 @@
-# SkeletonGraph — Verified Findings Ledger
+# SkeletonGraph — Verified Findings Ledger (preprint, July 2026)
+
+> **Superseded for current results.** This ledger backs the July 2026 preprint
+> (`docs/paper/ResearchPaper.pdf`) and is kept unchanged so the preprint's numbers stay
+> checkable. The current results, and corrections to this file, are in
+> [`docs/FINDINGS.md`](../FINDINGS.md). Two corrections matter here: the `none` arm
+> below is **not closed-book** — it has no search tool but can list and read files — so
+> "35/100 tasks are solvable with no repository access" is wrong; and the cost-tail
+> result holds for Claude Code releases 2.1.206–2.1.274 but not for 2.1.278, where the
+> agent's own search changed.
 
 Every number here was recomputed from the run JSONs on 2026-07-22. This is the
 backup-of-record: if the paper and this file disagree, **this file is right**.

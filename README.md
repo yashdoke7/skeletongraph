@@ -1,7 +1,7 @@
 <!-- mcp-name: io.github.yashdoke7/skeletongraph -->
 <p align="center">
   <img src="docs/paper/figures/sg_banner.png"
-       alt="SkeletonGraph — the exact function, not a pile of files. An MCP server that indexes your repo with tree-sitter, then ranks symbols by BM25, embeddings, and the call graph, fused with reciprocal-rank fusion. First-search file recall 66% to 86%, function-level localization 0% to ~80%, cost at the 95th percentile down 42%."
+       alt="SkeletonGraph — the exact function, not a pile of files. An MCP server that indexes your repo with tree-sitter, then ranks symbols by BM25, embeddings, and the call graph, fused with reciprocal-rank fusion."
        width="100%">
 </p>
 
@@ -28,7 +28,7 @@
 </p>
 
 <p align="center">
-  <strong>Languages</strong>&nbsp;
+  <strong>Parses</strong>&nbsp;
   <img src="https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat-square&logo=javascript&logoColor=black" alt="JavaScript">
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
@@ -41,114 +41,101 @@
   <img src="https://img.shields.io/badge/PHP-777BB4?style=flat-square&logo=php&logoColor=white" alt="PHP">
 </p>
 
-**Coding agents burn tokens reading whole files to find one function. SkeletonGraph
-indexes your repo with tree-sitter — no LLM — and hands the agent the exact function
-to edit, over MCP.**
+**SkeletonGraph indexes your repository with tree-sitter — no LLM — and hands a coding
+agent the exact function it is looking for, over MCP.** It is also the instrument of a
+study of what better code retrieval actually buys an agent that has to fix the code,
+across two production agents, several of their releases, and two benchmarks. The short
+answer is below; it is more useful, and less flattering, than a token ratio.
 
 <picture>
   <source srcset="docs/paper/figures/sg_hero.gif" media="(prefers-reduced-motion: no-preference)">
   <img src="docs/paper/figures/sg_hero_still.png"
-       alt="SkeletonGraph walkthrough on a real django/django task. 1 INDEX: tree-sitter parses the repo into named function nodes joined by call edges, no LLM. 2 QUERY: the agent calls sg_search with the plain-English issue text over MCP. 3 RANK: BM25, jina-code embeddings, and the call graph each rank the same symbols in a different order. 4 FUSE: reciprocal-rank fusion merges the three orderings and _alter_field, ranked 2nd, 3rd and 2nd and top of none of them, comes out first with its file and line. 5 RESULT: first-search file recall rises from 66% to 86% and function-level localization from 0% to about 80%, while cost changes by +1.9% at the median task and −42.5% at the 95th percentile."
+       alt="SkeletonGraph walkthrough on a real django/django task: tree-sitter parses the repo into function nodes joined by call edges with no LLM; the agent calls sg_search with the issue text; BM25, code embeddings and the call graph each rank the same symbols differently; reciprocal-rank fusion puts the right function first with its file and line."
        width="100%">
 </picture>
 
 <p align="center"><em>Index once with tree-sitter (no LLM) → three signals rank the same symbols → reciprocal-rank fusion returns the exact function, served to your agent over MCP.</em></p>
 
-<p align="center"><sub>The answer is rank 2, 3, and 2 across the three signals — top of none of them. Fusing is what puts it first.</sub></p>
+## What we found
 
-SkeletonGraph is a retrieval engine purpose-built for coding agents, not a general
-RAG library retrofitted onto code. It parses a repository into function-level
-structure, a cross-file call graph, and PageRank centrality with **zero LLM calls** —
-deterministic, cheap, and instant to rebuild after every edit. At query time it
-resolves the symbols an issue names, walks the call graph outward, and reranks a
-BM25 recall pool by structural confirmation so the agent lands on the **right
-function** on the first try, instead of grepping and re-reading its way there. Its
-leaner operating point, **`sg-rerank`** (the product default), skips the dense leg
-entirely and still delivers the best file *and* function recall of any method we
-benchmarked it against — at the lowest token cost of any of them.
+We ran the same retriever in every setting we could: without an agent, in a controlled
+agent loop on an open-weight model, and inside **Claude Code** (three release windows)
+and **Codex CLI**, on SWE-bench Verified and the decontaminated SWE-rebench —
+**3,433 runs, every patch verified by running the project's tests**, every comparison
+paired by task. The evaluation covers Python repositories.
 
-The thesis: code-context tools have mostly been validated as a **token-optimization**
-game — how few tokens can you spend. SkeletonGraph re-centers the question on
-**retrieval quality** — did the agent land on the correct function — of which lower
-token cost turns out to be a *consequence*, measurable only end-to-end inside a real
-agent loop, not in an offline benchmark.
+### 1. It finds code better than every agent's own search
 
-## Results
+Without an agent, on 100 SWE-bench Verified tasks (file level):
 
-All numbers below are regenerated from the released run artifacts
-(`python -m eval.scripts.make_paper_figures`). The full verified ledger, including
-withdrawn claims, is in [`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
-
-### 1. Controlled retrieval ablation (react loop, open-weight model, 100 tasks)
-
-Identical action space for every arm; **only the retrieval backend changes**. The
-`none` arm gets no code access at all and establishes the memorization floor.
-
-| arm | pass@1 | file recall@1 | function hit | tokens (k) | turns | $/task |
-|---|--:|--:|--:|--:|--:|--:|
-| **`sg-fusion`** | **42.0%** | .737 | **57%** | **180** | 21.9 | **.052** |
-| `bm25` | 41.0% | .642 | 43% | 264 | 24.6 | .074 |
-| `graphify` (knowledge graph) | 41.0% | .223 | 9% | 275 | 25.6 | .078 |
-| `grep` | 39.0% | .647 | 0% | 282 | 22.4 | .079 |
-| `aider` (repo-map) | 36.7% | — | — | 1,126 | 18.1 | .160 |
-| `none` (no retrieval) | 35.0% | — | — | 345 | 23.6 | .066 |
-
-**`sg-fusion` is the top arm, the cheapest arm, and the only one that localizes to
-the function** (57% vs grep's 0% — lexical search is file-granular by construction).
-Against the closed-book floor of 35.0% the difference is 7 points, which is not
-statistically significant at n=100 (McNemar p = 0.14): a model with no repository
-access already solves 35 of these 100 tasks.
-
-`sg-rerank`'s recall/cost profile is reported separately in the agent-free intrinsic
-retrieval ablation in [the paper](docs/paper/ResearchPaper.pdf)
-(Table 2, §5.1) — best MRR/recall@10 short of full fusion, at the lowest index cost.
-
-### 2. Deployment: SkeletonGraph vs native Claude Code (MCP, Docker-verified)
-
-The product itself — SG as an MCP server driving **Claude Code (sonnet)** against
-Claude Code on its own tools. 100 paired SWE-bench Verified tasks:
-
-| arm | pass@1 | file recall@1 | turns | $/task |
-|---|--:|--:|--:|--:|
-| `native` (Claude's own Grep/Read) | 74/100 | .663 | 14.5 | .434 |
-| **`sg-fusion`** (SkeletonGraph MCP) | 75/100 | **.862** | **11.4** | **.371** |
-
-<sub>SG's first-search recall excludes 3 tasks where the agent never called SG at
-all — those are adoption events, not retrieval failures. Including them gives .836.</sub>
-
-**Equivalent solve rate at −14.6% cost and −21.4% turns.** The saving is not spread
-evenly — it lives almost entirely in the tail:
-
-| cost percentile | native | +SG | change |
+| ranker | MRR | recall@5 | recall@10 |
 |---|--:|--:|--:|
-| 50th (median task) | $0.255 | $0.260 | **+1.9%** |
-| 90th | $1.010 | $0.752 | −25.6% |
-| 95th (worst tasks) | $1.559 | $0.896 | **−42.5%** |
+| grep | 0.159 | 0.236 | 0.348 |
+| BM25 | 0.482 | 0.626 | 0.719 |
+| `sg-rerank` (BM25 + structure) | 0.518 | 0.701 | 0.824 |
+| BM25 + dense | 0.551 | 0.714 | 0.843 |
+| **`sg-fusion`** (BM25 + dense + structure) | **0.658** | **0.785** | **0.856** |
 
-Retrieval does nothing for the typical task and removes over 40% of the cost of the
-worst ones. Paired bootstrap 95% CI on the mean: [−25.3%, −1.2%]; McNemar on pass@1:
-p = 1.0 (no difference).
+Inside the agents, on the tasks where they called it, SkeletonGraph's first search returned
+a file the fix changes on **87–96%** of tasks, against **60–93%** for the agents' own first
+search. The largest margin was Codex, where the right file came first on 71% of tasks
+instead of 32%.
 
-### 3. What the numbers don't cover
+### 2. But the agents already found the right code — so that gain doesn't reach the fix
 
-![Retrieval changes nothing on ordinary tasks; it truncates the expensive ones](docs/paper/figures/fig_tail.png)
+<p align="center"><img src="docs/paper/figures/fig_funnel.png" alt="Funnel charts for six agent settings: the share of tasks whose first search hit the right file, that saw its code, edited it, made a patch, and were solved, with and without SkeletonGraph. In every production agent the two lines meet by the second stage; only the ReAct loop keeps a gap through the edit." width="92%"></p>
 
-That tail effect is where the chart above comes from. Retrieval quality itself holds
-up under real stress-testing: it survives having all the location cues (tracebacks,
-code blocks) stripped from the issue text, and it survives on a decontaminated
-benchmark of repos the model hasn't memorized. But better retrieval doesn't move the
-solve rate (McNemar p=1.0), and an agent given enough turns to explore on its own
-eventually learns a repo about as well as a ranked list tells it — retrieval buys
-speed and cost, not a ceiling past what patient exploration reaches.
+With or without SkeletonGraph, the production agents saw code from the right file on
+**96–100%** of tasks and edited it on **88–97%**. Of the 69 tasks whose outcome differed
+between arms, **61 were tasks where both arms had already edited the right file**: they
+differ in whether the change was correct, not in where it was made. No production-agent
+setting showed a statistically detectable solve-rate improvement from retrieval. Only an agent that often failed
+to find the code on its own — the controlled loop, whose search-free arm edited the right
+file on 65% of tasks — gained (35 → 42 solved, not statistically significant).
 
-Full methodology — the n=15→50 revision, the dose-response check, the
-cumulative-recall mechanism, and every withdrawn claim — is in
-[the paper](docs/paper/ResearchPaper.pdf) and
-[`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
+### 3. What it changes is cost — and the agent decides the direction
 
-SkeletonGraph is wrapper-first: it returns a full context packet or exposes a
-retrieval index (AST skeletons + call graph + local summaries + optional embeddings)
-so the IDE agent or CLI can choose targets.
+<p align="center"><img src="docs/paper/figures/fig_settings.png" alt="Input tokens per task with and without SkeletonGraph in eight settings, ordered by how much the agent spends on its own. In the two leanest settings SkeletonGraph adds tokens; in the six heavier ones it saves." width="92%"></p>
+
+| setting | tokens per task on its own | with SkeletonGraph |
+|---|--:|---|
+| Claude Code, SWE-rebench | 1,048,603 | **−24%** (−256k tokens, −4.7 turns, −12¢) |
+| Claude Code 2.1.206–211 | 644,504 | **−24%** (−152k tokens, −3.1 turns, −6¢) |
+| Claude Code 2.1.274 | 530,478 | **−18%** (−93k tokens, −1.9 turns, −3¢) |
+| ReAct loop (open-weight model) | 344,642 | **−48%** (−165k tokens, −1.7 turns, −1¢) |
+| Codex CLI 0.155.0 | 134,955 | +6% (+8k tokens, −0.3 turns, −0.4¢) |
+| Claude Code 2.1.278 | 112,813 | +58% (+66k tokens, +2.5 turns, +2¢) |
+
+Where an agent spends a lot searching, reading and re-checking, SkeletonGraph replaces
+that work and saves; where it already finds the code in one or two calls, the retriever is
+added on top and costs a little more. The penalty is small and bounded; the saving grows
+with how much the agent would have spent.
+
+### 4. Agents change underneath you
+
+Between Claude Code 2.1.274 and 2.1.278 — three weeks, same tasks, same prompt — the
+built-in agent went from 10.9 to 4.7 tool turns per task, read a fifth as much, ran code
+after editing on 2 tasks instead of 40, and its own first search put the right file first
+on 85 tasks instead of 59. The same SkeletonGraph setup went from saving 93k tokens a task
+to costing 66k. Anthropic's release notes document no change to the search tools; we can
+describe the change, not attribute it.
+
+### What this means if you use it
+
+- **Expect better first searches, not more solved tasks.** The bottleneck for current
+  frontier agents is turning located code into a correct fix, which retrieval does not
+  address.
+- **The saving depends on your agent and its version.** It is largest with agents and
+  tasks that explore a lot, and it can turn into a small overhead with lean ones.
+  Measure it on your own setup.
+- **Integration instructions cost tokens.** On Codex, the shipped integration added 53k
+  tokens a task against 8k for the plain one, with no detectable difference in solve
+  rate.
+
+The full account, with confidence intervals and every caveat, is in
+[`docs/FINDINGS.md`](docs/FINDINGS.md); how to reproduce it is in
+[`eval/README.md`](eval/README.md). The July 2026 preprint reported the first Claude Code
+release window only; its ledger is [`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
 
 SkeletonGraph has two product surfaces:
 
@@ -157,35 +144,27 @@ SkeletonGraph has two product surfaces:
 - **SG CLI**: terminal pipeline for route, prepare, dry-run, provider execution,
   and cost-aware model selection.
 
-## Why SkeletonGraph
+## How it works
 
-Most coding agents spend expensive turns discovering the repo:
-
-```text
-search -> read file -> read neighbor -> read tests -> realize the target
-```
-
-SkeletonGraph moves that work into a deterministic graph pipeline:
+SkeletonGraph parses a repository into function-level structure, a cross-file call graph,
+and PageRank centrality with **zero LLM calls** — deterministic, cheap, and instant to
+rebuild after every edit. At query time it resolves the symbols an issue names, walks the
+call graph outward, and ranks candidates by three signals — BM25, code embeddings, and
+structural confirmation — fused with reciprocal-rank fusion.
 
 ```text
 prompt -> (optional) retrieval planner -> classify task -> find target nodes -> expand graph -> assemble packet
 ```
 
-The goal is not only lower token cost. The useful product outcomes are:
-
-- fewer exploratory file reads
-- faster first useful answer
-- better target/test/blast-radius context
-- transparent routing reasons
-- lower model overkill for routine tasks
-- reusable packets for IDEs, CLIs, and other agents
+`sg-rerank`, the product default, skips the dense leg for a lighter index; `sg-fusion`
+adds it and ranks best in our retrieval benchmark (table above).
 
 ## Install
 
 ```bash
 pip install skeletongraph           # core: indexing, MCP server, CLI (no API key needed)
 pip install "skeletongraph[llm]"    # + litellm for sg run --execute / sg summarize --tier cloud
-pip install "skeletongraph[all]"    # everything
+pip install "skeletongraph[all]"    # everything, including the evaluation harness
 ```
 
 ## Quick Start: SG IDE
@@ -202,8 +181,7 @@ sg doctor
 
 `sg init` writes the MCP config and the agent instruction file for the selected
 IDE. SG IDE does not require an API key. Your IDE subscription/model still does
-the reasoning and editing; SkeletonGraph supplies the packet or retrieval
-signals for efficient target selection.
+the reasoning and editing; SkeletonGraph supplies the retrieval.
 
 Supported IDE setup targets include:
 
@@ -345,19 +323,21 @@ Copilot-style MCP installer.
 
 For any other MCP-capable client, or to configure it by hand, see
 [`mcp.example.json`](mcp.example.json) for the raw server config
-(`sg serve --path /path/to/your/project`).
+(`sg serve --path /path/to/your/project`). The "plain" integration measured above is
+the server started with `SG_MCP_PLAIN=1`, which removes the guidance text from tool
+descriptions and results, registered without the rules and hooks `sg install` writes.
 
 After install, restart your editor. SkeletonGraph runs as a background MCP server
 (`sg serve --path .`) that the IDE connects to automatically.
 
 ## MCP Tools
 
-Seven tools are exposed to the IDE agent. Use these **instead of** grep/glob/file reads:
+Seven tools are exposed to the agent:
 
 | Tool | When to call | Returns |
 | --- | --- | --- |
 | `sg_overview` | Session start — once per session | Constraints + top-N functions (by PageRank) + recent turns + index stats |
-| `sg_search "query"` | **Primary retrieval** — almost every prompt | Top-3 matches with body excerpts + summaries + 1-hop callers; top-4..N as signatures + summaries. One call usually enough — no need to chain. |
+| `sg_search "query"` | **Primary retrieval** | Top-3 matches with body excerpts + summaries + 1-hop callers; top-4..N as signatures + summaries |
 | `sg_get "fqn"` | When the exact FQN is known | Signature + summary + 1-hop callers + callees |
 | `sg_expand "target"` | When more body is needed than `sg_search` returned | Full function body / file / line range (token-capped) |
 | `sg_constraint list` / `propose` | Before proposing changes | Confirmed + proposed project rules |
@@ -433,8 +413,6 @@ SG auto-builds on first invocation (see `auto_build_on_query` in config).
 | `sg watch` | Daemon: auto-reindex files on save |
 
 Provider output from `sg run --execute` is written to `.skeletongraph/runs/`.
-Evaluation is currently done externally via a SWE-bench harness (see the
-[Evaluation](#evaluation) section below).
 
 ## Python API
 
@@ -451,42 +429,42 @@ print(result.recommended_model)
 print(result.routing_reason)
 ```
 
-## Architecture
+## Repository layout
 
 ```text
-src/skeletongraph/
-  parser/       AST extraction
-  graph/        dependency graph and ranking
-  storage/      .skeletongraph persistence
-  retrieval/    classification, resolution, model routing
-  assembly/     context packet construction
-  session/      memory and dedup
-  server/       MCP server
-  install/      per-IDE hook + MCP config writers (`sg install`)
-  hooks/        IDE hook handlers (prompt-submit routing, etc.)
-  llm/          LiteLLM wrapper for optional CLI execution
-  cli/          Click commands
-  engine.py     unified query pipeline
+src/skeletongraph/      the package
+  parser/                 AST extraction (tree-sitter)
+  graph/                  dependency graph and ranking
+  storage/                .skeletongraph persistence
+  retrieval/              classification, resolution, model routing
+  assembly/               context packet construction
+  session/                memory and dedup
+  server/                 MCP server
+  install/                per-IDE hook + MCP config writers (`sg install`)
+  hooks/                  IDE hook handlers
+  llm/                    LiteLLM wrapper for optional CLI execution
+  cli/                    Click commands
+  engine.py               unified query pipeline
+tests/                  unit tests (pytest)
+eval/                   the evaluation harness — see eval/README.md
+  datasets/               the frozen task sets
+docs/
+  FINDINGS.md             current results, with every caveat
+  paper/                  the July 2026 preprint, its ledger, and the figures
 ```
 
-## Evaluation
+## Reproducing the results
 
-The full methodology, verified results, and every withdrawn/superseded claim are in
-[the paper](docs/paper/ResearchPaper.pdf) and
-[`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
+Everything — task sets, drivers for every agent, verification, and the scripts behind
+every number and figure — is in [`eval/`](eval/README.md). The per-run records and
+transcripts are several gigabytes and are published with the tagged release rather than
+in git. `docs/paper/numbers_v2.json` holds the computed results, so the figures
+regenerate without them:
 
-SkeletonGraph should be evaluated on both quality and cost:
-
-- target recall and packet completeness
-- missed tests/callers
-- first useful answer latency
-- file reads after SG context
-- pass rate
-- cost per passing task
-- dynamic routing overkill/underpower rate
-- IDE compliance with SG-first context usage
-
-Cost savings are only meaningful when reported with pass rate.
+```bash
+pip install -e ".[all]"
+python -m eval.scripts.make_v2_paper_figures
+```
 
 ## License
 
@@ -495,7 +473,7 @@ distribute, for commercial and private projects alike.
 
 ## Citation
 
-If SkeletonGraph is useful in your research, please cite:
+If SkeletonGraph is useful in your research, please cite the preprint:
 
 ```bibtex
 @misc{doke2026skeletongraph,
