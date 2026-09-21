@@ -1,17 +1,18 @@
-"""Docker-free smoke test for verify.py's glue logic.
+"""Docker-free tests for verify.py's glue logic.
 
-The real pass@1 needs Docker + the official SWE-bench harness, which we cannot
-run on a dev box. But the two pieces that silently break — the predictions-file
-FORMAT and the verdict WRITE-BACK (apply_results' schema matching) — are pure
-data plumbing and ARE testable here. If either is wrong you would only find out
-mid-32B-run, after spending the compute. This catches it in one second.
+The real pass@1 needs Docker + the official SWE-bench harness. The pieces that
+silently break are pure data plumbing and ARE testable here: the predictions-file
+format, parsing the harness report, writing verdicts back into run records, and
+clearing the harness's cached per-task verdicts before a re-verify.
 
-    python -m eval.agent.test_verify
+    python -m eval.agent.test_verify          # standalone
+    python -m pytest eval/agent/test_verify.py
 """
 
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -24,103 +25,85 @@ def _rec(task_id: str, arm: str, patch: str) -> dict:
             "model": "main", "repeat": 0, "model_patch": patch}
 
 
-def test_write_predictions(tmp: Path) -> str:
-    """write_predictions emits one valid SWE-bench JSON object per run."""
+def test_write_predictions(tmp_path: Path) -> str:
+    """One valid SWE-bench JSON object per run, named by arm (one file per arm)."""
     recs = [_rec("astropy__astropy-8707", "sg", "diff --git a/x b/x\n+fix"),
-            _rec("django__django-14725", "bm25", "")]   # empty patch is legal
-    out = verify.write_predictions(recs, tmp / "_predictions.jsonl")
+            _rec("django__django-14725", "sg", "")]   # empty patch is legal
+    out = verify.write_predictions(recs, tmp_path / "_predictions.jsonl")
 
     lines = out.read_text(encoding="utf-8").splitlines()
     assert len(lines) == len(recs), f"expected {len(recs)} lines, got {len(lines)}"
     for ln, rec in zip(lines, recs):
-        obj = json.loads(ln)                       # must be valid JSON
+        obj = json.loads(ln)
         assert obj["instance_id"] == rec["task_id"], "instance_id wrong"
-        assert obj["model_name_or_path"] == rec["run_id"], "model_name wrong"
+        assert obj["model_name_or_path"] == rec["arm"], "model_name should be the arm"
         assert obj["model_patch"] == rec["model_patch"], "patch not preserved"
-        assert set(obj) == {"instance_id", "model_name_or_path",
-                            "model_patch"}, "unexpected keys in prediction"
-    return "write_predictions: valid SWE-bench JSONL, patches preserved"
+        assert set(obj) == {"instance_id", "model_name_or_path", "model_patch"}
+    return "write_predictions: valid SWE-bench JSONL, one arm per file"
 
 
-def test_apply_results_resolved_ids(tmp: Path) -> str:
-    """apply_results writes the harness verdict back into each run JSON."""
+def test_resolved_task_ids_both_shapes(tmp_path: Path) -> str:
+    """The harness report is read in either {"resolved_ids": [...]} or
+    {"resolved": [...]} shape; a corrupt report yields an empty set, not a crash."""
+    a = tmp_path / "a.json"
+    a.write_text(json.dumps({"resolved_ids": ["t1", "t2"]}), encoding="utf-8")
+    b = tmp_path / "b.json"
+    b.write_text(json.dumps({"resolved": ["t3"]}), encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json at all {{{", encoding="utf-8")
+    assert verify._resolved_task_ids(a) == {"t1", "t2"}
+    assert verify._resolved_task_ids(b) == {"t3"}
+    assert verify._resolved_task_ids(bad) == set()
+    return "_resolved_task_ids: both schema shapes parsed, corrupt file -> empty"
+
+
+def test_apply_results_writes_verdicts(tmp_path: Path) -> str:
+    """apply_results writes True/False into each run record by task_id."""
     orig = config.RUNS_DIR
-    config.RUNS_DIR = tmp
+    config.RUNS_DIR = tmp_path
     try:
         recs = [_rec("astropy__astropy-8707", "sg", "patch"),
                 _rec("django__django-14725", "sg", "patch")]
-        for r in recs:                              # apply_results overwrites these
-            (tmp / f"{r['run_id']}.json").write_text(json.dumps(r), encoding="utf-8")
-
-        # harness output: only the astropy run resolved (keyed by run_id)
-        results = tmp / "harness_results.json"
-        results.write_text(json.dumps(
-            {"resolved_ids": ["astropy__astropy-8707__sg__main__r0"]}),
-            encoding="utf-8")
-
-        verify.apply_results(recs, results)
-
-        a = json.loads((tmp / "astropy__astropy-8707__sg__main__r0.json")
-                       .read_text(encoding="utf-8"))
-        d = json.loads((tmp / "django__django-14725__sg__main__r0.json")
-                       .read_text(encoding="utf-8"))
+        for r in recs:
+            (tmp_path / f"{r['run_id']}.json").write_text(json.dumps(r), encoding="utf-8")
+        recs[0]["_path"] = "scratch"                 # must not be persisted
+        verify.apply_results(recs, {"astropy__astropy-8707"})
+        a = json.loads((tmp_path / "astropy__astropy-8707__sg__main__r0.json").read_text(encoding="utf-8"))
+        d = json.loads((tmp_path / "django__django-14725__sg__main__r0.json").read_text(encoding="utf-8"))
         assert a["resolved"] is True, "resolved run not marked True"
         assert d["resolved"] is False, "unresolved run not marked False"
         assert "_path" not in a, "_path scratch key leaked into saved JSON"
     finally:
         config.RUNS_DIR = orig
-    return "apply_results: resolved_ids verdict written back correctly"
+    return "apply_results: verdicts written back by task_id"
 
 
-def test_apply_results_task_id_fallback(tmp: Path) -> str:
-    """apply_results also matches when the harness keys by task_id, not run_id,
-    and accepts the alternate {"resolved": [...]} schema shape."""
-    orig = config.RUNS_DIR
-    config.RUNS_DIR = tmp
+def test_drop_stale_logs_only_touches_the_batch(tmp_path: Path) -> str:
+    """A re-verify clears the cached per-task verdicts for exactly the runs being
+    scored, so a re-run task is never scored against its old patch; other tasks'
+    logs are left alone."""
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
     try:
-        rec = _rec("pallets__flask-5014", "sg", "patch")
-        (tmp / f"{rec['run_id']}.json").write_text(json.dumps(rec), encoding="utf-8")
-
-        results = tmp / "harness_results2.json"
-        results.write_text(json.dumps(
-            {"resolved": ["pallets__flask-5014"]}),   # task_id key + alt shape
-            encoding="utf-8")
-
-        verify.apply_results([rec], results)
-        saved = json.loads((tmp / f"{rec['run_id']}.json")
-                           .read_text(encoding="utf-8"))
-        assert saved["resolved"] is True, "task_id fallback match failed"
+        base = Path("logs/run_evaluation/tag_sg/sg")
+        for t in ("t1", "t2", "t3"):
+            (base / t).mkdir(parents=True)
+            (base / t / "report.json").write_text("{}", encoding="utf-8")
+        n = verify._drop_stale_logs([{"task_id": "t1"}, {"task_id": "t2"}], "tag_sg", "sg")
+        assert n == 2, f"expected 2 cleared, got {n}"
+        assert not (base / "t1").exists() and not (base / "t2").exists()
+        assert (base / "t3" / "report.json").exists(), "a task outside the batch was cleared"
+        assert verify._drop_stale_logs([{"task_id": "t1"}], "no_such_tag", "sg") == 0
     finally:
-        config.RUNS_DIR = orig
-    return "apply_results: task_id fallback + alternate schema shape handled"
-
-
-def test_apply_results_unparseable(tmp: Path) -> str:
-    """A corrupt/unexpected harness file must not crash — every run gets a
-    definite False verdict so aggregate.py never reads a stale value."""
-    orig = config.RUNS_DIR
-    config.RUNS_DIR = tmp
-    try:
-        rec = _rec("mwaskom__seaborn-3069", "sg", "patch")
-        (tmp / f"{rec['run_id']}.json").write_text(json.dumps(rec), encoding="utf-8")
-
-        bad = tmp / "garbage.json"
-        bad.write_text("not json at all {{{", encoding="utf-8")
-
-        verify.apply_results([rec], bad)              # must not raise
-        saved = json.loads((tmp / f"{rec['run_id']}.json")
-                           .read_text(encoding="utf-8"))
-        assert saved["resolved"] is False, "corrupt results should yield False"
-    finally:
-        config.RUNS_DIR = orig
-    return "apply_results: corrupt harness file degrades safely to False"
+        os.chdir(cwd)
+    return "_drop_stale_logs: clears the batch, leaves everything else"
 
 
 _TESTS = [
     test_write_predictions,
-    test_apply_results_resolved_ids,
-    test_apply_results_task_id_fallback,
-    test_apply_results_unparseable,
+    test_resolved_task_ids_both_shapes,
+    test_apply_results_writes_verdicts,
+    test_drop_stale_logs_only_touches_the_batch,
 ]
 
 

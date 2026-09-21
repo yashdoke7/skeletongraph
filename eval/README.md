@@ -1,317 +1,160 @@
-# SkeletonGraph — Research Evaluation Harness
+# Evaluation harness
 
-Research-grade evaluation for the paper:
-**"Knowledge-Aware Structural Retrieval for Coding Agents: Equal Task Success at a
-Fraction of the Resident Context."**
+Everything needed to reproduce the study: what better code retrieval buys a coding
+agent, measured without an agent, in a controlled agent loop, and inside Claude Code
+and Codex CLI across releases and benchmarks. The results themselves are summarised
+in the top-level [README](../README.md) and recorded, with every caveat, in
+[`docs/FINDINGS.md`](../docs/FINDINGS.md).
 
-The thesis: structural (graph-aware) retrieval achieves equal agentic task success
-as long-context stuffing and flat RAG, while resident context tokens drop ~5-10x —
-and that linearly multiplies inference serving density (requests per GPU).
+## Layout
 
-This directory is **not shipped in the PyPI package**. It's the eval harness only.
+| path | what it is |
+|---|---|
+| `retrieval_eval.py` | retrieval-only evaluation: one backend, one task file, MRR and recall@k |
+| `backends/` | the retrieval backends compared (grep, BM25, dense, hybrid, Aider map, Graphify, codebase-memory-mcp, summary search) |
+| `agent/react.py`, `agent/run_stage.py`, `agent/run_agent.py` | the controlled ReAct loop and its stage runner |
+| `agent/run_claude_code.py` | Claude Code driver (headless `claude -p`), all Claude arms |
+| `agent/run_codex.py` | Codex CLI driver (`codex exec`), all Codex arms |
+| `agent/verify.py` | execution-based verification through the official SWE-bench harness |
+| `agent/config.py` | stages, arms, run tags, model endpoint |
+| `datasets/` | the frozen task sets ([details](datasets/README.md)) |
+| `scripts/paper_v2_analysis.py` | every number in the current paper, from run records and transcripts |
+| `scripts/make_v2_paper_figures.py`, `scripts/make_paper_figures.py` | the figures |
+| `scripts/corpus_audit.py` | an independent census and paired audit of the whole corpus |
+| `scripts/` (other) | dataset builders, repository restore, prewarming, and the analyses behind the July 2026 preprint |
+| `docs/` | arm definitions and the Claude Code runbook |
 
----
+## Requirements
 
-## 0. The six evaluation axes
+- Python 3.11 and `pip install -e ".[all]"` from the repository root.
+- Docker, for verification. The SWE-bench harness imports a POSIX-only module, so run
+  verification from Linux or WSL, not native Windows Python.
+- For the production agents: the Claude Code CLI and Codex CLI (0.155.0 in the study),
+  each signed in. Every run records the CLI version it used.
+- For the ReAct loop: any OpenAI-compatible endpoint, set with `SG_EVAL_API_BASE`,
+  `SG_EVAL_MODEL` and `SG_EVAL_API_KEY`. The study used
+  `nvidia/nemotron-3-super-120b-a12b`.
+- Results go to `eval/results/agent/<SG_EVAL_RUN_TAG>/`, one JSON per run plus the
+  agent transcript. Set `SG_EVAL_RUN_TAG` for every run.
 
-| Axis | Question | Primary instrument | Hardware |
-| --- | --- | --- | --- |
-| 1. Extrinsic task quality | Does the agent still solve the task? | SWE-bench Verified, pass@1 | Cloud API + laptop (verify) |
-| 2. Intrinsic retrieval | Did we retrieve the right code? | ContextBench + SWE-bench gold | Laptop (CPU) |
-| 3. Context efficiency | How many tokens did we spend? | tiktoken per-query log | Laptop (CPU) |
-| 4. Systems / serving | What does that cost to serve? | KV-cache calc + vLLM throughput | Laptop + RunPod (6 hr) |
-| 5. Cost | $ per *passing* task? | API billing, cached + uncached | derived |
-| 6. Ablations | Which component earns its keep? | controlled harness sweeps | Laptop + API |
+## 1. Task sets and repositories
 
-**Baselines — tiered. SG's credibility depends on beating the STRONG tier,
-not the floor. Beating only grep/flat-BM25 is strawmanning and reviewers will
-say so.**
-
-| Tier | Backends | Required by |
-| --- | --- | --- |
-| Floor (reference) | `grep` (keyword grep), `bm25` (flat BM25) | Stage 0 GO/NO-GO only |
-| Strong RAG | `hybrid` (BM25+dense fusion + cross-encoder/LLM reranker), `dense` (SOTA code embedder) | **Stage 1 — mandatory** |
-| Deployed graph competitor | `aider_map` (Aider repo-map: tree-sitter + PageRank — closest real competitor) | **Stage 1 — mandatory** |
-| Graph SOTA | CODEXGRAPH / GraphCoder (if reproducible) | Stage 2 |
-| No-retrieval | `longctx` (dump whole files, no retrieval) | all stages — the cost baseline |
-| Agentic | `native` (agent greps/reads on its own) | controlled-harness conditions |
-
-Stage 0 may run only {grep, bm25, sg} — it answers "is there a signal." The
-workshop paper MUST show SG vs `hybrid` and SG vs `aider_map`.
-
----
-
-## 1. Hardware plan
-
-Your machine: RTX 4070 8 GB (laptop) + i9-14900HX (24 cores).
-
-| Runs on the laptop | Runs on RunPod (rented) |
-| --- | --- |
-| SG indexing, retrieval, intrinsic eval (Axis 2) | vLLM throughput sweep (Axis 4 measured) |
-| Context-token logging (Axis 3) | — that's it — |
-| SWE-bench patch **verification** (Docker, CPU) | |
-| KV-cache analytical calc (Axis 4 analytical) | |
-| Ollama Tier-0.5 summary generation | |
-| All aggregation + figures | |
-
-**Why not the 4070 for serving benchmarks:** 8 GB VRAM can't hold a realistic
-model + meaningful KV cache. You'd benchmark a toy. Rent an **A100-80GB** on
-RunPod for ~6 hours (~$2/hr → ~$12, budget $30-50 with setup overhead) and run
-the throughput sweep once. Everything else is CPU and runs on the laptop.
-
-**Disk:** SWE-bench per-instance Docker images are ~1-2 GB each. For a 150-task
-subset budget ~120 GB; prune images as tasks verify (`docker image prune`).
-
----
-
-## 2. Cost & time budget
-
-| Item | Cost | Wall time |
-| --- | --- | --- |
-| Agent runs: 150 tasks x 4 backends, Haiku-class model | $150-300 | ~1 week (parallelized) |
-| — same with Sonnet-class on a 30-task quality subset | +$100-200 | overlaps |
-| RunPod A100, throughput sweep | $30-50 | 1 day |
-| SWE-bench verification (laptop Docker) | $0 | 1-2 days |
-| Intrinsic retrieval eval (laptop) | $0 | 2-4 days |
-| **Total spend** | **~$300-550** | |
-
-**Time to a paper:**
-- **Workshop paper** (Axes 2-4 + small SWE-bench + analytical KV): **3-4 weeks**.
-- **Top-tier** (all 6 axes, full ablations, ContextBench, measured throughput,
-  type/test-edge graph): **~3 months** of focused work.
-
-Recommendation: ship the **workshop paper first** — it timestamps the idea and
-gets review feedback — then extend to the top-tier venue. Acting fast matters:
-ContextBench (Feb 2026) shows the field is already benchmarking this.
-
----
-
-## 3. SG changes required BEFORE evaluating
-
-These land first — they are both genuine quality levers and the paper's
-differentiation vs CODEXGRAPH / GraphCoder (which are call-graph only).
-
-| # | Change | Why it matters for the paper | Effort |
-| --- | --- | --- | --- |
-| 1 | **Test↔code edges** — link test functions to the functions they exercise | SWE-bench *is* tests; a retriever that surfaces the covering test is a clean novel signal | ~1 wk |
-| 2 | **Type/schema nodes** — index dataclass / TypedDict / Protocol / struct / interface as first-class graph nodes | bug fixes need the data model, not just functions | ~4 d |
-| 3 | **Per-query context log** — JSONL: query, retrieved FQNs, context tokens (tiktoken), zone breakdown, latency | this IS Axis 3's raw data | ~2 d |
-| 4 | **Deterministic eval mode** — frozen summaries, fixed seeds, no network in the retrieval path | reproducibility; reviewers require it | ~2 d |
-| 5 | **Standalone baseline retrievers** — `eval/backends/{bm25_flat,dense,grep_sim}.py` | the harness needs all four conditions behind one interface | ~1 wk |
-| 6 | Inheritance/`implements` edges + import/module graph | rounds out the "multi-relational knowledge graph" claim | ~4 d |
-| 7 | (P1) Git-churn ranking signal | recently-changed code ranks higher for bug fixes | ~3 d |
-
-Track these as issues; #1-#5 are blocking, #6-#7 strengthen the top-tier version.
-
----
-
-## 4. Phase-by-phase runbook
-
-### Phase A — Environment (once)
+The committed task files keep the original machine's paths. Write a local copy that
+points at a directory of yours, then clone every repository at its base commit:
 
 ```bash
-# Laptop: SG + eval deps
-cd skeletongraph
-python -m venv .venv && . .venv/Scripts/activate      # PowerShell: .venv\Scripts\Activate.ps1
-pip install -e ".[llm,embeddings,eval]"
-pip install datasets swebench                          # SWE-bench harness + HF datasets
-
-# Docker (for SWE-bench verification) — confirm it runs
-docker run --rm hello-world
+python -m eval.scripts.relocate_tasks --dataset eval/datasets/swebench_100.jsonl --root /data/sg
+python -m eval.scripts.restore_repos  --dataset eval/datasets/swebench_100.local.jsonl
 ```
 
-Reproducible eval image (optional but recommended for the paper's artifact):
-
-```dockerfile
-# eval/Dockerfile
-FROM python:3.11-slim
-RUN apt-get update && apt-get install -y git build-essential && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY . /app/skeletongraph
-RUN pip install -e "/app/skeletongraph[llm,embeddings,eval]" && pip install datasets swebench
-ENTRYPOINT ["bash"]
-```
+Repeat for `graphify_100`, `swebench_100_prose_stripped`, `swe_rebench_100` and
+`swe_rebench_100_prose` as needed; the prose variants share clones with their originals.
+Pre-pull the verification images once, so verification can then run offline:
 
 ```bash
-docker build -t sg-eval:0.1 -f eval/Dockerfile .
+python -m eval.agent.prefetch --tasks eval/datasets/swebench_100.local.jsonl --workers 8
 ```
 
-### Phase B — Build datasets
+## 2. Retrieval only (no agent)
 
 ```bash
-# B1. Pull SWE-bench Verified, pick a stratified subset (small/med/large repos)
-python eval/make_dataset.py --split verified --n 150 \
-    --out eval/datasets/swebench_subset.jsonl
-
-# B2. Convert gold patches -> retrieval ground truth (gold_fqns / gold_files)
-python eval/make_retrieval_dataset.py \
-    --tasks eval/datasets/swebench_subset.jsonl \
-    --out   eval/datasets/swebench_retrieval.jsonl
-
-# B3. (P1) Pull ContextBench — it ships human-annotated gold contexts already
-python eval/make_dataset.py --source contextbench \
-    --out eval/datasets/contextbench_retrieval.jsonl
-```
-
-`make_dataset.py` and `make_retrieval_dataset.py` are thin scripts to write
-(see §6). Each SWE-bench instance carries `base_commit`, `patch`, `test_patch` —
-the `patch` diff tells you exactly which files/functions are gold.
-
-### Phase C — Axis 2: intrinsic retrieval (laptop, CPU, no API)
-
-```bash
-for B in sg bm25 dense grep; do
-  python eval/retrieval_eval.py \
-    --dataset eval/datasets/swebench_retrieval.jsonl \
-    --backend $B --k 5 10 20 \
-    --out eval/results/retrieval_$B.json
-done
-python eval/aggregate.py --glob "eval/results/retrieval_*.json" \
-    --out eval/figures/retrieval_table.md
-```
-
-**The money chart:** filter to gold functions whose names do NOT lexically
-appear in the issue text — "non-lexical targets". SG (graph) should recall these;
-bm25/dense miss them. `retrieval_eval.py` exposes per-task rows for this slice.
-
-### Phase D — Axis 1/3/5: controlled agent harness
-
-The agent is a **fixed minimal ReAct loop** — same model, same prompt, only the
-retrieval backend swapped. This isolates SG's contribution (a commercial IDE
-would confound it with its own context management).
-
-```bash
-# Per backend, per task: agent produces a patch + a per-query context log
-for B in native bm25 dense sg; do
-  python eval/run_agent.py \
-    --dataset eval/datasets/swebench_subset.jsonl \
-    --backend $B --model claude-haiku-4-5 \
-    --workers 6 \
-    --out eval/results/agent_$B/
+for b in grep bm25 sg-rerank bm25-dense bm25-dense-sg; do
+  python eval/retrieval_eval.py --dataset eval/datasets/graphify_100.local.jsonl \
+    --backend $b --granularity file --k 5 10 20 --out eval/results/paper_verified_${b}_file.json
 done
 ```
 
-`run_agent.py` writes per task: `patch.diff`, `context_log.jsonl`
-(tokens per turn), `usage.json` (API tokens + $). Axis 3 and 5 fall out of these.
+## 3. Controlled ReAct loop
 
-### Phase E — Axis 1: SWE-bench verification (laptop, Docker, no API)
-
-```bash
-for B in native bm25 dense sg; do
-  python -m swebench.harness.run_evaluation \
-    --predictions_path eval/results/agent_$B/predictions.jsonl \
-    --max_workers 8 --split verified \
-    --run_id sg_eval_$B
-done
-docker image prune -f         # reclaim disk between backends
-```
-
-Produces pass@1 per backend.
-
-### Phase F — Axis 4: systems / serving
+Stage `v` defines every arm; choose the ones to run.
 
 ```bash
-# F1. Analytical — laptop, instant, no GPU
-python eval/kv_cache.py --csv eval/results/kv_cache.csv
-
-# F2. Measured throughput — RunPod A100-80GB, ~6 hr
-#   On the pod:
-pip install vllm
-python eval/vllm_bench.py \
-    --model Qwen/Qwen2.5-Coder-7B-Instruct \
-    --context-lengths 8000 16000 35000 64000 128000 \
-    --out vllm_throughput.json
-#   scp vllm_throughput.json back to eval/results/
+export SG_EVAL_RUN_TAG=nemotron_v4 SG_EVAL_MODEL=nvidia/nemotron-3-super-120b-a12b
+python -m eval.agent.run_stage --stage v --dataset eval/datasets/graphify_100.local.jsonl \
+  --only-arms none,grep,bm25,fusion,graphify,aider,sg-rerank --workers 4
 ```
 
-`vllm_bench.py` sweeps context length, measures tokens/sec, TTFT, and max
-concurrent requests — the *measured* counterpart to `kv_cache.py`'s analytical
-curve. Put both on one plot: they should agree, which validates the model.
+`none` has no search tool but can list and read files; it is not closed-book.
 
-### Phase G — Aggregate + figures
+## 4. Claude Code
 
 ```bash
-python eval/aggregate.py --all --out eval/figures/
+export SG_EVAL_RUN_TAG=claude_v8
+python -m eval.agent.run_claude_code --dataset eval/datasets/swebench_100.local.jsonl --arm native
+python -m eval.agent.run_claude_code --dataset eval/datasets/swebench_100.local.jsonl --arm sg-fusion-plain
 ```
 
-Produces the paper's tables and the **headline figure**: a pass@1-vs-context-tokens
-Pareto frontier with SG's curve dominating all baselines.
+Arms: `native` (built-in tools only), `sg-fusion` (the retriever with its shipped
+integration: rules file, prompt hint, hooks), `sg-fusion-plain` (the same retriever with
+no behavioural instructions). `--range A-B` and `--tasks id,id` split a batch across
+terminals. The driver runs Claude Code on its own login (an API key in `.env` is
+ignored), denies web search and fetch, and records any shell command that reaches for
+the network or for unreachable git objects in `leak_flags`.
 
-### Phase H — Ablations (Axis 6)
-
-Re-run Phases C-E with SG variants: `--ablate graph` (no edges), `--ablate
-test-edges`, `--ablate summaries`, `--ablate pagerank`, `--ablate zones`, plus a
-`--budget` sweep (2k → 64k) for the Pareto curve.
-
----
-
-## 5. Smoke test (do FIRST — before any full run)
+## 5. Codex CLI
 
 ```bash
-# 1 easy task, all 4 backends, end to end. ~30 min.
-python eval/make_dataset.py --split verified --task-ids pytest-dev__pytest-5103 \
-    --out eval/datasets/smoke.jsonl
-python eval/make_retrieval_dataset.py --tasks eval/datasets/smoke.jsonl \
-    --out eval/datasets/smoke_retrieval.jsonl
-
-python eval/retrieval_eval.py --dataset eval/datasets/smoke_retrieval.jsonl --backend sg --k 5 10
-python eval/run_agent.py --dataset eval/datasets/smoke.jsonl --backend sg --model claude-haiku-4-5
-python eval/kv_cache.py --model qwen-coder-7b
+export SG_EVAL_RUN_TAG=codex_v1
+python -m eval.agent.run_codex --dataset eval/datasets/swebench_100.local.jsonl --arm codex-native
+python -m eval.agent.run_codex --dataset eval/datasets/swebench_100.local.jsonl --arm codex-sg-plain
+python -m eval.agent.run_codex --dataset eval/datasets/swebench_100.local.jsonl --arm codex-sg-fusion
 ```
 
-Checklist: SG index builds · retrieval returns non-empty · agent produces a
-non-empty diff · context_log.jsonl has token counts · KV calc prints a table.
-Fix anything broken here before scaling to 150 tasks.
+Codex runs with a clean configuration directory, web search disabled, and an
+unreachable proxy for shell commands.
 
----
+## 6. Verification
 
-## 6. What's built vs what to build
+From Linux or WSL:
 
-| File | Status | Notes |
-| --- | --- | --- |
-| `eval/kv_cache.py` | **done** | analytical KV + serving density; runs now |
-| `eval/retrieval_eval.py` | **done** | metrics + SG backend live; baseline backends are imports |
-| `eval/backends/bm25_flat.py` | TODO (SG change #5) | reuse SG's BM25, disable graph + centrality |
-| `eval/backends/dense.py` | TODO | code-embedding model + cosine; `sentence-transformers` |
-| `eval/backends/grep_sim.py` | TODO | keyword grep → ranked files (naive-agent baseline) |
-| `eval/make_dataset.py` | TODO | SWE-bench / ContextBench → task jsonl |
-| `eval/make_retrieval_dataset.py` | TODO | gold patch → gold_fqns / gold_files |
-| `eval/run_agent.py` | TODO | fixed ReAct loop, swappable retrieval backend |
-| `eval/vllm_bench.py` | TODO | RunPod throughput sweep |
-| `eval/aggregate.py` | TODO | results/*.json → tables + Pareto figure |
-| `eval/Dockerfile` | TODO | reproducible artifact (snippet in §4-A) |
+```bash
+python -m eval.agent.verify --run-tag claude_v8 --all
+python -m eval.scripts.verify_rebench --tag claude_rebench_v1      # SWE-rebench tags
+```
 
-`run_agent.py` is the largest piece — keep the ReAct loop minimal: a system
-prompt, a `retrieve(query)` tool bound to the chosen backend, an `edit_file`
-tool, a `run_tests` tool, capped at N turns. Log every turn's token count.
+Verification writes `resolved` into each run record. It clears the harness's cached
+per-task verdicts for the runs being scored, so a re-run task is never scored against an
+old patch (`--reuse-verdicts` opts out), and it keeps per-task Docker images by default so
+repeat verification needs no rebuild. Drop `--incremental` after re-running tasks.
 
----
+## 7. Numbers and figures
 
-## 7. Automation map
+```bash
+python -m eval.scripts.paper_v2_analysis --json docs/paper/numbers_v2.json
+python -m eval.scripts.make_v2_paper_figures        # fig_funnel, fig_settings, fig_release
+python -m eval.scripts.corpus_audit                 # census + paired audit -> tmp/corpus_audit.json
+```
 
-| Fully automated (script + cron-able) | Needs a human / account |
-| --- | --- |
-| Dataset build, retrieval eval, KV calc | RunPod pod creation (one click) |
-| Agent runs (API-driven — no GUI) | API key + budget approval |
-| SWE-bench verification, aggregation, figures | reading the final numbers |
+`docs/paper/numbers_v2.json` is committed, so the figures regenerate without the raw runs.
 
-Everything except provisioning the RunPod box and approving spend is scriptable.
-A single `eval/run_all.sh` can chain Phases B→C→D→E→G once the TODO scripts
-exist. The commercial-IDE runs (Claude Code / Cursor in-GUI) are deliberately
-**out of the main pipeline** — keep them as a separate 10-15 task "ecological
-validity" appendix, run by hand, not part of the reproducible result.
+## Run tags used in the study
 
----
+| tag | setting | CLI version | arms |
+|---|---|---|---|
+| `nemotron_v4` | ReAct loop | — | none, grep, bm25, fusion, graphify, aider, sg-rerank |
+| `nemotron_v2` | ReAct loop, earlier run | — | 15 retrieval backends |
+| `claude_v7` | Claude Code, Verified | 2.1.206–2.1.211 | native, sg-fusion |
+| `claude_v7_rep2` | Claude Code, Verified | 2.1.274 (sg-fusion-plain: 2.1.278) | native, sg-fusion, sg-fusion-plain |
+| `claude_v8` | Claude Code, Verified | 2.1.278 | native |
+| `claude_rebench_v1` | Claude Code, SWE-rebench (first 50) | 2.1.211–2.1.214 | native, sg-fusion |
+| `claude_rebench_prose_v1` | Claude Code, SWE-rebench, code removed | 2.1.214 | native, sg-fusion |
+| `codex_v1` | Codex CLI, Verified | 0.155.0 | codex-native, codex-sg-fusion, codex-sg-plain |
 
-## 8. Paper-readiness checklist
+The run records and transcripts are several gigabytes and are not in git; they are
+published with the tagged release. Runs excluded for contamination stay in the
+archive, in `<tag>/_quarantine_contaminated_*/`.
 
-- [ ] SG changes #1-#5 landed (test edges, type nodes, context log, deterministic mode, baseline backends)
-- [ ] Smoke test green
-- [ ] Axis 2 on SWE-bench gold + ContextBench, 4 backends
-- [ ] Axis 1 pass@1, 4 backends, verified
-- [ ] Axis 3 context tokens logged per task
-- [ ] Axis 4 analytical KV + measured vLLM curve agree
-- [ ] Axis 5 $/passing-task, with + without prompt caching
-- [ ] Axis 6 ablations + budget Pareto frontier
-- [ ] Failure analysis: where SG retrieval misses
-- [ ] Reproducible: `eval/Dockerfile` + pinned deps + dataset manifest
+## Things that will bite you
+
+- **Record the agent's version.** The same arm on the same tasks behaved very
+  differently between Claude Code 2.1.274 and 2.1.278. Compare arms only within one
+  release.
+- **Report tokens, not dollars.** The provider's prices changed by about a third partway
+  through the study.
+- **Token fields differ by harness.** Claude Code and Codex report `total_input_tokens`;
+  the ReAct loop's `billed_input` already includes cached tokens, so never add
+  `cached_input` to it.
+- **Single runs are noisy.** At 100 tasks only differences of roughly ten points are
+  resolvable; rely on paired comparisons.
+- **Confirm each tool was actually used.** Two slow-starting MCP servers were never
+  offered to headless Claude Code and recorded zero calls.
