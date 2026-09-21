@@ -58,6 +58,14 @@ eval/datasets/_agent_work/
 # try to stage every cloned repository in the benchmark.
 eval/datasets/_claude_repos/
 eval/datasets/*.jsonl
+# ...except the frozen task sets the published study ran on (SWE-bench Verified is
+# MIT-licensed, SWE-rebench CC-BY-4.0; see eval/datasets/README.md). Everything
+# else in eval/datasets/ is a working copy or an abandoned subset.
+!eval/datasets/swebench_100.jsonl
+!eval/datasets/graphify_100.jsonl
+!eval/datasets/swebench_100_prose_stripped.jsonl
+!eval/datasets/swe_rebench_100.jsonl
+!eval/datasets/swe_rebench_100_prose.jsonl
 eval/results/
 eval/figures/
 eval/logs/
@@ -68,6 +76,7 @@ docs/sg.md
 docs/BLUEPRINT.md
 docs/CODEMEMBENCH.md
 docs/results_memory_analysis.md
+docs/REVIEW_AND_PUBLICATION_PLAN.md
 docs/*.local.md
 EVALUATION_WORKFLOW.md
 evaluation_dataset.md
@@ -108,6 +117,7 @@ aider.*.json
 graphify.*.json
 fusion.*.json
 native.*.json
+codex-*.json
 summary-*.json
 logs/
 
@@ -129,7 +139,7 @@ docs/paper/*.blg
 # (docs/paper/ResearchPaper.pdf), the figures, and the verified-claims ledger
 # (docs/paper/FINDINGS.md) ARE committed — those are what a reader wants.
 # Keeping the .tex out avoids publishing a half-edited manuscript alongside the
-# released PDF, and keeps the eventual double-anonymous FSE build (which needs a
+# released PDF, and keeps any anonymized review build (which needs a
 # de-anonymized/anonymized pair of the same file) off the public repo.
 docs/paper/*.tex
 docs/paper/*.tex.*
@@ -140,3 +150,6 @@ eval/scripts/set_nim_env.bat
 eval/scripts/set_nim_env.ps1
 
 .aider.tags.cache.v4
+# Local scratch: analysis output and working notes (regenerable, not source)
+tmp/
+_dev/
