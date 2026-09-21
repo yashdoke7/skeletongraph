@@ -1,0 +1,746 @@
+{
+ "settings": {
+  "ReAct loop (v4)": {
+   "n": 100,
+   "base_tokens": 344642.47,
+   "tokens_delta": -164572.50999999998,
+   "tokens_pct": -47.75166275938076,
+   "ci": [
+    -58.618069925455615,
+    -34.39216232306699
+   ],
+   "turns_delta": -1.6999999999999993,
+   "usd_delta": -0.013822099999999997,
+   "p50_pct": -45.38806283412006,
+   "p90_pct": -58.60056830326575,
+   "cheaper_tasks": 77,
+   "solved": [
+    35,
+    42
+   ],
+   "discordant": [
+    5,
+    12
+   ],
+   "mcnemar_p": 0.143463134765625
+  },
+  "ReAct loop (v2)": {
+   "n": 100,
+   "base_tokens": 244123.42,
+   "tokens_delta": -69323.61000000002,
+   "tokens_pct": -28.39695183690283,
+   "ci": [
+    -39.234504127599436,
+    -15.32365241073787
+   ],
+   "turns_delta": -1.5399999999999991,
+   "usd_delta": -0.018899399999999997,
+   "p50_pct": -28.825904927046853,
+   "p90_pct": -23.671326262204587,
+   "cheaper_tasks": 61,
+   "solved": [
+    44,
+    45
+   ],
+   "discordant": [
+    6,
+    7
+   ],
+   "mcnemar_p": 1.0
+  },
+  "Claude Code 2.1.206-211": {
+   "n": 100,
+   "base_tokens": 644504.24,
+   "tokens_delta": -152316.52000000002,
+   "tokens_pct": -23.633129240546193,
+   "ci": [
+    -35.459638919972704,
+    -7.5390468326741535
+   ],
+   "turns_delta": -3.1099999999999994,
+   "usd_delta": -0.06340973,
+   "p50_pct": 2.8641278487866506,
+   "p90_pct": -37.97619404707721,
+   "cheaper_tasks": 43,
+   "solved": [
+    74,
+    75
+   ],
+   "discordant": [
+    6,
+    7
+   ],
+   "mcnemar_p": 1.0
+  },
+  "Claude Code 2.1.274": {
+   "n": 100,
+   "base_tokens": 530477.69,
+   "tokens_delta": -93274.24999999994,
+   "tokens_pct": -17.58306744247811,
+   "ci": [
+    -30.503971476948916,
+    -0.33174041744155963
+   ],
+   "turns_delta": -1.8599999999999994,
+   "usd_delta": -0.025575560000000025,
+   "p50_pct": 10.43297779137521,
+   "p90_pct": -36.40399661239778,
+   "cheaper_tasks": 42,
+   "solved": [
+    79,
+    69
+   ],
+   "discordant": [
+    11,
+    1
+   ],
+   "mcnemar_p": 0.00634765625
+  },
+  "Claude Code 2.1.278": {
+   "n": 100,
+   "base_tokens": 112812.63,
+   "tokens_delta": 65990.73999999999,
+   "tokens_pct": 58.495879406410424,
+   "ci": [
+    49.46201593911323,
+    68.46676028502766
+   ],
+   "turns_delta": 2.499999999999999,
+   "usd_delta": 0.02008741,
+   "p50_pct": 58.92594746022517,
+   "p90_pct": 44.209408885903464,
+   "cheaper_tasks": 4,
+   "solved": [
+    71,
+    73
+   ],
+   "discordant": [
+    4,
+    6
+   ],
+   "mcnemar_p": 0.75390625
+  },
+  "Claude Code, SWE-rebench": {
+   "n": 49,
+   "base_tokens": 1048602.5918367347,
+   "tokens_delta": -255641.0,
+   "tokens_pct": -24.379207336519993,
+   "ci": [
+    -39.08222466345792,
+    -5.40155934545369
+   ],
+   "turns_delta": -4.673469387755102,
+   "usd_delta": -0.11743048979591841,
+   "p50_pct": -6.720647311455899,
+   "p90_pct": -20.15413255858084,
+   "cheaper_tasks": 26,
+   "solved": [
+    27,
+    26
+   ],
+   "discordant": [
+    6,
+    5
+   ],
+   "mcnemar_p": 1.0
+  },
+  "Claude Code, SWE-rebench prose": {
+   "n": 50,
+   "base_tokens": 1119864.2,
+   "tokens_delta": -228276.0,
+   "tokens_pct": -20.384257305484006,
+   "ci": [
+    -33.314362331478534,
+    -5.885267707853367
+   ],
+   "turns_delta": -3.9800000000000004,
+   "usd_delta": -0.11160503999999993,
+   "p50_pct": -33.465678752888216,
+   "p90_pct": -18.68773496199182,
+   "cheaper_tasks": 28,
+   "solved": [
+    25,
+    22
+   ],
+   "discordant": [
+    5,
+    2
+   ],
+   "mcnemar_p": 0.453125
+  },
+  "Codex CLI 0.155.0": {
+   "n": 100,
+   "base_tokens": 134955.49,
+   "tokens_delta": 7734.360000000015,
+   "tokens_pct": 5.731045102351906,
+   "ci": [
+    -6.723271156055814,
+    21.197921849112607
+   ],
+   "turns_delta": -0.28999999999999915,
+   "usd_delta": -0.004020070000000001,
+   "p50_pct": 26.950185479597245,
+   "p90_pct": -9.828977385819055,
+   "cheaper_tasks": 32,
+   "solved": [
+    53,
+    59
+   ],
+   "discordant": [
+    5,
+    11
+   ],
+   "mcnemar_p": 0.210113525390625
+  },
+  "Codex CLI 0.155.0, shipped integration": {
+   "n": 100,
+   "base_tokens": 134955.49,
+   "tokens_delta": 53473.82000000001,
+   "tokens_pct": 39.62330098612514,
+   "ci": [
+    17.347427691827537,
+    65.89895709413724
+   ],
+   "turns_delta": 2.09,
+   "usd_delta": 0.023092840000000003,
+   "p50_pct": 72.29067302596715,
+   "p90_pct": 4.001653575857792,
+   "cheaper_tasks": 21,
+   "solved": [
+    53,
+    58
+   ],
+   "discordant": [
+    7,
+    12
+   ],
+   "mcnemar_p": 0.359283447265625
+  }
+ },
+ "funnel": {
+  "ReAct loop (v4)": {
+   "n": 100,
+   "stages": [
+    [
+     "first search hits gold",
+     0.0,
+     80.0
+    ],
+    [
+     "sees gold code",
+     88.0,
+     97.0
+    ],
+    [
+     "edits gold file",
+     65.0,
+     87.0
+    ],
+    [
+     "makes a patch",
+     74.0,
+     90.0
+    ],
+    [
+     "solved",
+     35.0,
+     42.0
+    ]
+   ],
+   "newly_edit_gold": 26,
+   "newly_edit_gold_newly_solved": 4,
+   "both_edit_gold": 61,
+   "discordant": 17,
+   "discordant_both_edited": 10,
+   "net_solve_both_edited": 6
+  },
+  "ReAct loop (v2)": {
+   "n": 100,
+   "stages": [
+    [
+     "first search hits gold",
+     0.0,
+     76.0
+    ],
+    [
+     "sees gold code",
+     95.0,
+     97.0
+    ],
+    [
+     "edits gold file",
+     80.0,
+     82.0
+    ],
+    [
+     "makes a patch",
+     86.0,
+     88.0
+    ],
+    [
+     "solved",
+     44.0,
+     45.0
+    ]
+   ],
+   "newly_edit_gold": 11,
+   "newly_edit_gold_newly_solved": 5,
+   "both_edit_gold": 71,
+   "discordant": 13,
+   "discordant_both_edited": 7,
+   "net_solve_both_edited": -3
+  },
+  "Claude Code 2.1.206-211": {
+   "n": 100,
+   "stages": [
+    [
+     "first search hits gold",
+     73.0,
+     91.0
+    ],
+    [
+     "sees gold code",
+     100.0,
+     99.0
+    ],
+    [
+     "edits gold file",
+     96.0,
+     96.0
+    ],
+    [
+     "makes a patch",
+     100.0,
+     100.0
+    ],
+    [
+     "solved",
+     74.0,
+     75.0
+    ]
+   ],
+   "newly_edit_gold": 1,
+   "newly_edit_gold_newly_solved": 0,
+   "both_edit_gold": 95,
+   "discordant": 13,
+   "discordant_both_edited": 11,
+   "net_solve_both_edited": 3
+  },
+  "Claude Code 2.1.274": {
+   "n": 100,
+   "stages": [
+    [
+     "first search hits gold",
+     69.0,
+     85.0
+    ],
+    [
+     "sees gold code",
+     99.0,
+     100.0
+    ],
+    [
+     "edits gold file",
+     97.0,
+     96.0
+    ],
+    [
+     "makes a patch",
+     100.0,
+     100.0
+    ],
+    [
+     "solved",
+     79.0,
+     69.0
+    ]
+   ],
+   "newly_edit_gold": 0,
+   "newly_edit_gold_newly_solved": 0,
+   "both_edit_gold": 96,
+   "discordant": 12,
+   "discordant_both_edited": 10,
+   "net_solve_both_edited": -8
+  },
+  "Claude Code 2.1.278": {
+   "n": 100,
+   "stages": [
+    [
+     "first search hits gold",
+     90.0,
+     92.0
+    ],
+    [
+     "sees gold code",
+     97.0,
+     98.0
+    ],
+    [
+     "edits gold file",
+     97.0,
+     97.0
+    ],
+    [
+     "makes a patch",
+     100.0,
+     100.0
+    ],
+    [
+     "solved",
+     71.0,
+     73.0
+    ]
+   ],
+   "newly_edit_gold": 0,
+   "newly_edit_gold_newly_solved": 0,
+   "both_edit_gold": 97,
+   "discordant": 10,
+   "discordant_both_edited": 9,
+   "net_solve_both_edited": 1
+  },
+  "Claude Code, SWE-rebench": {
+   "n": 49,
+   "stages": [
+    [
+     "first search hits gold",
+     67.34693877551021,
+     81.63265306122449
+    ],
+    [
+     "sees gold code",
+     97.95918367346938,
+     97.95918367346938
+    ],
+    [
+     "edits gold file",
+     89.79591836734694,
+     91.83673469387755
+    ],
+    [
+     "makes a patch",
+     97.95918367346938,
+     97.95918367346938
+    ],
+    [
+     "solved",
+     55.10204081632653,
+     53.06122448979592
+    ]
+   ],
+   "newly_edit_gold": 1,
+   "newly_edit_gold_newly_solved": 1,
+   "both_edit_gold": 44,
+   "discordant": 11,
+   "discordant_both_edited": 10,
+   "net_solve_both_edited": -2
+  },
+  "Claude Code, SWE-rebench prose": {
+   "n": 50,
+   "stages": [
+    [
+     "first search hits gold",
+     66.0,
+     80.0
+    ],
+    [
+     "sees gold code",
+     100.0,
+     96.0
+    ],
+    [
+     "edits gold file",
+     88.0,
+     88.0
+    ],
+    [
+     "makes a patch",
+     100.0,
+     98.0
+    ],
+    [
+     "solved",
+     50.0,
+     44.0
+    ]
+   ],
+   "newly_edit_gold": 0,
+   "newly_edit_gold_newly_solved": 0,
+   "both_edit_gold": 44,
+   "discordant": 7,
+   "discordant_both_edited": 7,
+   "net_solve_both_edited": -3
+  },
+  "Codex CLI 0.155.0": {
+   "n": 100,
+   "stages": [
+    [
+     "first search hits gold",
+     61.0,
+     88.0
+    ],
+    [
+     "sees gold code",
+     99.0,
+     98.0
+    ],
+    [
+     "edits gold file",
+     94.0,
+     95.0
+    ],
+    [
+     "makes a patch",
+     99.0,
+     100.0
+    ],
+    [
+     "solved",
+     53.0,
+     59.0
+    ]
+   ],
+   "newly_edit_gold": 1,
+   "newly_edit_gold_newly_solved": 1,
+   "both_edit_gold": 94,
+   "discordant": 16,
+   "discordant_both_edited": 14,
+   "net_solve_both_edited": 4
+  },
+  "Codex CLI 0.155.0, shipped integration": {
+   "n": 100,
+   "stages": [
+    [
+     "first search hits gold",
+     61.0,
+     85.0
+    ],
+    [
+     "sees gold code",
+     99.0,
+     99.0
+    ],
+    [
+     "edits gold file",
+     94.0,
+     93.0
+    ],
+    [
+     "makes a patch",
+     99.0,
+     100.0
+    ],
+    [
+     "solved",
+     53.0,
+     58.0
+    ]
+   ],
+   "newly_edit_gold": 2,
+   "newly_edit_gold_newly_solved": 1,
+   "both_edit_gold": 91,
+   "discordant": 19,
+   "discordant_both_edited": 14,
+   "net_solve_both_edited": 6
+  }
+ },
+ "retrieval": {
+  "Claude Code 2.1.206-211": {
+   "invoked": 97,
+   "n": 100,
+   "hit": [
+    75.25773195876289,
+    93.81443298969072
+   ],
+   "rank1": [
+    64.94845360824742,
+    75.25773195876289
+   ]
+  },
+  "Claude Code 2.1.274": {
+   "invoked": 94,
+   "n": 100,
+   "hit": [
+    73.40425531914893,
+    90.42553191489361
+   ],
+   "rank1": [
+    62.765957446808514,
+    75.53191489361703
+   ]
+  },
+  "Claude Code 2.1.278": {
+   "invoked": 96,
+   "n": 100,
+   "hit": [
+    92.70833333333333,
+    95.83333333333333
+   ],
+   "rank1": [
+    87.5,
+    92.70833333333333
+   ]
+  },
+  "Claude Code, SWE-rebench": {
+   "invoked": 46,
+   "n": 49,
+   "hit": [
+    69.56521739130434,
+    86.95652173913044
+   ],
+   "rank1": [
+    45.65217391304348,
+    54.34782608695652
+   ]
+  },
+  "Claude Code, SWE-rebench prose": {
+   "invoked": 46,
+   "n": 50,
+   "hit": [
+    69.56521739130434,
+    86.95652173913044
+   ],
+   "rank1": [
+    58.69565217391305,
+    58.69565217391305
+   ]
+  },
+  "Codex CLI 0.155.0": {
+   "invoked": 93,
+   "n": 100,
+   "hit": [
+    60.215053763440864,
+    89.24731182795699
+   ],
+   "rank1": [
+    32.25806451612903,
+    70.96774193548387
+   ]
+  },
+  "Codex CLI 0.155.0, shipped integration": {
+   "invoked": 98,
+   "n": 100,
+   "hit": [
+    61.224489795918366,
+    84.6938775510204
+   ],
+   "rank1": [
+    31.632653061224488,
+    47.95918367346939
+   ]
+  }
+ },
+ "release": {
+  "n": 100,
+  "rows": {
+   "turns": [
+    10.94,
+    4.69
+   ],
+   "before_edit": [
+    5.84,
+    2.7872340425531914
+   ],
+   "after_edit": [
+    5.1,
+    1.9042553191489362
+   ],
+   "reads": [
+    3.24,
+    1.12
+   ],
+   "read_chars": [
+    10135.2,
+    1811.14
+   ],
+   "searches": [
+    3.47,
+    1.7
+   ],
+   "file_list_searches": [
+    0.89,
+    0
+   ],
+   "code_runs": [
+    1.5,
+    0.1
+   ],
+   "tool_lookups": [
+    0.01,
+    0
+   ],
+   "retriever_calls": [
+    0,
+    0
+   ],
+   "all_tool_chars": [
+    14178.1,
+    3975.68
+   ],
+   "output_tokens": [
+    5093.27,
+    1446.5
+   ],
+   "ran_code_after_edit": [
+    40,
+    2
+   ]
+  }
+ },
+ "addition": {
+  "n": 100,
+  "rows": {
+   "turns": [
+    4.69,
+    7.19
+   ],
+   "before_edit": [
+    2.7872340425531914,
+    5.010752688172043
+   ],
+   "after_edit": [
+    1.9042553191489362,
+    2.010752688172043
+   ],
+   "reads": [
+    1.12,
+    1.32
+   ],
+   "read_chars": [
+    1811.14,
+    2077.09
+   ],
+   "searches": [
+    1.7,
+    1.49
+   ],
+   "file_list_searches": [
+    0,
+    0
+   ],
+   "code_runs": [
+    0.1,
+    0.09
+   ],
+   "tool_lookups": [
+    0,
+    0.96
+   ],
+   "retriever_calls": [
+    0,
+    1.33
+   ],
+   "all_tool_chars": [
+    3975.68,
+    5603.14
+   ],
+   "output_tokens": [
+    1446.5,
+    1757.02
+   ],
+   "ran_code_after_edit": [
+    2,
+    2
+   ]
+  }
+ }
+}

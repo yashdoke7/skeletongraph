@@ -643,7 +643,7 @@ def fig_ablation(tag="nemotron_v4"):
     """Pass@1 with a Wilson 95% interval against mean input tokens per task."""
     import math
     arms = [("fusion", f"{SG_SHORT}-Fusion"), ("bm25", "BM25"), ("graphify", "Graphify"),
-            ("grep", "Grep"), ("aider", "Aider map"), ("none", "Closed-book")]
+            ("grep", "Grep"), ("aider", "Aider map"), ("none", "No search")]
     pts = []
     for arm, label in arms:
         recs = [r for r in load_arm(tag, arm).values() if r.get("resolved") is not None]
