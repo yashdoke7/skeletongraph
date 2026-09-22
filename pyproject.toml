@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "skeletongraph"
 version = "0.1.1"
-description = "Token-minimal, constraint-preserving context assembly for AI coding agents"
+description = "Zero-LLM structural code retrieval for AI coding agents, served over MCP"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -96,14 +96,13 @@ Repository = "https://github.com/yashdoke7/skeletongraph"
 [tool.hatch.build.targets.wheel]
 packages = ["src/skeletongraph"]
 
-# The sdist otherwise pulls in the whole monorepo (research eval harness,
-# paper PDFs/GIFs) — none of it is needed to build or run the installed
-# package, so exclude it to keep `pip install skeletongraph` lean.
+# The sdist otherwise pulls in the whole repo (the evaluation harness, its task
+# sets, and the README images) — none of it is needed to build or run the
+# installed package, so exclude it to keep `pip install skeletongraph` lean.
 [tool.hatch.build.targets.sdist]
 exclude = [
     "/eval",
-    "/docs/paper",
-    "/docs/AMD_RUN_PLAN.md",
+    "/docs",
 ]
 
 [tool.pytest.ini_options]

@@ -1,11 +1,12 @@
 """Figures for the v2 paper: the funnel, the per-setting cost effect, the release change.
 
-    python -m eval.scripts.paper_v2_analysis --json docs/paper/numbers_v2.json
+    python -m eval.scripts.paper_v2_analysis --json eval/results_summary.json
     python -m eval.scripts.make_v2_paper_figures
 
-Reads the numbers file written by paper_v2_analysis (no number is hardcoded here)
-and writes PDF + PNG into SG_FIG_OUT (default docs/paper/figures). SG_NUMBERS
-overrides the numbers file and SG_LABEL the tool's display name.
+Reads the results file written by paper_v2_analysis (no number is hardcoded here)
+and writes the figures into SG_FIG_OUT (default docs/assets, PNG). SG_NUMBERS
+overrides the results file, SG_LABEL the tool's display name, and SG_FIG_FORMATS
+the formats written (e.g. "pdf,png").
 
 Colour: slots 1-2 of the validated categorical palette (#2a78d6, #eb6834), which
 clear the all-pairs CVD and normal-vision floors; every series is also direct-
@@ -21,9 +22,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-NUMBERS = Path(os.environ.get("SG_NUMBERS", "docs/paper/numbers_v2.json"))
-OUT = Path(os.environ.get("SG_FIG_OUT", "docs/paper/figures"))
+NUMBERS = Path(os.environ.get("SG_NUMBERS", "eval/results_summary.json"))
+OUT = Path(os.environ.get("SG_FIG_OUT", "docs/assets"))
 TOOL = os.environ.get("SG_LABEL", "SkeletonGraph")
+FORMATS = [f.strip() for f in os.environ.get("SG_FIG_FORMATS", "png").split(",") if f.strip()]
 
 BLUE, ORANGE = "#2a78d6", "#eb6834"
 INK, INK2, MUTED, GRID = "#0b0b0b", "#52514e", "#8a8985", "#e6e5e1"
@@ -42,10 +44,10 @@ def style():
 
 def save(fig, name):
     OUT.mkdir(parents=True, exist_ok=True)
-    for ext in ("pdf", "png"):
+    for ext in FORMATS:
         fig.savefig(OUT / f"{name}.{ext}")
     plt.close(fig)
-    print(f"  wrote {OUT / name}.pdf / .png")
+    print(f"  wrote {OUT / name}.{{{','.join(FORMATS)}}}")
 
 
 # ── the funnel ──────────────────────────────────────────────────────────────

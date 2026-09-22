@@ -1,6 +1,6 @@
 <!-- mcp-name: io.github.yashdoke7/skeletongraph -->
 <p align="center">
-  <img src="docs/paper/figures/sg_banner.png"
+  <img src="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/sg_banner.png"
        alt="SkeletonGraph — the exact function, not a pile of files. An MCP server that indexes your repo with tree-sitter, then ranks symbols by BM25, embeddings, and the call graph, fused with reciprocal-rank fusion."
        width="100%">
 </p>
@@ -48,8 +48,8 @@ across two production agents, several of their releases, and two benchmarks. The
 answer is below; it is more useful, and less flattering, than a token ratio.
 
 <picture>
-  <source srcset="docs/paper/figures/sg_hero.gif" media="(prefers-reduced-motion: no-preference)">
-  <img src="docs/paper/figures/sg_hero_still.png"
+  <source srcset="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/sg_hero.gif" media="(prefers-reduced-motion: no-preference)">
+  <img src="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/sg_hero_still.png"
        alt="SkeletonGraph walkthrough on a real django/django task: tree-sitter parses the repo into function nodes joined by call edges with no LLM; the agent calls sg_search with the issue text; BM25, code embeddings and the call graph each rank the same symbols differently; reciprocal-rank fusion puts the right function first with its file and line."
        width="100%">
 </picture>
@@ -83,7 +83,7 @@ instead of 32%.
 
 ### 2. But the agents already found the right code — so that gain doesn't reach the fix
 
-<p align="center"><img src="docs/paper/figures/fig_funnel.png" alt="Funnel charts for six agent settings: the share of tasks whose first search hit the right file, that saw its code, edited it, made a patch, and were solved, with and without SkeletonGraph. In every production agent the two lines meet by the second stage; only the ReAct loop keeps a gap through the edit." width="92%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/fig_funnel.png" alt="Funnel charts for six agent settings: the share of tasks whose first search hit the right file, that saw its code, edited it, made a patch, and were solved, with and without SkeletonGraph. In every production agent the two lines meet by the second stage; only the ReAct loop keeps a gap through the edit." width="92%"></p>
 
 With or without SkeletonGraph, the production agents saw code from the right file on
 **96–100%** of tasks and edited it on **88–97%**. Of the 69 tasks whose outcome differed
@@ -95,7 +95,7 @@ file on 65% of tasks — gained (35 → 42 solved, not statistically significant
 
 ### 3. What it changes is cost — and the agent decides the direction
 
-<p align="center"><img src="docs/paper/figures/fig_settings.png" alt="Input tokens per task with and without SkeletonGraph in eight settings, ordered by how much the agent spends on its own. In the two leanest settings SkeletonGraph adds tokens; in the six heavier ones it saves." width="92%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/fig_settings.png" alt="Input tokens per task with and without SkeletonGraph in eight settings, ordered by how much the agent spends on its own. In the two leanest settings SkeletonGraph adds tokens; in the six heavier ones it saves." width="92%"></p>
 
 | setting | tokens per task on its own | with SkeletonGraph |
 |---|--:|---|
@@ -132,10 +132,10 @@ describe the change, not attribute it.
   tokens a task against 8k for the plain one, with no detectable difference in solve
   rate.
 
-The full account, with confidence intervals and every caveat, is in
-[`docs/FINDINGS.md`](docs/FINDINGS.md); how to reproduce it is in
+Every result with its confidence interval and caveats is in
+[`docs/RESULTS.md`](docs/RESULTS.md); how to reproduce it is in
 [`eval/README.md`](eval/README.md). The July 2026 preprint reported the first Claude Code
-release window only; its ledger is [`docs/paper/FINDINGS.md`](docs/paper/FINDINGS.md).
+release window only.
 
 SkeletonGraph has two product surfaces:
 
@@ -449,8 +449,8 @@ tests/                  unit tests (pytest)
 eval/                   the evaluation harness — see eval/README.md
   datasets/               the frozen task sets
 docs/
-  FINDINGS.md             current results, with every caveat
-  paper/                  the July 2026 preprint, its ledger, and the figures
+  RESULTS.md              every result, with confidence intervals and caveats
+  assets/                 README images and the script that draws the banner and hero
 ```
 
 ## Reproducing the results
@@ -458,7 +458,7 @@ docs/
 Everything — task sets, drivers for every agent, verification, and the scripts behind
 every number and figure — is in [`eval/`](eval/README.md). The per-run records and
 transcripts are several gigabytes and are published with the tagged release rather than
-in git. `docs/paper/numbers_v2.json` holds the computed results, so the figures
+in git. `eval/results_summary.json` holds the computed results, so the figures
 regenerate without them:
 
 ```bash

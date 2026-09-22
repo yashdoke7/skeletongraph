@@ -4,7 +4,7 @@ Everything needed to reproduce the study: what better code retrieval buys a codi
 agent, measured without an agent, in a controlled agent loop, and inside Claude Code
 and Codex CLI across releases and benchmarks. The results themselves are summarised
 in the top-level [README](../README.md) and recorded, with every caveat, in
-[`docs/FINDINGS.md`](../docs/FINDINGS.md).
+[`docs/RESULTS.md`](../docs/RESULTS.md).
 
 ## Layout
 
@@ -18,11 +18,11 @@ in the top-level [README](../README.md) and recorded, with every caveat, in
 | `agent/verify.py` | execution-based verification through the official SWE-bench harness |
 | `agent/config.py` | stages, arms, run tags, model endpoint |
 | `datasets/` | the frozen task sets ([details](datasets/README.md)) |
-| `scripts/paper_v2_analysis.py` | every number in the current paper, from run records and transcripts |
+| `scripts/paper_v2_analysis.py` | every number in the results, from run records and transcripts |
 | `scripts/make_v2_paper_figures.py`, `scripts/make_paper_figures.py` | the figures |
 | `scripts/corpus_audit.py` | an independent census and paired audit of the whole corpus |
 | `scripts/` (other) | dataset builders, repository restore, prewarming, and the analyses behind the July 2026 preprint |
-| `docs/` | arm definitions and the Claude Code runbook |
+| `docs/ARM_FLOWS.md` | how each arm wraps the agent's tools |
 
 ## Requirements
 
@@ -120,12 +120,14 @@ repeat verification needs no rebuild. Drop `--incremental` after re-running task
 ## 7. Numbers and figures
 
 ```bash
-python -m eval.scripts.paper_v2_analysis --json docs/paper/numbers_v2.json
+python -m eval.scripts.paper_v2_analysis --json eval/results_summary.json
 python -m eval.scripts.make_v2_paper_figures        # fig_funnel, fig_settings, fig_release
 python -m eval.scripts.corpus_audit                 # census + paired audit -> tmp/corpus_audit.json
 ```
 
-`docs/paper/numbers_v2.json` is committed, so the figures regenerate without the raw runs.
+`eval/results_summary.json` is committed, so the figures regenerate without the raw runs;
+they are written to `docs/assets/`. `python docs/assets/make_hero.py` redraws the README
+banner and hero animation.
 
 ## Run tags used in the study
 

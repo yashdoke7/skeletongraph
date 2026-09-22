@@ -1,7 +1,7 @@
 """Every number in the v2 paper's new sections, from the run records and transcripts.
 
     python -m eval.scripts.paper_v2_analysis            # print all tables
-    python -m eval.scripts.paper_v2_analysis --json docs/paper/numbers_v2.json
+    python -m eval.scripts.paper_v2_analysis --json eval/results_summary.json
 
 Sections it feeds:
   settings  - the same retriever in each agent setting: tokens, turns, cost, pass@1

@@ -13,17 +13,18 @@ The worked example is one real task (django/django). The point of beat 4 is
 that the answer is rank 2 / 3 / 2 -- top of nothing -- and still wins the
 fusion. That is the argument for fusing, and it is true.
 
-Every number shown is measured and carries its baseline. The cost chart is
-deliberately two bars, because the honest headline is that the median did
-not move and the tail collapsed.
+Every number shown is measured and carries its baseline. The cost chart shows
+settings where the retriever saves AND where it costs, because the honest
+headline is that the direction depends on the agent, and that solve rate did
+not move. Numbers: eval/results_summary.json (python -m eval.scripts.paper_v2_analysis).
 
-Outputs
-  sg_hero.gif        1120x630  16:9, README (variable frame holds)
-  sg_hero.mp4        1080x1350 4:5, LinkedIn (core framed by title/stat bands)
-  sg_hero_still.png  1120x630  the fuse frame
+Outputs (written next to this script)
   sg_banner.png      1600x460  README header
+  sg_hero.gif        1120x630  16:9, README (variable frame holds)
+  sg_hero_still.png  1120x630  the fuse frame
+  sg_hero.mp4        1080x1350 4:5 social video, only with --mp4 (not committed)
 
-Usage:  python sg_hero.py
+Usage:  python docs/assets/make_hero.py [--mp4]
 """
 import os
 
@@ -382,58 +383,61 @@ def frame(t):
     # ---- beat 5: charted results, baselines attached
     if a_buys > 0.01:
         ba = a_buys
-        text(d, (M, 146), "MEASURED ON 100 SWE-bench VERIFIED TASKS  ·  "
-                          "EVERY FIX RUN AGAINST THE REPO'S OWN TESTS", "bold", 14,
+        text(d, (M, 146), "3,433 RUNS  ·  CLAUDE CODE, CODEX CLI, A REACT LOOP  ·  "
+                          "EVERY PATCH RUN AGAINST THE REPO'S OWN TESTS", "bold", 14,
              fade(DIM, ba))
+        prog = smooth(seg(t, 0.90, 0.99))
 
-        # left: retrieval accuracy, baseline vs SkeletonGraph
-        text(d, (M, 186), "retrieval accuracy", "bold", 19, fade(INK, ba))
+        # left: finding the code, baseline vs SkeletonGraph (Codex CLI, the 93
+        # tasks where it was called; the other agents show the same ordering)
+        text(d, (M, 186), "finding the code  ·  Codex CLI", "bold", 19, fade(INK, ba))
         bw = 300
         for gi, (lab, base_v, sg_v, col) in enumerate(
-                [("first-search file recall", .663, .862, GREEN),
-                 ("function-level localization", .0, .80, BLUE)]):
+                [("first search hits the right file", .60, .89, GREEN),
+                 ("right file ranked first", .32, .71, BLUE)]):
             gy = 228 + gi * 108
             text(d, (M, gy), lab, "reg", 16, fade(MUT, ba))
             for bi, (v, c) in enumerate(((base_v, STEEL), (sg_v, col))):
                 by = gy + 26 + bi * 30
-                bar(d, M, by, bw, 20, v * smooth(seg(t, 0.90, 0.99)), c, ba)
+                bar(d, M, by, bw, 20, v * prog, c, ba)
                 text(d, (M + bw + 14, by + 1), f"{int(round(v*100))}%", "bold", 16,
                      fade(c, ba))
         lx = M
-        for sw, lab in ((STEEL, "agent's own tools"), (GREEN, "+ SkeletonGraph")):
+        for sw, lab in ((STEEL, "agent's own search"), (GREEN, "+ SkeletonGraph")):
             rrect(d, (lx, 454, lx + 14, 466), 3, fill=fade(sw, ba))
             text(d, (lx + 22, 452), lab, "reg", 14, fade(MUT, ba))
             lx += tw(lab, "reg", 14) + 56
 
-        # right: the honest cost story -- two bars, one axis
-        rx = 640
-        text(d, (rx, 186), "cost per task vs. the agent's own tools", "bold", 19,
+        # right: input tokens per task -- saves where the agent explores a lot,
+        # costs where it does not. One axis, signed bars.
+        rx = 620
+        text(d, (rx, 186), "input tokens per task, with SkeletonGraph", "bold", 19,
              fade(INK, ba))
-        ax = 930
-        d.line([p(ax), p(224), p(ax), p(400)], fill=fade(EDGE, ba), width=p(1))
+        ax = 905
+        d.line([p(ax), p(222), p(ax), p(402)], fill=fade(EDGE, ba), width=p(1))
         text(d, (ax, 404), "0", "mono", 13, fade(DIM, ba), anchor="ma")
-        scale = 190 / 45.0
-        prog = smooth(seg(t, 0.90, 0.99))
-        for bi, (lab, pct, col) in enumerate(
-                [("median task  (p50)", +1.9, MUT), ("worst 5%  (p95)", -42.5, GREEN)]):
-            by = 246 + bi * 78
-            text(d, (rx, by - 22), lab, "reg", 16, fade(MUT, ba))
+        scale = 135 / 60.0
+        for bi, (lab, pct) in enumerate(
+                [("Claude Code, SWE-rebench", -24), ("ReAct loop", -48),
+                 ("Codex CLI", +6), ("Claude Code 2.1.278", +58)]):
+            by = 226 + bi * 44
+            text(d, (rx, by + 3), lab, "reg", 15, fade(MUT, ba))
+            col = GREEN if pct < 0 else AMBER
             wpx = abs(pct) * scale * prog
             if pct >= 0:
-                rrect(d, (ax, by, ax + max(3, wpx), by + 26), 5, fill=fade(col, ba * .8))
+                rrect(d, (ax, by, ax + max(3, wpx), by + 24), 5, fill=fade(col, ba * .9))
+                text(d, (ax + wpx + 10, by + 2), f"+{pct}%", "bold", 16, fade(col, ba))
             else:
-                rrect(d, (ax - wpx, by, ax, by + 26), 5, fill=fade(col, ba))
-            text(d, (ax + 16 if pct >= 0 else ax - wpx - 16, by + 3),
-                 f"{pct:+.1f}%", "bold", 18, fade(col, ba),
-                 anchor="la" if pct >= 0 else "ra")
-        text(d, (rx, 424), "the median task did not get cheaper.", "reg", 17,
+                rrect(d, (ax - wpx, by, ax, by + 24), 5, fill=fade(col, ba))
+                text(d, (ax + 10, by + 2), f"\u2212{abs(pct)}%", "bold", 16, fade(col, ba))
+        text(d, (rx, 424), "saves where the agent explores a lot;", "reg", 17,
              fade(INK, ba))
-        text(d, (rx, 448), "the expensive tail did — that is the whole finding.",
-             "reg", 17, fade(AMBER, ba * .9))
+        text(d, (rx, 448), "adds a little where it already finds the code fast.",
+             "reg", 17, fade(INK, ba))
 
-        text(d, (M, 500), "accuracy is not the product. fewer turns before the agent "
-                          "commits is.", "reg", 16, fade(DIM, ba))
-        text(d, (M, 560), "github.com/yashdoke/skeletongraph", "mono", 16,
+        text(d, (M, 500), "solve rate: no detectable change. the agents already found the code; "
+                          "the hard part is the fix.", "reg", 16, fade(AMBER, ba * .9))
+        text(d, (M, 560), "github.com/yashdoke7/skeletongraph", "mono", 16,
              fade(MUT, ba))
         text(d, (W - M, 560), "preprint  ·  10.21203/rs.3.rs-10749266/v1", "mono", 15,
              fade(DIM, ba), anchor="ra")
@@ -507,9 +511,9 @@ def save_mp4(tl, frames, fps=25):
          "reg", 19, MUT)
     by = top + core_h + 34
     d.line([p(60), p(by - 18), p(VW - 60), p(by - 18)], fill=EDGE, width=p(1))
-    rows = [("first-search file recall", "66%", "86%", GREEN),
-            ("function-level localization", "0%", "~80%", BLUE),
-            ("cost at the 95th percentile", "", "−42%", AMBER)]
+    rows = [("first search hits the right file", "60–93%", "87–96%", GREEN),
+            ("tokens, agents that explore a lot", "", "−18 to −48%", BLUE),
+            ("tokens, lean agents", "", "+6 to +58%", AMBER)]
     for i, (lab, was, now, col) in enumerate(rows):
         ry = by + 14 + i * 52
         text(d, (62, ry), lab, "reg", 22, INK)
@@ -517,8 +521,8 @@ def save_mp4(tl, frames, fps=25):
             text(d, (600, ry), was, "bold", 22, DIM)
             text(d, (672, ry), "→", "reg", 21, DIM)
         text(d, (716, ry - 3), now, "bold", 27, col)
-    text(d, (62, by + 184), "100 SWE-bench Verified tasks · Docker-verified · the median "
-                            "task did not move, the tail did", "reg", 16, DIM)
+    text(d, (62, by + 184), "3,433 test-verified runs · Claude Code · Codex CLI · ReAct "
+                            "loop · no detectable change in solve rate", "reg", 16, DIM)
     plate = plate.resize((VW, VH), Image.LANCZOS)
 
     path = os.path.join(HERE, "sg_hero.mp4")
@@ -572,15 +576,17 @@ def banner():
          "reg", 20, MUT)
     text(d, (76, 244), "symbols by BM25 + embeddings + call graph, fused with RRF",
          "reg", 20, MUT)
-    for i, (lab, val, col) in enumerate(
-            [("first-search file recall", "66% → 86%", GREEN),
-             ("function-level localization", "0% → ~80%", BLUE),
-             ("cost at the 95th percentile", "−42%", AMBER)]):
+    for i, (lab, val, note, col) in enumerate(
+            [("first search hits the right file", "87–96%", "agents' own search: 60–93%", GREEN),
+             ("tokens, agents that explore a lot", "−18 to −48%", "", BLUE),
+             ("tokens, lean agents", "+6 to +58%", "", AMBER)]):
         y = 300 + i * 40
         text(d, (76, y), lab, "reg", 19, MUT)
         text(d, (420, y - 2), val, "bold", 21, col)
-    text(d, (76, 424), "100 SWE-bench Verified tasks · Docker-verified · median cost "
-                       "unchanged, the tail is where it pays", "reg", 16, DIM)
+        if note:
+            text(d, (420 + tw(val, "bold", 21) + 16, y + 1), note, "reg", 16, DIM)
+    text(d, (76, 424), "3,433 test-verified runs · Claude Code · Codex CLI · ReAct loop · "
+                       "no detectable change in solve rate", "reg", 16, DIM)
 
     out = vignette(img, BW, BH, 0.38).resize((BW, BH), Image.LANCZOS)
     path = os.path.join(HERE, "sg_banner.png")
@@ -589,10 +595,13 @@ def banner():
 
 
 if __name__ == "__main__":
+    import sys
     banner()
     tl, frames = render_all()
     save_gif(tl, frames)
-    save_mp4(tl, frames)
     sp = os.path.join(HERE, "sg_hero_still.png")
     frame(0.82).save(sp, optimize=True)
     print(f"sg_hero_still.png  {os.path.getsize(sp)/1024:.0f} KB")
+    if "--mp4" in sys.argv:
+        save_mp4(tl, frames)
+

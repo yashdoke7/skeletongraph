@@ -350,7 +350,7 @@ ARMS: Dict[str, Arm] = {
 # ── staged run plan ────────────────────────────────────────────────────────
 # Each stage is a self-contained, publishable-at-its-level result. Stages add;
 # they never replace. If credits run out after any stage you still have a
-# coherent paper at that tier. See STAGES.md for the rationale.
+# coherent result at that tier.
 
 @dataclass
 class Stage:
@@ -366,7 +366,7 @@ class Stage:
 # SWE-bench task count — FIXED across all stages. 150 stratified tasks is
 # statistically sufficient for paired significance tests against strong
 # baselines. Compute is spent on BREADTH (baselines/ablations/2nd benchmark),
-# not on more SWE-bench tasks. See STAGES.md for the rationale.
+# not on more SWE-bench tasks.
 SWEBENCH_N = 150
 
 STAGES: Dict[str, Stage] = {

@@ -25,7 +25,7 @@ def _rec(task_id: str, arm: str, patch: str) -> dict:
             "model": "main", "repeat": 0, "model_patch": patch}
 
 
-def test_write_predictions(tmp_path: Path) -> str:
+def test_write_predictions(tmp_path: Path) -> None:
     """One valid SWE-bench JSON object per run, named by arm (one file per arm)."""
     recs = [_rec("astropy__astropy-8707", "sg", "diff --git a/x b/x\n+fix"),
             _rec("django__django-14725", "sg", "")]   # empty patch is legal
@@ -39,10 +39,9 @@ def test_write_predictions(tmp_path: Path) -> str:
         assert obj["model_name_or_path"] == rec["arm"], "model_name should be the arm"
         assert obj["model_patch"] == rec["model_patch"], "patch not preserved"
         assert set(obj) == {"instance_id", "model_name_or_path", "model_patch"}
-    return "write_predictions: valid SWE-bench JSONL, one arm per file"
 
 
-def test_resolved_task_ids_both_shapes(tmp_path: Path) -> str:
+def test_resolved_task_ids_both_shapes(tmp_path: Path) -> None:
     """The harness report is read in either {"resolved_ids": [...]} or
     {"resolved": [...]} shape; a corrupt report yields an empty set, not a crash."""
     a = tmp_path / "a.json"
@@ -54,10 +53,9 @@ def test_resolved_task_ids_both_shapes(tmp_path: Path) -> str:
     assert verify._resolved_task_ids(a) == {"t1", "t2"}
     assert verify._resolved_task_ids(b) == {"t3"}
     assert verify._resolved_task_ids(bad) == set()
-    return "_resolved_task_ids: both schema shapes parsed, corrupt file -> empty"
 
 
-def test_apply_results_writes_verdicts(tmp_path: Path) -> str:
+def test_apply_results_writes_verdicts(tmp_path: Path) -> None:
     """apply_results writes True/False into each run record by task_id."""
     orig = config.RUNS_DIR
     config.RUNS_DIR = tmp_path
@@ -75,10 +73,9 @@ def test_apply_results_writes_verdicts(tmp_path: Path) -> str:
         assert "_path" not in a, "_path scratch key leaked into saved JSON"
     finally:
         config.RUNS_DIR = orig
-    return "apply_results: verdicts written back by task_id"
 
 
-def test_drop_stale_logs_only_touches_the_batch(tmp_path: Path) -> str:
+def test_drop_stale_logs_only_touches_the_batch(tmp_path: Path) -> None:
     """A re-verify clears the cached per-task verdicts for exactly the runs being
     scored, so a re-run task is never scored against its old patch; other tasks'
     logs are left alone."""
@@ -96,7 +93,6 @@ def test_drop_stale_logs_only_touches_the_batch(tmp_path: Path) -> str:
         assert verify._drop_stale_logs([{"task_id": "t1"}], "no_such_tag", "sg") == 0
     finally:
         os.chdir(cwd)
-    return "_drop_stale_logs: clears the batch, leaves everything else"
 
 
 _TESTS = [
@@ -112,8 +108,9 @@ def main() -> None:
     for fn in _TESTS:
         with tempfile.TemporaryDirectory() as td:
             try:
-                msg = fn(Path(td))
-                print(f"  PASS  {fn.__name__}: {msg}")
+                fn(Path(td))
+                doc = (fn.__doc__ or "").strip().splitlines()[0]
+                print(f"  PASS  {fn.__name__}: {doc}")
                 passed += 1
             except AssertionError as e:
                 print(f"  FAIL  {fn.__name__}: {e}")
