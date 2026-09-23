@@ -52,10 +52,10 @@ def save(fig, name):
 
 # ── the funnel ──────────────────────────────────────────────────────────────
 PANELS = [("ReAct loop (v4)", "ReAct loop"),
-          ("Claude Code 2.1.206-211", "Claude Code 2.1.206–211"),
-          ("Claude Code 2.1.274", "Claude Code 2.1.274"),
-          ("Claude Code 2.1.278", "Claude Code 2.1.278"),
-          ("Claude Code, SWE-rebench", "Claude Code, SWE-rebench"),
+          ("Claude Code 2.1.206-211", "Claude exploratory (July)"),
+          ("Claude Code 2.1.274", "Claude exploratory (Sept.)"),
+          ("Claude Code 2.1.278", "Claude lean"),
+          ("Claude Code, SWE-rebench", "Claude exploratory, Rebench"),
           ("Codex CLI 0.155.0", "Codex CLI")]
 STAGES = ["1st search\nhit", "saw the\ncode", "edited\nthe file", "made a\npatch", "solved"]
 
@@ -95,14 +95,14 @@ def fig_funnel(R):
 
 
 # ── the same retriever's token effect in each setting ───────────────────────
-SETTING_ROWS = [("Claude Code, SWE-rebench prose", "Claude Code 2.1.214, SWE-rebench prose"),
-                ("Claude Code, SWE-rebench", "Claude Code 2.1.211–214, SWE-rebench"),
-                ("Claude Code 2.1.206-211", "Claude Code 2.1.206–211"),
-                ("Claude Code 2.1.274", "Claude Code 2.1.274"),
+SETTING_ROWS = [("Claude Code, SWE-rebench prose", "Claude exploratory, Rebench prose"),
+                ("Claude Code, SWE-rebench", "Claude exploratory, Rebench"),
+                ("Claude Code 2.1.206-211", "Claude exploratory (July)"),
+                ("Claude Code 2.1.274", "Claude exploratory (Sept.)"),
                 ("ReAct loop (v4)", "ReAct loop (vs. no search)"),
                 ("ReAct loop (v2)", "ReAct loop, earlier run"),
                 ("Codex CLI 0.155.0", "Codex CLI 0.155.0"),
-                ("Claude Code 2.1.278", "Claude Code 2.1.278")]
+                ("Claude Code 2.1.278", "Claude lean")]
 
 
 def fig_settings(R):
@@ -142,9 +142,9 @@ METRICS = [("turns", "turns with\na tool call"), ("before_edit", "turns before\n
 
 def fig_release(R):
     rel, add = R["release"]["rows"], R["addition"]["rows"]
-    groups = [("2.1.274, built-in", [rel[k][0] for k, _ in METRICS], "#9ec3ee"),
-              ("2.1.278, built-in", [rel[k][1] for k, _ in METRICS], BLUE),
-              (f"2.1.278, + {TOOL}", [add[k][1] for k, _ in METRICS], ORANGE)]
+    groups = [("Exploratory, built-in", [rel[k][0] for k, _ in METRICS], "#9ec3ee"),
+              ("Lean, built-in", [rel[k][1] for k, _ in METRICS], BLUE),
+              (f"Lean, + {TOOL}", [add[k][1] for k, _ in METRICS], ORANGE)]
     fig, axes = plt.subplots(1, len(METRICS), figsize=(7.1, 2.35))
     for j, (ax, (_, lab)) in enumerate(zip(axes, METRICS)):
         vals = [g[1][j] for g in groups]

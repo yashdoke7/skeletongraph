@@ -44,7 +44,7 @@
 **SkeletonGraph indexes your repository with tree-sitter — no LLM — and hands a coding
 agent the exact function it is looking for, over MCP.** It is also the instrument of a
 study of what better code retrieval actually buys an agent that has to fix the code,
-across two production agents, several of their releases, and two benchmarks. The short
+across two production agents, two Claude behavioral regimes, and two benchmarks. The short
 answer is below; it is more useful, and less flattering, than a token ratio.
 
 <picture>
@@ -59,7 +59,7 @@ answer is below; it is more useful, and less flattering, than a token ratio.
 ## What we found
 
 We ran the same retriever in every setting we could: without an agent, in a controlled
-agent loop on an open-weight model, and inside **Claude Code** (three release windows)
+agent loop on an open-weight model, and inside **Claude Code** (exploratory and lean regimes)
 and **Codex CLI**, on SWE-bench Verified and the decontaminated SWE-rebench —
 **3,433 runs, every patch verified by running the project's tests**, every comparison
 paired by task. The evaluation covers Python repositories.
@@ -99,12 +99,12 @@ file on 65% of tasks — gained (35 → 42 solved, not statistically significant
 
 | setting | tokens per task on its own | with SkeletonGraph |
 |---|--:|---|
-| Claude Code, SWE-rebench | 1,048,603 | **−24%** (−256k tokens, −4.7 turns, −12¢) |
-| Claude Code 2.1.206–211 | 644,504 | **−24%** (−152k tokens, −3.1 turns, −6¢) |
-| Claude Code 2.1.274 | 530,478 | **−18%** (−93k tokens, −1.9 turns, −3¢) |
+| Claude exploratory, SWE-rebench | 1,048,603 | **−24%** (−256k tokens, −4.7 turns, −12¢) |
+| Claude exploratory (July) | 644,504 | **−24%** (−152k tokens, −3.1 turns, −6¢) |
+| Claude exploratory (September) | 530,478 | **−18%** (−93k tokens, −1.9 turns, −3¢) |
 | ReAct loop (open-weight model) | 344,642 | **−48%** (−165k tokens, −1.7 turns, −1¢) |
 | Codex CLI 0.155.0 | 134,955 | +6% (+8k tokens, −0.3 turns, −0.4¢) |
-| Claude Code 2.1.278 | 112,813 | +58% (+66k tokens, +2.5 turns, +2¢) |
+| Claude lean | 112,813 | +58% (+66k tokens, +2.5 turns, +2¢) |
 
 Where an agent spends a lot searching, reading and re-checking, SkeletonGraph replaces
 that work and saves; where it already finds the code in one or two calls, the retriever is
@@ -113,12 +113,14 @@ with how much the agent would have spent.
 
 ### 4. Agents change underneath you
 
-Between Claude Code 2.1.274 and 2.1.278 — three weeks, same tasks, same prompt — the
-built-in agent went from 10.9 to 4.7 tool turns per task, read a fifth as much, ran code
+Across two Claude Code windows three weeks apart—exploratory through 2.1.274 and lean at
+2.1.278, on the same tasks and prompt—the built-in agent went from 10.9 to 4.7 tool turns
+per task, read a fifth as much, ran code
 after editing on 2 tasks instead of 40, and its own first search put the right file first
 on 85 tasks instead of 59. The same SkeletonGraph setup went from saving 93k tokens a task
-to costing 66k. Anthropic's release notes document no change to the search tools; we can
-describe the change, not attribute it.
+to costing 66k. The product release, available tools, account-loaded skills, and possibly
+the served model changed together. We can describe the two regimes, not attribute the break
+to the version number alone.
 
 ### What this means if you use it
 

@@ -1,5 +1,5 @@
 """
-SkeletonGraph — Token-minimal, constraint-preserving context assembly for AI coding agents.
+SkeletonGraph — zero-LLM structural code retrieval for AI coding agents, served over MCP.
 
 Quick start:
     from skeletongraph import SGEngine
@@ -15,7 +15,7 @@ Features:
     - Session memory for cross-turn context deduplication
     - Per-directory constraint scoping
     - 10-language support via Tree-sitter
-    - MCP server with 11 tools for IDE integration
+    - MCP server with 7 tools for IDE integration
     - PR blast-radius analysis with risk scoring
 """
 
