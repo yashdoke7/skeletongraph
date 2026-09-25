@@ -141,9 +141,33 @@ def saw_gold(tag, d, kind):
     return False
 
 
+STAGE_NAMES = ["first search hits gold", "reads gold code", "edits gold file",
+               "edits gold function", "makes a patch", "solved"]
+
+
 def funnel_stages(tag, d, kind):
-    return [bool(d.get("retrieval_hit")), saw_gold(tag, d, kind), bool(d.get("edited_gold_file")),
-            bool((d.get("model_patch") or "").strip()), bool(d.get("resolved"))]
+    """Per-run funnel. "reads gold code" requires code from a gold file to enter the
+    context (a read, a content search, a printed file, or a retriever payload); a
+    path-only listing does not count. "edits gold function" maps the patch's changed
+    lines onto the base-commit file's functions (see funnel_strict)."""
+    from eval.scripts import funnel_strict as fs      # lazy: fs imports this module
+    if kind == "react":
+        code = saw_gold(tag, d, kind)                  # ReAct read_file returns file content
+    else:
+        turn = (fs.claude_content_turn if kind == "claude" else fs.codex_content_turn)(tag, d)
+        code = turn is not None
+    return [bool(d.get("retrieval_hit")), code, bool(d.get("edited_gold_file")),
+            fs.edited_gold_function(d), bool((d.get("model_patch") or "").strip()),
+            bool(d.get("resolved"))]
+
+
+def first_code_turn(tag, d, kind):
+    from eval.scripts import funnel_strict as fs
+    if kind == "claude":
+        return fs.claude_content_turn(tag, d)
+    if kind == "codex":
+        return fs.codex_content_turn(tag, d)
+    return None
 
 
 # ── what the agent did, from a Claude Code transcript ─────────────────────────
@@ -258,7 +282,8 @@ def main():
               f"| solved {s0}->{s1} ({bo}/{ro}, p={row['mcnemar_p']:.3f})")
 
     print("\n== funnel ==")
-    names = ["first search hits gold", "sees gold code", "edits gold file", "makes a patch", "solved"]
+    names = STAGE_NAMES
+    SOLVED, FILE, FUNC = 5, 2, 3
     for lab, ta, aa, tb, ab, kind in SETTINGS:
         A, B = load(ta)[aa], load(tb)[ab]
         c = sorted(set(A) & set(B))
@@ -266,24 +291,49 @@ def main():
         SB = {t: funnel_stages(tb, B[t], kind) for t in c}
         stages = []
         for i, nm in enumerate(names):
-            va = [SA[t][i] for t in c if SA[t][i] is not None]
-            vb = [SB[t][i] for t in c if SB[t][i] is not None]
-            stages.append((nm, 100 * sum(va) / max(1, len(va)), 100 * sum(vb) / max(1, len(vb))))
-        newly = [t for t in c if not SA[t][2] and SB[t][2]]
-        both = [t for t in c if SA[t][2] and SB[t][2]]
-        disc_all = sum(1 for t in c if SA[t][4] != SB[t][4])
-        disc_both = sum(1 for t in both if SA[t][4] != SB[t][4])
+            ok = [t for t in c if SA[t][i] is not None and SB[t][i] is not None]
+            a = sum(bool(SA[t][i]) for t in ok)
+            b = sum(bool(SB[t][i]) for t in ok)
+            lost = sum(1 for t in ok if SA[t][i] and not SB[t][i])
+            gain = sum(1 for t in ok if SB[t][i] and not SA[t][i])
+            stages.append((nm, 100 * a / max(1, len(ok)), 100 * b / max(1, len(ok)),
+                           len(ok), mcnemar(lost, gain)))
+        newly = [t for t in c if not SA[t][FILE] and SB[t][FILE]]
+        both = [t for t in c if SA[t][FILE] and SB[t][FILE]]
+        disc = [t for t in c if SA[t][SOLVED] != SB[t][SOLVED]]
+        fn_ok = [t for t in disc if SA[t][FUNC] is not None and SB[t][FUNC] is not None]
         row = {"n": len(c), "stages": stages, "newly_edit_gold": len(newly),
-               "newly_edit_gold_newly_solved": sum(1 for t in newly if SB[t][4] and not SA[t][4]),
-               "both_edit_gold": len(both), "discordant": disc_all, "discordant_both_edited": disc_both,
-               "net_solve_both_edited": sum(1 for t in both if SB[t][4] and not SA[t][4])
-               - sum(1 for t in both if SA[t][4] and not SB[t][4])}
+               "newly_edit_gold_newly_solved": sum(1 for t in newly if SB[t][SOLVED] and not SA[t][SOLVED]),
+               "both_edit_gold": len(both), "discordant": len(disc),
+               "discordant_both_edited": sum(1 for t in disc if t in both),
+               "discordant_fn_resolved": len(fn_ok),
+               "discordant_both_edited_function": sum(1 for t in fn_ok if SA[t][FUNC] and SB[t][FUNC]),
+               "net_solve_both_edited": sum(1 for t in both if SB[t][SOLVED] and not SA[t][SOLVED])
+               - sum(1 for t in both if SA[t][SOLVED] and not SB[t][SOLVED])}
+        if kind != "react":
+            ta_ = {t: first_code_turn(ta, A[t], kind) for t in c}
+            tb_ = {t: first_code_turn(tb, B[t], kind) for t in c}
+            reached = [t for t in c if ta_[t] is not None and tb_[t] is not None]
+            row["first_code_turn"] = {
+                "n": len(reached),
+                "mean": [st.mean(ta_[t] for t in reached), st.mean(tb_[t] for t in reached)],
+                "median": [st.median(ta_[t] for t in reached), st.median(tb_[t] for t in reached)],
+                "baseline_on_first_call": sum(1 for t in c if ta_[t] == (0 if kind == "claude" else 1)),
+                "baseline_within_three": sum(1 for t in c if ta_[t] is not None
+                                             and ta_[t] < (3 if kind == "claude" else 4)),
+            }
         report.setdefault("funnel", {})[lab] = row
         print(f"{lab}  (n={len(c)})")
-        for nm, a, b in stages:
-            print(f"   {nm:<24}{a:>5.0f}% -> {b:>4.0f}%")
-        print(f"   outcome differs on {disc_all} tasks; {disc_both} of them had both arms edit a gold file;"
-              f" newly edits gold {len(newly)} -> newly solved {row['newly_edit_gold_newly_solved']}")
+        for nm, a, b, n_ok, p in stages:
+            print(f"   {nm:<24}{a:>5.0f}% -> {b:>4.0f}%   (n={n_ok}, McNemar p={p:.3f})")
+        print(f"   outcome differs on {row['discordant']} tasks; both edited a gold file on "
+              f"{row['discordant_both_edited']}, a gold function on "
+              f"{row['discordant_both_edited_function']} of {len(fn_ok)} resolvable")
+        if "first_code_turn" in row:
+            f = row["first_code_turn"]
+            print(f"   first gold code at tool turn (both reached, n={f['n']}): mean {f['mean'][0]:.1f} -> "
+                  f"{f['mean'][1]:.1f}, median {f['median'][0]:g} -> {f['median'][1]:g}; baseline on its "
+                  f"first call {f['baseline_on_first_call']}, within three {f['baseline_within_three']}")
 
     print("\n== retrieval on the tasks where the retriever was used ==")
     for lab, ta, aa, tb, ab, kind in SETTINGS:

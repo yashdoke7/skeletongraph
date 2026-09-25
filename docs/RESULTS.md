@@ -64,30 +64,45 @@ SkeletonGraph's first-search recall (−0.008, 95% CI −0.067 to +0.049, 93 tas
 ## 2. The funnel: how far the gain travels
 
 Share of tasks reaching each stage, built-in → with SkeletonGraph, all paired tasks.
-*Differ*: tasks whose verified outcome differs between arms; *both edited*: of those,
-tasks where both arms had edited a gold file.
+A dagger marks a stage whose paired difference is significant (exact McNemar, p < 0.05).
+*Differ*: tasks whose verified outcome differs between arms; *file* / *fn*: of those, tasks
+where both arms had edited a gold file / a gold function.
 
-| setting | n | first search hit | saw gold code | edited gold file | made a patch | solved | differ / both edited |
-|---|--:|--:|--:|--:|--:|--:|--:|
-| ReAct loop | 100 | 0 → 80 | 88 → 97 | 65 → 87 | 74 → 90 | 35 → 42 | 17 / 10 |
-| ReAct loop, earlier run | 100 | 0 → 76 | 95 → 97 | 80 → 82 | 86 → 88 | 44 → 45 | 13 / 7 |
-| Claude Code 2.1.206–211 | 100 | 73 → 91 | 100 → 99 | 96 → 96 | 100 → 100 | 74 → 75 | 13 / 11 |
-| Claude Code 2.1.274 | 100 | 69 → 85 | 99 → 100 | 97 → 96 | 100 → 100 | 79 → 69 | 12 / 10 |
-| Claude Code 2.1.278 | 100 | 90 → 92 | 97 → 98 | 97 → 97 | 100 → 100 | 71 → 73 | 10 / 9 |
-| Claude Code, SWE-rebench | 49 | 67 → 82 | 98 → 98 | 90 → 92 | 98 → 98 | 55 → 53 | 11 / 10 |
-| Claude Code, SWE-rebench, code-stripped | 50 | 66 → 80 | 100 → 96 | 88 → 88 | 100 → 98 | 50 → 44 | 7 / 7 |
-| Codex CLI (plain) | 100 | 61 → 88 | 99 → 98 | 94 → 95 | 99 → 100 | 53 → 59 | 16 / 14 |
+| setting | n | first search hit | read gold code | edited gold file | edited gold function | made a patch | solved | differ / file / fn |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| ReAct loop | 100 | 0 → 80† | 88 → 97† | 65 → 87† | 44 → 55† | 74 → 90† | 35 → 42 | 17 / 10 / 8 |
+| ReAct loop, earlier run | 100 | 0 → 76† | 95 → 97 | 80 → 82 | 52 → 56 | 86 → 88 | 44 → 45 | 13 / 7 / 5 |
+| Claude Code 2.1.206–211 | 100 | 73 → 91† | 99 → 99 | 96 → 96 | 69 → 66 | 100 → 100 | 74 → 75 | 13 / 11 / 10 |
+| Claude Code 2.1.274 | 100 | 69 → 85† | 100 → 100 | 97 → 96 | 69 → 65 | 100 → 100 | 79 → 69† | 12 / 10 / 7 |
+| Claude Code 2.1.278 | 100 | 90 → 92 | 98 → 98 | 97 → 97 | 68 → 69 | 100 → 100 | 71 → 73 | 10 / 9 / 6 |
+| Claude Code, SWE-rebench | 49 | 67 → 82 | 96 → 98 | 90 → 92 | 63 → 63 | 98 → 98 | 55 → 53 | 11 / 10 / 6 |
+| Claude Code, SWE-rebench, code-stripped | 50 | 66 → 80 | 98 → 96 | 88 → 88 | 66 → 66 | 100 → 98 | 50 → 44 | 7 / 7 / 3 |
+| Codex CLI (plain) | 100 | 61 → 88† | 97 → 96 | 94 → 95 | 63 → 68 | 99 → 100 | 53 → 59 | 16 / 14 / 10 |
 
-The production agents saw and edited the right file on nearly every task with or
-without SkeletonGraph. Across the six production-agent comparisons, outcomes differ on
-69 tasks, and on 61 of them both arms had already edited a gold file. SkeletonGraph made
-an agent newly edit a gold file on 3 tasks in all six settings together. Only the ReAct
-loop, whose search-free arm often failed to reach the right file, turned the gain into
-more edits of it (65% → 87%); even there, of the 26 tasks that newly edited a gold file,
-4 became newly solved.
+*Read gold code* requires code from a gold file to enter the agent's context (a file read, a
+content search, a command that printed it, or a retriever payload); a path-only listing does
+not count. *Edited gold function* maps each changed line onto the functions of the gold file at
+the base commit.
 
-*Saw gold code* counts a read of a gold file, or a search or retriever result containing
-its path.
+The production agents read and edited the right file on nearly every task with or without
+SkeletonGraph, and no stage after the first differs significantly in any production setting.
+They also got there fast: on SWE-bench Verified the built-in agents read gold code with their
+**first tool call** on 64–97% of tasks, and within three calls on 93–98%. The exception is
+SWE-rebench, whose repositories postdate the models: there the built-in agent read gold code on
+its first call on only 30–37% of tasks, and SkeletonGraph reached it sooner.
+
+Function-level localization is far from saturated (63–69%), but SkeletonGraph, which returns
+functions, did not move it in any production agent. Across the six production-agent
+comparisons, outcomes differ on 69 tasks; on 61 both arms had already edited a gold file, and on
+42 of the 68 with a resolvable gold function both had edited a gold function.
+
+Only the ReAct loop, whose search-free arm often failed to reach the right file, turned the gain
+into more edits of the right file (65% → 87%) and function (44% → 55%). Splitting its tasks by
+which arms edited a gold file, the net solve change was +4 where only SkeletonGraph did, +6 where
+both did, −2 where only the baseline did, and −1 where neither did: most of the outcome
+difference arose where both arms were already in the right file.
+
+The stricter measures are computed by `python -m eval.scripts.funnel_strict`.
 
 ## 3. Cost
 

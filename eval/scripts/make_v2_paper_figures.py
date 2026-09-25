@@ -57,15 +57,18 @@ PANELS = [("ReAct loop (v4)", "ReAct loop"),
           ("Claude Code 2.1.278", "Claude lean"),
           ("Claude Code, SWE-rebench", "Claude exploratory, Rebench"),
           ("Codex CLI 0.155.0", "Codex CLI")]
-STAGES = ["1st search\nhit", "saw the\ncode", "edited\nthe file", "made a\npatch", "solved"]
+# "made a patch" is omitted from the chart (98-100% in every production agent) and
+# kept in the paper's table; FIG_STAGES indexes the results file's stage list.
+STAGES = ["1st search\nhit", "read the\ncode", "edited\nthe file", "edited the\nfunction", "solved"]
+FIG_STAGES = [0, 1, 2, 3, 5]
 
 
 def fig_funnel(R):
-    fig, axes = plt.subplots(2, 3, figsize=(7.1, 4.3), sharey=True)
+    fig, axes = plt.subplots(2, 3, figsize=(7.1, 4.5), sharey=True)
     for ax, (key, title) in zip(axes.flat, PANELS):
         row = R["funnel"][key]
-        a = [s[1] for s in row["stages"]]
-        b = [s[2] for s in row["stages"]]
+        a = [row["stages"][i][1] for i in FIG_STAGES]
+        b = [row["stages"][i][2] for i in FIG_STAGES]
         x = range(len(STAGES))
         ax.plot(x, a, color=BLUE, linewidth=2, marker="o", markersize=5,
                 markeredgecolor="white", markeredgewidth=1, zorder=3,
@@ -81,7 +84,7 @@ def fig_funnel(R):
                         textcoords="offset points", ha="center", fontsize=6.5, color=ORANGE)
         ax.set_title(f"{title}  (n={row['n']})", fontsize=7.5)
         ax.set_xticks(list(x))
-        ax.set_xticklabels(STAGES, fontsize=5.8)
+        ax.set_xticklabels(STAGES, fontsize=5.6)
         ax.set_ylim(-10, 114)
         ax.set_xlim(-0.35, len(STAGES) - 0.65)
         ax.xaxis.grid(False)

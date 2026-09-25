@@ -224,27 +224,44 @@
     [
      "first search hits gold",
      0.0,
-     80.0
+     80.0,
+     100,
+     1.6543612251060553e-24
     ],
     [
-     "sees gold code",
+     "reads gold code",
      88.0,
-     97.0
+     97.0,
+     100,
+     0.00390625
     ],
     [
      "edits gold file",
      65.0,
-     87.0
+     87.0,
+     100,
+     5.947612226009369e-05
+    ],
+    [
+     "edits gold function",
+     43.87755102040816,
+     55.10204081632653,
+     98,
+     0.02660369873046875
     ],
     [
      "makes a patch",
      74.0,
-     90.0
+     90.0,
+     100,
+     0.0037191659212112427
     ],
     [
      "solved",
      35.0,
-     42.0
+     42.0,
+     100,
+     0.143463134765625
     ]
    ],
    "newly_edit_gold": 26,
@@ -252,6 +269,8 @@
    "both_edit_gold": 61,
    "discordant": 17,
    "discordant_both_edited": 10,
+   "discordant_fn_resolved": 17,
+   "discordant_both_edited_function": 8,
    "net_solve_both_edited": 6
   },
   "ReAct loop (v2)": {
@@ -260,27 +279,44 @@
     [
      "first search hits gold",
      0.0,
-     76.0
+     76.0,
+     100,
+     2.6469779601696886e-23
     ],
     [
-     "sees gold code",
+     "reads gold code",
      95.0,
-     97.0
+     97.0,
+     100,
+     0.5
     ],
     [
      "edits gold file",
      80.0,
-     82.0
+     82.0,
+     100,
+     0.8238029479980469
+    ],
+    [
+     "edits gold function",
+     52.04081632653061,
+     56.12244897959184,
+     98,
+     0.4239501953125
     ],
     [
      "makes a patch",
      86.0,
-     88.0
+     88.0,
+     100,
+     0.8238029479980469
     ],
     [
      "solved",
      44.0,
-     45.0
+     45.0,
+     100,
+     1.0
     ]
    ],
    "newly_edit_gold": 11,
@@ -288,6 +324,8 @@
    "both_edit_gold": 71,
    "discordant": 13,
    "discordant_both_edited": 7,
+   "discordant_fn_resolved": 13,
+   "discordant_both_edited_function": 5,
    "net_solve_both_edited": -3
   },
   "Claude Code 2.1.206-211": {
@@ -296,27 +334,44 @@
     [
      "first search hits gold",
      73.0,
-     91.0
+     91.0,
+     100,
+     0.0002771615982055664
     ],
     [
-     "sees gold code",
-     100.0,
-     99.0
+     "reads gold code",
+     99.0,
+     99.0,
+     100,
+     1.0
     ],
     [
      "edits gold file",
      96.0,
-     96.0
+     96.0,
+     100,
+     1.0
+    ],
+    [
+     "edits gold function",
+     69.38775510204081,
+     66.3265306122449,
+     98,
+     0.375
     ],
     [
      "makes a patch",
      100.0,
-     100.0
+     100.0,
+     100,
+     1.0
     ],
     [
      "solved",
      74.0,
-     75.0
+     75.0,
+     100,
+     1.0
     ]
    ],
    "newly_edit_gold": 1,
@@ -324,7 +379,22 @@
    "both_edit_gold": 95,
    "discordant": 13,
    "discordant_both_edited": 11,
-   "net_solve_both_edited": 3
+   "discordant_fn_resolved": 13,
+   "discordant_both_edited_function": 10,
+   "net_solve_both_edited": 3,
+   "first_code_turn": {
+    "n": 98,
+    "mean": [
+     0.6020408163265306,
+     1.0612244897959184
+    ],
+    "median": [
+     0.0,
+     1.0
+    ],
+    "baseline_on_first_call": 68,
+    "baseline_within_three": 93
+   }
   },
   "Claude Code 2.1.274": {
    "n": 100,
@@ -332,27 +402,44 @@
     [
      "first search hits gold",
      69.0,
-     85.0
+     85.0,
+     100,
+     0.0004024505615234375
     ],
     [
-     "sees gold code",
-     99.0,
-     100.0
+     "reads gold code",
+     100.0,
+     100.0,
+     100,
+     1.0
     ],
     [
      "edits gold file",
      97.0,
-     96.0
+     96.0,
+     100,
+     1.0
+    ],
+    [
+     "edits gold function",
+     69.38775510204081,
+     65.3061224489796,
+     98,
+     0.21875
     ],
     [
      "makes a patch",
      100.0,
-     100.0
+     100.0,
+     100,
+     1.0
     ],
     [
      "solved",
      79.0,
-     69.0
+     69.0,
+     100,
+     0.00634765625
     ]
    ],
    "newly_edit_gold": 0,
@@ -360,7 +447,22 @@
    "both_edit_gold": 96,
    "discordant": 12,
    "discordant_both_edited": 10,
-   "net_solve_both_edited": -8
+   "discordant_fn_resolved": 12,
+   "discordant_both_edited_function": 7,
+   "net_solve_both_edited": -8,
+   "first_code_turn": {
+    "n": 100,
+    "mean": [
+     0.74,
+     1.05
+    ],
+    "median": [
+     0.0,
+     1.0
+    ],
+    "baseline_on_first_call": 64,
+    "baseline_within_three": 93
+   }
   },
   "Claude Code 2.1.278": {
    "n": 100,
@@ -368,27 +470,44 @@
     [
      "first search hits gold",
      90.0,
-     92.0
+     92.0,
+     100,
+     0.75390625
     ],
     [
-     "sees gold code",
-     97.0,
-     98.0
+     "reads gold code",
+     98.0,
+     98.0,
+     100,
+     1.0
     ],
     [
      "edits gold file",
      97.0,
-     97.0
+     97.0,
+     100,
+     1.0
+    ],
+    [
+     "edits gold function",
+     68.36734693877551,
+     69.38775510204081,
+     98,
+     1.0
     ],
     [
      "makes a patch",
      100.0,
-     100.0
+     100.0,
+     100,
+     1.0
     ],
     [
      "solved",
      71.0,
-     73.0
+     73.0,
+     100,
+     0.75390625
     ]
    ],
    "newly_edit_gold": 0,
@@ -396,7 +515,22 @@
    "both_edit_gold": 97,
    "discordant": 10,
    "discordant_both_edited": 9,
-   "net_solve_both_edited": 1
+   "discordant_fn_resolved": 10,
+   "discordant_both_edited_function": 6,
+   "net_solve_both_edited": 1,
+   "first_code_turn": {
+    "n": 97,
+    "mean": [
+     0,
+     0.6082474226804123
+    ],
+    "median": [
+     0,
+     0
+    ],
+    "baseline_on_first_call": 97,
+    "baseline_within_three": 98
+   }
   },
   "Claude Code, SWE-rebench": {
    "n": 49,
@@ -404,27 +538,44 @@
     [
      "first search hits gold",
      67.34693877551021,
-     81.63265306122449
+     81.63265306122449,
+     49,
+     0.09228515625
     ],
     [
-     "sees gold code",
+     "reads gold code",
+     95.91836734693878,
      97.95918367346938,
-     97.95918367346938
+     49,
+     1.0
     ],
     [
      "edits gold file",
      89.79591836734694,
-     91.83673469387755
+     91.83673469387755,
+     49,
+     1.0
+    ],
+    [
+     "edits gold function",
+     63.04347826086956,
+     63.04347826086956,
+     46,
+     1.0
     ],
     [
      "makes a patch",
      97.95918367346938,
-     97.95918367346938
+     97.95918367346938,
+     49,
+     1.0
     ],
     [
      "solved",
      55.10204081632653,
-     53.06122448979592
+     53.06122448979592,
+     49,
+     1.0
     ]
    ],
    "newly_edit_gold": 1,
@@ -432,7 +583,22 @@
    "both_edit_gold": 44,
    "discordant": 11,
    "discordant_both_edited": 10,
-   "net_solve_both_edited": -2
+   "discordant_fn_resolved": 11,
+   "discordant_both_edited_function": 6,
+   "net_solve_both_edited": -2,
+   "first_code_turn": {
+    "n": 47,
+    "mean": [
+     1.7872340425531914,
+     1.2127659574468086
+    ],
+    "median": [
+     1,
+     1
+    ],
+    "baseline_on_first_call": 18,
+    "baseline_within_three": 36
+   }
   },
   "Claude Code, SWE-rebench prose": {
    "n": 50,
@@ -440,27 +606,44 @@
     [
      "first search hits gold",
      66.0,
-     80.0
+     80.0,
+     50,
+     0.11846923828125
     ],
     [
-     "sees gold code",
-     100.0,
-     96.0
+     "reads gold code",
+     98.0,
+     96.0,
+     50,
+     1.0
     ],
     [
      "edits gold file",
      88.0,
-     88.0
+     88.0,
+     50,
+     1.0
+    ],
+    [
+     "edits gold function",
+     65.95744680851064,
+     65.95744680851064,
+     47,
+     1.0
     ],
     [
      "makes a patch",
      100.0,
-     98.0
+     98.0,
+     50,
+     1.0
     ],
     [
      "solved",
      50.0,
-     44.0
+     44.0,
+     50,
+     0.453125
     ]
    ],
    "newly_edit_gold": 0,
@@ -468,7 +651,22 @@
    "both_edit_gold": 44,
    "discordant": 7,
    "discordant_both_edited": 7,
-   "net_solve_both_edited": -3
+   "discordant_fn_resolved": 6,
+   "discordant_both_edited_function": 3,
+   "net_solve_both_edited": -3,
+   "first_code_turn": {
+    "n": 48,
+    "mean": [
+     2,
+     1.7083333333333333
+    ],
+    "median": [
+     1.0,
+     1.0
+    ],
+    "baseline_on_first_call": 15,
+    "baseline_within_three": 38
+   }
   },
   "Codex CLI 0.155.0": {
    "n": 100,
@@ -476,27 +674,44 @@
     [
      "first search hits gold",
      61.0,
-     88.0
+     88.0,
+     100,
+     4.1934157934520044e-05
     ],
     [
-     "sees gold code",
-     99.0,
-     98.0
+     "reads gold code",
+     97.0,
+     96.0,
+     100,
+     1.0
     ],
     [
      "edits gold file",
      94.0,
-     95.0
+     95.0,
+     100,
+     1.0
+    ],
+    [
+     "edits gold function",
+     63.265306122448976,
+     68.36734693877551,
+     98,
+     0.125
     ],
     [
      "makes a patch",
      99.0,
-     100.0
+     100.0,
+     100,
+     1.0
     ],
     [
      "solved",
      53.0,
-     59.0
+     59.0,
+     100,
+     0.210113525390625
     ]
    ],
    "newly_edit_gold": 1,
@@ -504,7 +719,22 @@
    "both_edit_gold": 94,
    "discordant": 16,
    "discordant_both_edited": 14,
-   "net_solve_both_edited": 4
+   "discordant_fn_resolved": 16,
+   "discordant_both_edited_function": 10,
+   "net_solve_both_edited": 4,
+   "first_code_turn": {
+    "n": 94,
+    "mean": [
+     1.1808510638297873,
+     1.1170212765957446
+    ],
+    "median": [
+     1.0,
+     1.0
+    ],
+    "baseline_on_first_call": 85,
+    "baseline_within_three": 97
+   }
   },
   "Codex CLI 0.155.0, shipped integration": {
    "n": 100,
@@ -512,27 +742,44 @@
     [
      "first search hits gold",
      61.0,
-     85.0
+     85.0,
+     100,
+     0.00027153923429068527
     ],
     [
-     "sees gold code",
-     99.0,
-     99.0
+     "reads gold code",
+     97.0,
+     97.0,
+     100,
+     1.0
     ],
     [
      "edits gold file",
      94.0,
-     93.0
+     93.0,
+     100,
+     1.0
+    ],
+    [
+     "edits gold function",
+     63.265306122448976,
+     66.3265306122449,
+     98,
+     0.5810546875
     ],
     [
      "makes a patch",
      99.0,
-     100.0
+     100.0,
+     100,
+     1.0
     ],
     [
      "solved",
      53.0,
-     58.0
+     58.0,
+     100,
+     0.359283447265625
     ]
    ],
    "newly_edit_gold": 2,
@@ -540,7 +787,22 @@
    "both_edit_gold": 91,
    "discordant": 19,
    "discordant_both_edited": 14,
-   "net_solve_both_edited": 6
+   "discordant_fn_resolved": 18,
+   "discordant_both_edited_function": 12,
+   "net_solve_both_edited": 6,
+   "first_code_turn": {
+    "n": 94,
+    "mean": [
+     1.1702127659574468,
+     2.75531914893617
+    ],
+    "median": [
+     1.0,
+     3.0
+    ],
+    "baseline_on_first_call": 85,
+    "baseline_within_three": 97
+   }
   }
  },
  "retrieval": {
