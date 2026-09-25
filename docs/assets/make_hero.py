@@ -388,13 +388,15 @@ def frame(t):
              fade(DIM, ba))
         prog = smooth(seg(t, 0.90, 0.99))
 
-        # left: finding the code, baseline vs SkeletonGraph (Codex CLI, the 93
-        # tasks where it was called; the other agents show the same ordering)
-        text(d, (M, 186), "finding the code  ·  Codex CLI", "bold", 19, fade(INK, ba))
+        # left: the funnel in two bars (Codex CLI, all 100 paired tasks): the first
+        # search is better with SkeletonGraph, and one stage later both arms have
+        # read the right file's code anyway. The other agents show the same shape.
+        text(d, (M, 186), "finding the code  ·  Codex CLI, 100 tasks", "bold", 19,
+             fade(INK, ba))
         bw = 300
         for gi, (lab, base_v, sg_v, col) in enumerate(
-                [("first search hits the right file", .60, .89, GREEN),
-                 ("right file ranked first", .32, .71, BLUE)]):
+                [("first search hits the right file", .61, .88, GREEN),
+                 ("agent reads the right file's code", .97, .96, BLUE)]):
             gy = 228 + gi * 108
             text(d, (M, gy), lab, "reg", 16, fade(MUT, ba))
             for bi, (v, c) in enumerate(((base_v, STEEL), (sg_v, col))):
@@ -403,7 +405,7 @@ def frame(t):
                 text(d, (M + bw + 14, by + 1), f"{int(round(v*100))}%", "bold", 16,
                      fade(c, ba))
         lx = M
-        for sw, lab in ((STEEL, "agent's own search"), (GREEN, "+ SkeletonGraph")):
+        for sw, lab in ((STEEL, "agent on its own"), (GREEN, "+ SkeletonGraph")):
             rrect(d, (lx, 454, lx + 14, 466), 3, fill=fade(sw, ba))
             text(d, (lx + 22, 452), lab, "reg", 14, fade(MUT, ba))
             lx += tw(lab, "reg", 14) + 56
@@ -419,7 +421,7 @@ def frame(t):
         scale = 135 / 60.0
         for bi, (lab, pct) in enumerate(
                 [("Claude Code, SWE-rebench", -24), ("ReAct loop", -48),
-                 ("Codex CLI", +6), ("Claude Code 2.1.278", +58)]):
+                 ("Codex CLI", +6), ("Claude Code (lean)", +58)]):
             by = 226 + bi * 44
             text(d, (rx, by + 3), lab, "reg", 15, fade(MUT, ba))
             col = GREEN if pct < 0 else AMBER
@@ -504,14 +506,14 @@ def save_mp4(tl, frames, fps=25):
     plate = canvas(VW, VH)
     d = ImageDraw.Draw(plate)
     text(d, (60, 74), "SkeletonGraph", "bold", 58, INK)
-    text(d, (62, 158), "the exact function, not a pile of files", "reg", 28, GREEN)
+    text(d, (62, 158), "ranked functions, not a pile of files", "reg", 28, GREEN)
     text(d, (62, 202), "an MCP server that indexes your repo with tree-sitter, then",
          "reg", 19, MUT)
     text(d, (62, 230), "ranks symbols by BM25 + embeddings + call graph, fused by RRF",
          "reg", 19, MUT)
     by = top + core_h + 34
     d.line([p(60), p(by - 18), p(VW - 60), p(by - 18)], fill=EDGE, width=p(1))
-    rows = [("first search hits the right file", "60–93%", "87–96%", GREEN),
+    rows = [("first search hits the right file", "61–90%", "80–92%", GREEN),
             ("tokens, agents that explore a lot", "", "−18 to −48%", BLUE),
             ("tokens, lean agents", "", "+6 to +58%", AMBER)]
     for i, (lab, was, now, col) in enumerate(rows):
@@ -571,13 +573,13 @@ def banner():
     d = ImageDraw.Draw(img)
 
     text(d, (72, 78), "SkeletonGraph", "bold", 70, INK)
-    text(d, (76, 168), "the exact function, not a pile of files", "reg", 29, GREEN)
+    text(d, (76, 168), "ranked functions, not a pile of files", "reg", 29, GREEN)
     text(d, (76, 216), "an MCP server that indexes your repo with tree-sitter, then ranks",
          "reg", 20, MUT)
     text(d, (76, 244), "symbols by BM25 + embeddings + call graph, fused with RRF",
          "reg", 20, MUT)
     for i, (lab, val, note, col) in enumerate(
-            [("first search hits the right file", "87–96%", "agents' own search: 60–93%", GREEN),
+            [("first search hits the right file", "80–92%", "agents' own search: 61–90%", GREEN),
              ("tokens, agents that explore a lot", "−18 to −48%", "", BLUE),
              ("tokens, lean agents", "+6 to +58%", "", AMBER)]):
         y = 300 + i * 40

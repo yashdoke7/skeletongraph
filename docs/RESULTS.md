@@ -149,10 +149,12 @@ In the older Claude Code releases, whether the drop in post-edit checking came f
 retrieval or from the shipped integration's instruction not to re-run code cannot be
 separated; Codex checked too rarely in any arm to separate it there.
 
-## 4. Agent releases
+## 4. Claude Code operating regimes
 
-Claude Code's built-in agent on the same 100 tasks, 2.1.274 → 2.1.278 (three weeks apart;
-web tools were denied in the later run):
+Claude Code's built-in agent on the same 100 tasks in the exploratory regime (2.1.274) and
+the lean regime (2.1.278), three weeks apart; web tools were denied in the later run. The
+product release, available tools, account-loaded skills, and possibly the served model changed
+together, so the regimes are described, not attributed to the version number:
 
 | per task | 2.1.274 | 2.1.278 |
 |---|--:|--:|

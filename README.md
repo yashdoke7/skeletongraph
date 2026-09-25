@@ -1,7 +1,7 @@
 <!-- mcp-name: io.github.yashdoke7/skeletongraph -->
 <p align="center">
   <img src="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/sg_banner.png"
-       alt="SkeletonGraph — the exact function, not a pile of files. An MCP server that indexes your repo with tree-sitter, then ranks symbols by BM25, embeddings, and the call graph, fused with reciprocal-rank fusion."
+       alt="SkeletonGraph — ranked functions, not a pile of files. An MCP server that indexes your repo with tree-sitter, then ranks symbols by BM25, embeddings, and the call graph, fused with reciprocal-rank fusion."
        width="100%">
 </p>
 
@@ -42,7 +42,7 @@
 </p>
 
 **SkeletonGraph indexes your repository with tree-sitter — no LLM — and hands a coding
-agent the exact function it is looking for, over MCP.** It is also the instrument of a
+agent a ranked list of the functions relevant to its task, over MCP.** It is also the instrument of a
 study of what better code retrieval actually buys an agent that has to fix the code,
 across two production agents, two Claude behavioral regimes, and two benchmarks. The short
 answer is below; it is more useful, and less flattering, than a token ratio.
@@ -54,7 +54,7 @@ answer is below; it is more useful, and less flattering, than a token ratio.
        width="100%">
 </picture>
 
-<p align="center"><em>Index once with tree-sitter (no LLM) → three signals rank the same symbols → reciprocal-rank fusion returns the exact function, served to your agent over MCP.</em></p>
+<p align="center"><em>Index once with tree-sitter (no LLM) → three signals rank the same symbols → reciprocal-rank fusion returns ranked functions with file and line, served to your agent over MCP.</em></p>
 
 ## What we found
 
@@ -76,19 +76,22 @@ Without an agent, on 100 SWE-bench Verified tasks (file level):
 | BM25 + dense | 0.551 | 0.714 | 0.843 |
 | **`sg-fusion`** (BM25 + dense + structure) | **0.658** | **0.785** | **0.856** |
 
-Inside the agents, on the tasks where they called it, SkeletonGraph's first search returned
-a file the fix changes on **87–96%** of tasks, against **60–93%** for the agents' own first
-search. The largest margin was Codex, where the right file came first on 71% of tasks
-instead of 32%.
+Inside the agents, over all tasks, SkeletonGraph's first search returned a file the fix
+changes on **80–92%** of tasks, against **61–90%** for the agents' own first search (87–96%
+against 60–93% on the tasks where the agent actually called it). The largest margin was
+Codex, where the right file came first on 71% of the tasks where it was called, instead of
+32%.
 
 ### 2. But the agents already found the right code — so that gain doesn't reach the fix
 
-<p align="center"><img src="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/fig_funnel.png" alt="Funnel charts for six agent settings: the share of tasks whose first search hit the right file, that saw its code, edited it, made a patch, and were solved, with and without SkeletonGraph. In every production agent the two lines meet by the second stage; only the ReAct loop keeps a gap through the edit." width="92%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/yashdoke7/skeletongraph/main/docs/assets/fig_funnel.png" alt="Funnel charts for six agent settings: the share of tasks whose first search hit the right file, that read its code, edited the file, edited a function the fix changes, and were solved, with and without SkeletonGraph. In every production agent the two lines meet by the second stage; only the ReAct loop keeps a gap through the edits." width="92%"></p>
 
-With or without SkeletonGraph, the production agents saw code from the right file on
-**96–100%** of tasks and edited it on **88–97%**. Of the 69 tasks whose outcome differed
-between arms, **61 were tasks where both arms had already edited the right file**: they
-differ in whether the change was correct, not in where it was made. No production-agent
+With or without SkeletonGraph, the production agents read code from the right file on
+**96–100%** of tasks — on SWE-bench Verified usually with their **very first tool call** —
+and edited it on **88–97%**. At the level of functions, where they are far from perfect
+(63–69% edited a function the fix changes), SkeletonGraph did not move them either. Of the 69
+tasks whose outcome differed between arms, **61 were tasks where both arms had already edited
+the right file**: they differ in whether the change was correct, not in where it was made. No production-agent
 setting showed a statistically detectable solve-rate improvement from retrieval. Only an agent that often failed
 to find the code on its own — the controlled loop, whose search-free arm edited the right
 file on 65% of tasks — gained (35 → 42 solved, not statistically significant).
